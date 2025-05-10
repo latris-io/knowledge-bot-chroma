@@ -7,9 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
-# Expose the port Chroma uses
 EXPOSE 8000
-
-# Start the Chroma server
 CMD ["chromadb", "serve", "--host", "0.0.0.0", "--port", "8000"]
+
 
