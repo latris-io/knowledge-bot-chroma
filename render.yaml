@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: chroma-db
+    env: docker
+    plan: free  # or 'starter' if you need more RAM
+    dockerContext: .
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: PORT
+        value: 8000
+    autoDeploy: true
+    healthCheckPath: /
