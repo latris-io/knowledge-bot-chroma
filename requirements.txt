@@ -1,3 +1,1 @@
-chromadb[server]==0.6.3
-fastapi==0.110.3
-uvicorn[standard]==0.29.0
+chromadb==0.6.3
