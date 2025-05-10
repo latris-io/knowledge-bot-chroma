@@ -10,4 +10,7 @@ COPY app ./app
 EXPOSE 8000
 CMD ["chromadb", "serve", "--host", "0.0.0.0", "--port", "8000"]
 
+CMD ["sh", "-c", "echo 'Starting Chroma app...' && python app/main.py"]
+
+
 
