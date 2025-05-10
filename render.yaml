@@ -1,12 +1,12 @@
 services:
   - type: web
-    name: chroma-db
+    name: chroma
     env: docker
-    plan: free  # or 'starter' if you need more RAM
-    dockerContext: .
-    dockerfilePath: Dockerfile
+    repo: https://github.com/latris-io/knowledge-bot-chroma
+    branch: main
+    plan: starter
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: PORT
         value: 8000
-    autoDeploy: true
-    healthCheckPath: /
+
