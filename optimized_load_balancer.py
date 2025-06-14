@@ -218,18 +218,6 @@ class OptimizedLoadBalancer:
             "circuit_breaker_trips": 0
         }
         
-        # Read-after-write consistency tracking
-        self.recent_writes = {}  # Track recent write operations
-        self.write_consistency_window = 30  # 30 seconds for write consistency
-        
-        # Collection existence cache to avoid repeated 404s
-        self.collection_cache = {
-            "primary": set(),
-            "replica": set()
-        }
-        self.cache_ttl = 60  # Cache TTL in seconds
-        self.last_cache_update = 0
-        
         # Start health monitoring
         self.health_thread = threading.Thread(target=self.health_monitor_loop, daemon=True)
         self.health_thread.start()
@@ -248,169 +236,38 @@ class OptimizedLoadBalancer:
                 healthy.append(instance)
         return healthy
 
-    def track_write_operation(self, path: str, collection_id: str = None):
-        """Track write operations for read-after-write consistency"""
-        if collection_id:
-            # Track collection creation/modification
-            self.recent_writes[collection_id] = time.time()
-            # Invalidate cache for this collection
-            self.collection_cache["primary"].discard(collection_id)
-            self.collection_cache["replica"].discard(collection_id)
-        
-        # Clean up old entries (older than consistency window)
-        current_time = time.time()
-        self.recent_writes = {
-            coll_id: timestamp for coll_id, timestamp in self.recent_writes.items()
-            if current_time - timestamp < self.write_consistency_window
-        }
-
-    def should_use_primary_for_consistency(self, path: str, collection_name: str = None) -> bool:
-        """Check if we should use primary for read-after-write consistency"""
-        if not collection_name:
-            # Extract collection name from path if possible
-            if '/collections/' in path:
-                try:
-                    collection_name = path.split('/collections/')[-1].split('/')[0]
-                except:
-                    pass
-        
-        if collection_name and collection_name in self.recent_writes:
-            write_time = self.recent_writes[collection_name]
-            if time.time() - write_time < self.write_consistency_window:
-                logger.debug(f"🔄 Using PRIMARY for consistency: {collection_name} (recent write)")
-                return True
-        
-        return False
-
-    def verify_collection_exists(self, collection_name: str, instance: ChromaInstance) -> bool:
-        """Verify collection exists on specific instance with caching"""
-        current_time = time.time()
-        
-        # Update cache if stale
-        if current_time - self.last_cache_update > self.cache_ttl:
-            self.refresh_collection_cache()
-        
-        # Check cache first
-        if collection_name in self.collection_cache.get(instance.name, set()):
-            return True
-        
-        # Verify directly if not in cache
-        try:
-            session = self.connection_pool.get_session(timeout=1.0)
-            if not session:
-                return False
-            
-            url = f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
-            response = session.get(url, timeout=5)
-            
-            exists = response.status_code == 200
-            if exists:
-                self.collection_cache[instance.name].add(collection_name)
-            
-            self.connection_pool.return_session(session)
-            return exists
-            
-        except Exception as e:
-            logger.debug(f"Collection verification failed for {collection_name} on {instance.name}: {e}")
-            return False
-
-    def refresh_collection_cache(self):
-        """Refresh collection existence cache"""
-        try:
-            for instance in self.instances:
-                if not instance.is_healthy:
-                    continue
-                
-                session = self.connection_pool.get_session(timeout=1.0)
-                if not session:
-                    continue
-                
-                try:
-                    url = f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections"
-                    response = session.get(url, timeout=5)
-                    
-                    if response.status_code == 200:
-                        collections_data = response.json()
-                        collection_names = set()
-                        
-                        for collection in collections_data:
-                            if isinstance(collection, dict) and 'name' in collection:
-                                collection_names.add(collection['name'])
-                        
-                        self.collection_cache[instance.name] = collection_names
-                        logger.debug(f"📊 Cached {len(collection_names)} collections for {instance.name}")
-                    
-                except Exception as e:
-                    logger.debug(f"Cache refresh failed for {instance.name}: {e}")
-                finally:
-                    self.connection_pool.return_session(session)
-            
-            self.last_cache_update = time.time()
-            
-        except Exception as e:
-            logger.warning(f"Collection cache refresh error: {e}")
-
     def select_instance_for_request(self, method: str, path: str) -> Optional[ChromaInstance]:
-        """Intelligently select instance with read-after-write consistency"""
+        """Intelligently select instance based on request type and health"""
         healthy_instances = self.get_healthy_instances()
         
         if not healthy_instances:
             logger.error("❌ No healthy instances available")
             return None
         
-        # Extract collection name from path for consistency checks
-        collection_name = None
-        if '/collections/' in path:
-            try:
-                collection_name = path.split('/collections/')[-1].split('/')[0]
-                # Handle UUID vs name cases
-                if len(collection_name) > 50:  # Likely a UUID
-                    collection_name = None
-            except:
-                pass
-        
         # Write operations always go to primary
-        if method in ['POST', 'PUT', 'DELETE'] or any(op in path for op in ['add', 'update', 'delete', 'upsert']):
+        if method in ['POST', 'PUT', 'DELETE'] or 'add' in path or 'update' in path or 'delete' in path:
             primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
             if primary:
-                # Track write operations for consistency
-                if collection_name and method in ['POST', 'PUT']:
-                    self.track_write_operation(path, collection_name)
                 return primary
+            # Fallback to any healthy instance if primary unavailable
             return healthy_instances[0]
         
-        # Read operations with consistency checks
-        if method == 'GET' or any(op in path for op in ['query', 'get']):
-            # Check for read-after-write consistency requirements
-            if collection_name and self.should_use_primary_for_consistency(path, collection_name):
-                primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
-                if primary:
-                    return primary
-            
-            # Normal read distribution with fallback logic
+        # Read operations - use optimized distribution
+        if method == 'GET' or 'query' in path or 'get' in path:
+            # 80% to replica, 20% to primary (configurable)
             if random.random() < self.read_replica_ratio:
                 replica = next((inst for inst in healthy_instances if inst.name == "replica"), None)
                 if replica:
-                    # Verify collection exists on replica if we know the collection name
-                    if collection_name:
-                        if self.verify_collection_exists(collection_name, replica):
-                            return replica
-                        else:
-                            logger.debug(f"🔄 Collection {collection_name} not on replica, using primary")
-                            primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
-                            if primary:
-                                return primary
-                    else:
-                        return replica
+                    return replica
             
-            # Fallback to primary
+            # Fallback to primary or any healthy instance
             primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
             if primary:
                 return primary
             
             return healthy_instances[0]
         
-        # Default: performance-based selection
+        # Default: round-robin with performance weighting
         return self.select_best_performing_instance(healthy_instances)
     
     def select_best_performing_instance(self, instances: List[ChromaInstance]) -> ChromaInstance:
@@ -435,7 +292,7 @@ class OptimizedLoadBalancer:
         return best_instance
 
     def make_request_with_resilience(self, instance: ChromaInstance, method: str, path: str, **kwargs) -> requests.Response:
-        """Make request with full resilience pattern and automatic fallback"""
+        """Make request with full resilience pattern"""
         circuit_breaker = self.circuit_breakers[instance.name]
         
         if not circuit_breaker.can_execute():
@@ -448,41 +305,14 @@ class OptimizedLoadBalancer:
         start_time = time.time()
         
         try:
+            # Set adaptive timeout based on operation type
             timeout = self.get_adaptive_timeout(method, path)
             kwargs['timeout'] = timeout
             
             url = f"{instance.url}{path}"
             response = session.request(method, url, **kwargs)
             
-            # Handle 404 errors with automatic fallback for read operations
-            if response.status_code == 404 and method == 'GET' and instance.name == "replica":
-                logger.debug(f"🔄 404 on replica, trying primary for: {path}")
-                
-                # Try primary instance
-                primary = next((inst for inst in self.instances if inst.name == "primary" and inst.is_healthy), None)
-                if primary and self.circuit_breakers[primary.name].can_execute():
-                    primary_session = self.connection_pool.get_session(timeout=1.0)
-                    if primary_session:
-                        try:
-                            primary_url = f"{primary.url}{path}"
-                            primary_response = primary_session.request(method, primary_url, **kwargs)
-                            primary_response.raise_for_status()
-                            
-                            # Update stats for both instances
-                            response_time = time.time() - start_time
-                            instance.update_stats(response_time, False)  # Replica failed
-                            primary.update_stats(response_time, True)    # Primary succeeded
-                            circuit_breaker.record_failure()
-                            self.circuit_breakers[primary.name].record_success()
-                            
-                            return primary_response
-                            
-                        except Exception as primary_error:
-                            logger.debug(f"Primary fallback also failed: {primary_error}")
-                        finally:
-                            self.connection_pool.return_session(primary_session)
-            
-            # Record success/failure normally
+            # Record success
             response_time = time.time() - start_time
             instance.update_stats(response_time, True)
             circuit_breaker.record_success()
@@ -636,4 +466,4 @@ load_balancer = OptimizedLoadBalancer()
 
 def get_load_balancer():
     """Get the global load balancer instance"""
-    return load_balancer
+    return load_balancer 

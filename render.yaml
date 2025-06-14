@@ -51,7 +51,7 @@ services:
       - key: INSTANCE_PRIORITY
         value: 80
 
-  # Load Balancer - no storage needed, can be free
+  # Optimized Load Balancer - enhanced performance
   - type: web
     name: chroma-load-balancer
     env: docker
@@ -69,7 +69,20 @@ services:
       - key: FAILURE_THRESHOLD
         value: 3
       - key: LOAD_BALANCE_STRATEGY
-        value: write_primary
+        value: optimized_read_replica
+      # Performance optimizations
+      - key: MAX_CONCURRENT_REQUESTS
+        value: 8
+      - key: CONNECTION_POOL_SIZE
+        value: 10
+      - key: REQUEST_QUEUE_SIZE
+        value: 50
+      - key: REQUEST_TIMEOUT
+        value: 15
+      - key: CIRCUIT_BREAKER_TIMEOUT
+        value: 30
+      - key: READ_REPLICA_RATIO
+        value: 0.8
       - key: SLACK_WEBHOOK_URL
         sync: false
 
@@ -91,6 +104,15 @@ services:
         value: 30
       - key: FAILURE_THRESHOLD
         value: 3
+      # Resource monitoring thresholds
+      - key: MEMORY_WARNING_THRESHOLD
+        value: 80
+      - key: MEMORY_CRITICAL_THRESHOLD
+        value: 95
+      - key: CPU_WARNING_THRESHOLD
+        value: 80
+      - key: CPU_CRITICAL_THRESHOLD
+        value: 95
       - key: SLACK_WEBHOOK_URL
         sync: false
       - key: DATABASE_URL
@@ -98,7 +120,7 @@ services:
           name: chroma-metadata
           property: connectionString
 
-  # Sync worker - workers don't support free tier
+  # Optimized Sync worker - enhanced performance
   - type: worker
     name: chroma-sync
     env: docker
@@ -116,16 +138,27 @@ services:
           property: connectionString
       - key: SYNC_INTERVAL
         value: 300
+      # Optimized resource management
       - key: MAX_MEMORY_MB
         value: "400"
       - key: MAX_WORKERS
         value: "2"
+      - key: DEFAULT_BATCH_SIZE
+        value: "500"
+      # Distributed sync configuration
       - key: SYNC_DISTRIBUTED
         value: "false"
       - key: SYNC_COORDINATOR
         value: "false"
       - key: SYNC_CHUNK_SIZE
         value: "1000"
+      # Performance monitoring
+      - key: RESOURCE_CHECK_INTERVAL
+        value: 30
+      - key: MEMORY_WARNING_THRESHOLD
+        value: 80
+      - key: MEMORY_CRITICAL_THRESHOLD
+        value: 95
       - key: SLACK_WEBHOOK_URL
         sync: false
 
