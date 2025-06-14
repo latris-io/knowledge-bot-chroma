@@ -175,11 +175,18 @@ class StableLoadBalancer:
             
             # Simple session for this request
             session = requests.Session()
-            session.headers.update({
+            
+            # Set base headers
+            headers = {
                 'Accept-Encoding': '',  # No compression
-                'Accept': 'application/json',
-                'Content-Type': 'application/json'
-            })
+                'Accept': 'application/json'
+            }
+            
+            # Only set Content-Type for requests that have data
+            if 'json' in kwargs or 'data' in kwargs or method in ['POST', 'PUT', 'PATCH']:
+                headers['Content-Type'] = 'application/json'
+            
+            session.headers.update(headers)
             
             response = session.request(method, url, **kwargs)
             
