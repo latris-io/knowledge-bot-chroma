@@ -215,12 +215,11 @@ class TrueLoadBalancer:
                 # Make simple GET request exactly like health check - use same timeout too!
                 response = requests.get(url, timeout=10)
                 
-                # Return the response as simply as possible
-                return Response(
-                    response.text,
-                    status=response.status_code,
-                    content_type=response.headers.get('content-type', 'application/json')
-                )
+                # Return simple response - even more basic
+                from flask import make_response
+                flask_response = make_response(response.text, response.status_code)
+                flask_response.headers['Content-Type'] = response.headers.get('content-type', 'application/json')
+                return flask_response
                 
             else:
                 # For non-GET requests, use full parameter handling
