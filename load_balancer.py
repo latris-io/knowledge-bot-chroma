@@ -201,28 +201,35 @@ class TrueLoadBalancer:
         try:
             url = f"{target_url}{path}"
             
-            # Prepare request parameters
-            req_params = {
-                "timeout": self.request_timeout,
-                "allow_redirects": False
-            }
-            
-            # Handle request body properly
-            if request.data:
-                req_params["data"] = request.data
-            elif request.json:
-                req_params["json"] = request.json
-            
-            # Prepare headers - make GET requests behave EXACTLY like working health checks
-            headers = {}
-            
             if method == 'GET':
-                # For GET requests, use NO custom headers (exactly like health check that works)
+                # For GET requests, make them EXACTLY like working health checks
                 # Health check: requests.get(f"{instance.url}/api/v2/version", timeout=10)
-                # This works perfectly, so proxy should do the same
-                pass  # No headers for GET requests
+                # This works perfectly, so replicate it exactly
+                
+                # Add query parameters to URL if present
+                if request.args:
+                    from urllib.parse import urlencode
+                    query_string = urlencode(request.args)
+                    url = f"{url}?{query_string}"
+                
+                # Make simple GET request exactly like health check
+                response = requests.get(url, timeout=self.request_timeout)
+                
             else:
-                # For non-GET requests, forward headers and add Content-Type
+                # For non-GET requests, use full parameter handling
+                req_params = {
+                    "timeout": self.request_timeout,
+                    "allow_redirects": False
+                }
+                
+                # Handle request body
+                if request.data:
+                    req_params["data"] = request.data
+                elif request.json:
+                    req_params["json"] = request.json
+                
+                # Prepare headers for non-GET requests
+                headers = {}
                 for key, value in request.headers.items():
                     lower_key = key.lower()
                     if lower_key not in ['host', 'content-length', 'connection', 'upgrade-insecure-requests']:
@@ -231,18 +238,15 @@ class TrueLoadBalancer:
                 # Add Content-Type for requests with bodies
                 if request.data or request.json:
                     headers['Content-Type'] = 'application/json'
-            
-            req_params["headers"] = headers
-            
-            # Add query parameters
-            if request.args:
-                req_params["params"] = request.args
-            
-            # Log the request for debugging
-            logger.debug(f"Proxying {method} {url} with headers: {list(headers.keys())}")
-            
-            # Make the request
-            response = requests.request(method, url, **req_params)
+                
+                req_params["headers"] = headers
+                
+                # Add query parameters
+                if request.args:
+                    req_params["params"] = request.args
+                
+                # Make the request
+                response = requests.request(method, url, **req_params)
             
             # Create Flask response with proper headers
             response_headers = {}
