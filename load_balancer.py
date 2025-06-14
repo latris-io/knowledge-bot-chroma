@@ -213,18 +213,16 @@ class TrueLoadBalancer:
             elif request.json:
                 req_params["json"] = request.json
             
-            # Prepare headers - for GET requests, use minimal headers like health check
+            # Prepare headers - make GET requests behave EXACTLY like working health checks
             headers = {}
             
             if method == 'GET':
-                # For GET requests, use minimal headers (like health check that works)
-                # Only forward essential headers
-                for key, value in request.headers.items():
-                    lower_key = key.lower()
-                    if lower_key in ['authorization', 'user-agent']:
-                        headers[key] = value
+                # For GET requests, use NO custom headers (exactly like health check that works)
+                # Health check: requests.get(f"{instance.url}/api/v2/version", timeout=10)
+                # This works perfectly, so proxy should do the same
+                pass  # No headers for GET requests
             else:
-                # For non-GET requests, forward most headers and add Content-Type
+                # For non-GET requests, forward headers and add Content-Type
                 for key, value in request.headers.items():
                     lower_key = key.lower()
                     if lower_key not in ['host', 'content-length', 'connection', 'upgrade-insecure-requests']:
