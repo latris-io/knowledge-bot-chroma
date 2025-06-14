@@ -207,29 +207,51 @@ class TrueLoadBalancer:
                 "allow_redirects": False
             }
             
-            # Add request body for POST/PUT requests
-            if request.data:
+            # Handle request body properly
+            if request.content_type and 'application/json' in request.content_type:
+                if request.json:
+                    req_params["json"] = request.json
+                elif request.data:
+                    req_params["data"] = request.data
+            elif request.data:
                 req_params["data"] = request.data
-            elif request.json:
-                req_params["json"] = request.json
             
-            # Add headers (exclude host header)
-            headers = {k: v for k, v in request.headers.items() 
-                      if k.lower() not in ['host', 'content-length']}
+            # Prepare headers - be more selective and add required headers
+            headers = {}
+            
+            # Copy important headers but exclude problematic ones
+            for key, value in request.headers.items():
+                lower_key = key.lower()
+                if lower_key not in ['host', 'content-length', 'connection', 'upgrade-insecure-requests']:
+                    headers[key] = value
+            
+            # Ensure proper Content-Type for API requests
+            if method in ['POST', 'PUT', 'PATCH'] and 'content-type' not in [k.lower() for k in headers.keys()]:
+                headers['Content-Type'] = 'application/json'
+            
             req_params["headers"] = headers
             
             # Add query parameters
             if request.args:
                 req_params["params"] = request.args
             
+            # Log the request for debugging
+            logger.debug(f"Proxying {method} {url} with headers: {list(headers.keys())}")
+            
             # Make the request
             response = requests.request(method, url, **req_params)
             
-            # Create Flask response
+            # Create Flask response with proper headers
+            response_headers = {}
+            for key, value in response.headers.items():
+                # Skip headers that might cause issues
+                if key.lower() not in ['content-encoding', 'transfer-encoding']:
+                    response_headers[key] = value
+            
             flask_response = Response(
                 response.content,
                 status=response.status_code,
-                headers=dict(response.headers)
+                headers=response_headers
             )
             
             return flask_response
