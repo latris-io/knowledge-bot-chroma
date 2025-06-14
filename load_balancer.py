@@ -199,31 +199,39 @@ class TrueLoadBalancer:
                     logger.info(f"🔍 DEBUG - ChromaDB response headers: {dict(response.headers)}")
                     logger.info(f"🔍 DEBUG - ChromaDB response content-type: {response.headers.get('content-type')}")
                     logger.info(f"🔍 DEBUG - ChromaDB response content-encoding: {response.headers.get('content-encoding')}")
-                    logger.info(f"🔍 DEBUG - ChromaDB response encoding: {response.encoding}")
-                    logger.info(f"🔍 DEBUG - ChromaDB response apparent_encoding: {response.apparent_encoding}")
-                    logger.info(f"🔍 DEBUG - ChromaDB response.content length: {len(response.content)}")
                     logger.info(f"🔍 DEBUG - ChromaDB response.text length: {len(response.text)}")
-                    logger.info(f"🔍 DEBUG - ChromaDB response.content (first 100 bytes as hex): {response.content[:100].hex()}")
                     logger.info(f"🔍 DEBUG - ChromaDB response.text (first 500 chars): {response.text[:500]}")
-                    
-                    # Try to detect if content is compressed
-                    if response.content[:2] == b'\x1f\x8b':
-                        logger.info(f"🔍 DEBUG - DETECTED GZIP COMPRESSION in response.content!")
-                    if response.content[:2] == b'\x78\x9c':
-                        logger.info(f"🔍 DEBUG - DETECTED DEFLATE COMPRESSION in response.content!")
                 
-                # Return response using response.text to handle any compression automatically
+                # Handle Brotli, gzip, and deflate compression properly
+                # The requests library should automatically decompress when we access .text
+                content_encoding = response.headers.get('content-encoding', '').lower()
+                
+                if content_encoding in ['br', 'gzip', 'deflate']:
+                    logger.info(f"🔍 DEBUG - Detected {content_encoding} compression, using response.text for automatic decompression")
+                    response_content = response.text  # requests automatically decompresses
+                else:
+                    response_content = response.text
+                
+                # Create clean response without compression headers
                 final_response = Response(
-                    response.text,
+                    response_content,
                     status=response.status_code,
                     mimetype='application/json' if 'json' in response.headers.get('content-type', '') else None
                 )
                 
+                # Don't forward compression-related headers to avoid client confusion
+                # The client will receive uncompressed JSON
+                
                 if is_collection_get:
-                    logger.info(f"🔍 DEBUG - Final Flask response status: {final_response.status_code}")
-                    logger.info(f"🔍 DEBUG - Final Flask response mimetype: {final_response.mimetype}")
-                    logger.info(f"🔍 DEBUG - Final Flask response data length: {len(final_response.get_data())}")
-                    logger.info(f"🔍 DEBUG - Final Flask response data (first 500 chars): {final_response.get_data(as_text=True)[:500]}")
+                    logger.info(f"🔍 DEBUG - Final response content length: {len(response_content)}")
+                    logger.info(f"🔍 DEBUG - Final response (first 200 chars): {response_content[:200]}")
+                    
+                    # Verify it's valid JSON
+                    try:
+                        json.loads(response_content)
+                        logger.info(f"🔍 DEBUG - ✅ Final response is valid JSON")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"🔍 DEBUG - ❌ Final response is NOT valid JSON: {e}")
                 
                 return final_response
             
