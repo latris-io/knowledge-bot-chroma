@@ -351,6 +351,11 @@ def proxy(path):
         return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == '__main__':
-    logger.info("🚀 Starting Flask web server")
-    port = int(os.environ.get('PORT', 8000))
-    app.run(host='0.0.0.0', port=port, debug=False) 
+    try:
+        logger.info("🚀 Starting Flask web server")
+        port = int(os.environ.get('PORT', 8000))
+        logger.info(f"📡 Starting on port {port}")
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    except Exception as e:
+        logger.error(f"❌ Failed to start Flask app: {e}")
+        raise 
