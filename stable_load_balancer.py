@@ -173,28 +173,8 @@ class StableLoadBalancer:
         try:
             url = f"{instance.url}{path}"
             
-            # Simple session for this request
-            session = requests.Session()
-            
-            # Start with default headers
-            headers = {
-                'Accept-Encoding': '',  # No compression
-                'Accept': 'application/json'
-            }
-            
-            # Only set Content-Type for requests that have data
-            if 'json' in kwargs or 'data' in kwargs or method in ['POST', 'PUT', 'PATCH']:
-                headers['Content-Type'] = 'application/json'
-            
-            # Merge with any headers passed in kwargs, giving priority to incoming headers
-            if 'headers' in kwargs:
-                headers.update(kwargs['headers'])
-                # Remove headers from kwargs since we'll set them on session
-                del kwargs['headers']
-            
-            session.headers.update(headers)
-            
-            response = session.request(method, url, **kwargs)
+            # Directly make the request without any header manipulation
+            response = requests.request(method, url, **kwargs)
             
             # Handle 404 on replica with simple fallback
             if response.status_code == 404 and method == 'GET' and instance.name == "replica":
@@ -203,7 +183,7 @@ class StableLoadBalancer:
                 if primary:
                     try:
                         primary_url = f"{primary.url}{path}"
-                        primary_response = session.request(method, primary_url, **kwargs)
+                        primary_response = requests.request(method, primary_url, **kwargs)
                         primary_response.raise_for_status()
                         instance.update_stats(False)  # Replica failed
                         primary.update_stats(True)    # Primary succeeded
