@@ -277,13 +277,15 @@ class TrueLoadBalancer:
                 # Make the request
                 response = requests.request(method, url, **req_params)
                 
-                # For all responses, return simple Flask response using response.text
-                # The requests library automatically handles decompression
-                return Response(
-                    response.text,
-                    status=response.status_code,
-                    mimetype='application/json' if 'json' in response.headers.get('content-type', '') else None
-                )
+                # Return response using Flask's make_response for better compatibility
+                from flask import make_response
+                flask_response = make_response(response.text, response.status_code)
+                
+                # Set content type if it's JSON
+                if 'json' in response.headers.get('content-type', ''):
+                    flask_response.headers['Content-Type'] = 'application/json'
+                
+                return flask_response
             
         except requests.exceptions.Timeout:
             logger.error(f"Request timeout to {target_url}")
