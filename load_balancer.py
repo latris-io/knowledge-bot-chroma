@@ -229,11 +229,11 @@ class TrueLoadBalancer:
                     "allow_redirects": False
                 }
                 
-                # Handle request body
-                if request.data:
-                    req_params["data"] = request.data
-                elif request.json:
+                # Handle request body - prioritize JSON for structured data
+                if request.is_json and request.json is not None:
                     req_params["json"] = request.json
+                elif request.data:
+                    req_params["data"] = request.data
                 
                 # Prepare headers for non-GET requests
                 headers = {}
@@ -242,9 +242,11 @@ class TrueLoadBalancer:
                     if lower_key not in ['host', 'content-length', 'connection', 'upgrade-insecure-requests']:
                         headers[key] = value
                 
-                # Add Content-Type for requests with bodies
-                if request.data or request.json:
+                # Set appropriate Content-Type
+                if request.is_json:
                     headers['Content-Type'] = 'application/json'
+                elif request.content_type and request.content_type not in headers:
+                    headers['Content-Type'] = request.content_type
                 
                 req_params["headers"] = headers
                 
