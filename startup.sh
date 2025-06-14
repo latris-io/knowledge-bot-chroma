@@ -91,5 +91,15 @@ echo "🎉 ChromaDB is fully initialized and ready!"
 echo "🌐 Available v2 endpoints: /api/v2/version, /api/v2/heartbeat, /api/v2/collections"
 echo "📊 Connect to ChromaDB at: http://localhost:8000"
 
-# Keep the script running and monitor ChromaDB
+# Start health proxy for v1 API compatibility
+echo "🔗 Starting health proxy for v1 API compatibility..."
+if [ -f "health_proxy.py" ]; then
+    PROXY_PORT=3000 python3 health_proxy.py &
+    PROXY_PID=$!
+    echo "📋 Health proxy started with PID: $PROXY_PID on port 3000"
+else
+    echo "⚠️ Health proxy not found, skipping"
+fi
+
+# Keep the script running and monitor both processes
 wait $CHROMA_PID 
