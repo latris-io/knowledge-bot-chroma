@@ -317,7 +317,7 @@ def status():
 @app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'])
 @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'])
 def proxy(path):
-    """Proxy all requests to ChromaDB instances"""
+    """Proxy all requests to ChromaDB instances with completely agnostic handling"""
     try:
         # Get request details
         method = request.method
@@ -330,39 +330,19 @@ def proxy(path):
         # Prepare request kwargs
         request_kwargs = {}
         
-        # Handle headers very carefully - only pass essential ones
-        essential_headers = {}
+        # Pass through ALL headers exactly as received (except host)
+        headers = {}
         for header_name, header_value in request.headers:
-            header_lower = header_name.lower()
-            # Only pass through specific headers we know are safe
-            if header_lower in ['authorization', 'user-agent', 'accept']:
-                essential_headers[header_name] = header_value
+            if header_name.lower() != 'host':  # Skip host header
+                headers[header_name] = header_value
         
-        request_kwargs['headers'] = essential_headers
+        if headers:
+            request_kwargs['headers'] = headers
         
-        # Handle request body only if we have data, and be very careful
-        try:
-            if hasattr(request, 'get_data'):
-                body_data = request.get_data()
-                if body_data:
-                    # Check content type from headers
-                    content_type = ''
-                    for header_name, header_value in request.headers:
-                        if header_name.lower() == 'content-type':
-                            content_type = header_value.lower()
-                            break
-                    
-                    if 'application/json' in content_type:
-                        try:
-                            import json
-                            request_kwargs['json'] = json.loads(body_data.decode('utf-8'))
-                        except:
-                            request_kwargs['data'] = body_data
-                    else:
-                        request_kwargs['data'] = body_data
-        except Exception as e:
-            # If we can't get body data safely, just skip it
-            logger.debug(f"Could not get request body: {e}")
+        # Get raw request body without any parsing or interpretation
+        raw_body = request.get_data()
+        if raw_body:
+            request_kwargs['data'] = raw_body
         
         # Route through load balancer
         load_balancer.stats["total_requests"] += 1
@@ -374,7 +354,7 @@ def proxy(path):
         response = load_balancer.make_request(instance, method, url_path, **request_kwargs)
         load_balancer.stats["successful_requests"] += 1
         
-        # Return response
+        # Return response with all headers preserved
         return Response(
             response.content,
             status=response.status_code,
