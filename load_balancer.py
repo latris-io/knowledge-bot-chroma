@@ -277,34 +277,13 @@ class TrueLoadBalancer:
                 # Make the request
                 response = requests.request(method, url, **req_params)
                 
-                # Handle JSON responses properly to avoid binary corruption
-                if response.headers.get('content-type', '').startswith('application/json'):
-                    # Always use response.text for JSON content-type to ensure decompression
-                    # requests library automatically handles gzip/deflate decompression
-                    response_text = response.text
-                    
-                    # Return clean JSON response without trying to validate it
-                    # This avoids any fallback to binary handling
-                    return Response(
-                        response_text,
-                        status=response.status_code,
-                        mimetype='application/json'
-                    )
-                
-                # For non-JSON responses, handle normally with simplified headers  
-                response_headers = {}
-                for key, value in response.headers.items():
-                    # Skip headers that might cause compression issues
-                    if key.lower() not in ['content-encoding', 'transfer-encoding', 'content-length']:
-                        response_headers[key] = value
-                
-                flask_response = Response(
+                # For all responses, return simple Flask response using response.text
+                # The requests library automatically handles decompression
+                return Response(
                     response.text,
                     status=response.status_code,
-                    headers=response_headers
+                    mimetype='application/json' if 'json' in response.headers.get('content-type', '') else None
                 )
-                
-                return flask_response
             
         except requests.exceptions.Timeout:
             logger.error(f"Request timeout to {target_url}")
