@@ -154,11 +154,7 @@ class ChromaDataSync:
                 logger.error(f"Could not retrieve data from primary collection '{collection_name}'")
                 return False
             
-            if not primary_data.get('ids'):
-                logger.info(f"Collection '{collection_name}' is empty, skipping")
-                return True
-            
-            # Find or create replica collection
+            # Find or create replica collection (always create structure, even if empty)
             replica_collection_id = None
             for replica_col in replica_collections:
                 if replica_col['name'] == collection_name:
@@ -174,10 +170,12 @@ class ChromaDataSync:
             # Clear replica collection (full sync approach)
             self.clear_collection(self.replica_url, replica_collection_id)
             
-            # Add all documents to replica
-            self.add_documents_to_collection(self.replica_url, replica_collection_id, primary_data)
-            
-            logger.info(f"Successfully synced collection '{collection_name}' with {len(primary_data['ids'])} documents")
+            # Add documents to replica only if primary has data
+            if primary_data.get('ids'):
+                self.add_documents_to_collection(self.replica_url, replica_collection_id, primary_data)
+                logger.info(f"Successfully synced collection '{collection_name}' with {len(primary_data['ids'])} documents")
+            else:
+                logger.info(f"Collection '{collection_name}' is empty - created empty collection structure on replica")
             return True
             
         except Exception as e:
