@@ -9,6 +9,8 @@ import time
 import requests
 import logging
 import json
+import gzip
+import brotli
 from flask import Flask, request, jsonify, Response, make_response
 from werkzeug.exceptions import ServiceUnavailable
 import threading
@@ -16,6 +18,7 @@ import random
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
+from io import BytesIO
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -126,6 +129,26 @@ class RobustLoadBalancer:
                 logger.error(f"Error in health monitor: {e}")
                 time.sleep(self.check_interval)
 
+    def decompress_response(self, response) -> str:
+        """Properly decompress response content based on encoding"""
+        content_encoding = response.headers.get('content-encoding', '').lower()
+        
+        if content_encoding == 'gzip':
+            try:
+                return gzip.decompress(response.content).decode('utf-8')
+            except:
+                # Fallback to response.text if manual decompression fails
+                return response.text
+        elif content_encoding == 'br':
+            try:
+                return brotli.decompress(response.content).decode('utf-8')
+            except:
+                # Fallback to response.text if manual decompression fails
+                return response.text
+        else:
+            # No compression or identity
+            return response.text
+
     def proxy_request(self, target_url: str, path: str, method: str) -> Response:
         """Proxy request to target ChromaDB instance with proper Brotli/compression handling"""
         try:
@@ -145,8 +168,9 @@ class RobustLoadBalancer:
                 # Simple GET request
                 response = requests.get(url, timeout=self.request_timeout)
                 
-                # Return response.text which automatically handles decompression
-                flask_response = make_response(response.text, response.status_code, {
+                # Use explicit decompression to ensure clean content
+                response_text = self.decompress_response(response)
+                flask_response = make_response(response_text, response.status_code, {
                     'Content-Type': response.headers.get('content-type', 'application/json'),
                     'Cache-Control': 'no-transform'
                 })
@@ -182,11 +206,11 @@ class RobustLoadBalancer:
                 if is_collection_endpoint:
                     content_encoding = response.headers.get('content-encoding', 'none')
                     logger.info(f"🔧 Response: status={response.status_code}, encoding={content_encoding}, content-type={response.headers.get('content-type')}")
-                    logger.info(f"🔧 Response text length: {len(response.text)}")
+                    logger.info(f"🔧 Raw response.text length: {len(response.text)}")
+                    logger.info(f"🔧 Raw response.content length: {len(response.content)}")
                 
-                # Handle compressed responses properly
-                # The requests library automatically decompresses when we access .text
-                response_text = response.text
+                # Handle compressed responses properly with explicit decompression
+                response_text = self.decompress_response(response)
                 
                 # Create clean response without compression headers
                 # CRITICAL: Remove all compression-related headers to prevent double compression
@@ -196,14 +220,16 @@ class RobustLoadBalancer:
                 }
                 
                 if is_collection_endpoint:
+                    logger.info(f"🔧 Decompressed response length: {len(response_text)}")
                     logger.info(f"🔧 Returning clean response, length: {len(response_text)}")
                     # Verify it's valid JSON for debugging
                     try:
                         if response.headers.get('content-type', '').startswith('application/json'):
                             json.loads(response_text)
-                            logger.info("🔧 ✅ Response is valid JSON")
+                            logger.info("🔧 ✅ Decompressed response is valid JSON")
                     except json.JSONDecodeError:
-                        logger.warning("🔧 ⚠️ Response is not valid JSON")
+                        logger.warning("🔧 ⚠️ Decompressed response is not valid JSON")
+                        logger.warning(f"🔧 First 100 chars: {response_text[:100]}")
                 
                 # Create response that explicitly prevents compression
                 flask_response = make_response(response_text, response.status_code, clean_headers)
