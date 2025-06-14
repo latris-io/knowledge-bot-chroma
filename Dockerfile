@@ -15,9 +15,9 @@ RUN mkdir -p /chroma/chroma
 
 EXPOSE 8000
 
-# Add health check with longer start period for ChromaDB initialization
-HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=5 \
-    CMD curl -f http://localhost:8000/api/v1/heartbeat || exit 1
+# Create startup script for better initialization
+COPY startup.sh /startup.sh
+RUN chmod +x /startup.sh
 
-# ✅ Launch the Chroma server with persistent storage
-CMD ["chroma", "run", "--host", "0.0.0.0", "--port", "8000", "--path", "/chroma/chroma"]
+# ✅ Launch the Chroma server with delayed startup for proper initialization
+CMD ["/startup.sh"]
