@@ -208,13 +208,10 @@ class TrueLoadBalancer:
             }
             
             # Handle request body properly
-            if request.content_type and 'application/json' in request.content_type:
-                if request.json:
-                    req_params["json"] = request.json
-                elif request.data:
-                    req_params["data"] = request.data
-            elif request.data:
+            if request.data:
                 req_params["data"] = request.data
+            elif request.json:
+                req_params["json"] = request.json
             
             # Prepare headers - be more selective and add required headers
             headers = {}
@@ -225,8 +222,8 @@ class TrueLoadBalancer:
                 if lower_key not in ['host', 'content-length', 'connection', 'upgrade-insecure-requests']:
                     headers[key] = value
             
-            # Ensure proper Content-Type for API requests
-            if method in ['POST', 'PUT', 'PATCH'] and 'content-type' not in [k.lower() for k in headers.keys()]:
+            # Ensure proper Content-Type only for requests with body content
+            if method in ['POST', 'PUT', 'PATCH'] and request.data and 'content-type' not in [k.lower() for k in headers.keys()]:
                 headers['Content-Type'] = 'application/json'
             
             req_params["headers"] = headers
