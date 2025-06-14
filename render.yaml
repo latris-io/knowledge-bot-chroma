@@ -3,13 +3,13 @@
 project: knowledge-bot
 
 services:
-  # Primary ChromaDB instance
+  # Primary ChromaDB instance - needs persistent storage
   - type: web
     name: chroma-primary
     env: docker
     dockerfilePath: ./Dockerfile
     region: oregon
-    plan: starter
+    plan: standard  # $7/month - cheapest plan with disk support
     disk:
       name: chroma-primary-data
       mountPath: /chroma/chroma
@@ -27,13 +27,13 @@ services:
       - key: INSTANCE_PRIORITY
         value: 100
 
-  # Replica ChromaDB instance
+  # Replica ChromaDB instance - needs persistent storage
   - type: web
     name: chroma-replica
     env: docker
     dockerfilePath: ./Dockerfile
     region: oregon
-    plan: starter
+    plan: standard  # $7/month - cheapest plan with disk support
     disk:
       name: chroma-replica-data
       mountPath: /chroma/chroma
@@ -51,13 +51,13 @@ services:
       - key: INSTANCE_PRIORITY
         value: 80
 
-  # True Load Balancer with multiple strategies
+  # Load Balancer - no storage needed, can be free
   - type: web
     name: chroma-load-balancer
     env: docker
     dockerfilePath: ./Dockerfile.loadbalancer
     region: oregon
-    plan: starter
+    plan: starter  # Free plan - no storage needed
     healthCheckPath: /health
     envVars:
       - key: PRIMARY_URL
@@ -73,13 +73,13 @@ services:
       - key: SLACK_WEBHOOK_URL
         sync: false
 
-  # Background worker for health monitoring and failover
+  # Monitor worker - no storage needed, can be free
   - type: worker
     name: chroma-monitor
     env: docker
     dockerfilePath: ./Dockerfile.monitor
     region: oregon
-    plan: starter
+    plan: starter  # Free plan - no storage needed
     envVars:
       - key: PRIMARY_URL
         value: https://chroma-primary.onrender.com
@@ -98,13 +98,13 @@ services:
           name: chroma-metadata
           property: connectionString
 
-  # Data synchronization worker (with distributed mode support)
+  # Sync worker - no storage needed, can be free
   - type: worker
     name: chroma-sync
     env: docker
     dockerfilePath: ./Dockerfile.sync
     region: oregon
-    plan: starter
+    plan: starter  # Free plan - no storage needed
     envVars:
       - key: PRIMARY_URL
         value: https://chroma-primary.onrender.com
@@ -135,4 +135,4 @@ databases:
     databaseName: chroma_ha
     user: chroma_user
     region: oregon
-    plan: free 
+    plan: free  # Free PostgreSQL 
