@@ -73,13 +73,13 @@ services:
       - key: SLACK_WEBHOOK_URL
         sync: false
 
-  # Monitor worker - no storage needed, can be free
+  # Monitor worker - workers don't support free tier
   - type: worker
     name: chroma-monitor
     env: docker
     dockerfilePath: ./Dockerfile.monitor
     region: oregon
-    plan: starter  # Free plan - no storage needed
+    plan: standard  # $7/month - workers don't have free tier
     envVars:
       - key: PRIMARY_URL
         value: https://chroma-primary.onrender.com
@@ -98,13 +98,13 @@ services:
           name: chroma-metadata
           property: connectionString
 
-  # Sync worker - no storage needed, can be free
+  # Sync worker - workers don't support free tier
   - type: worker
     name: chroma-sync
     env: docker
     dockerfilePath: ./Dockerfile.sync
     region: oregon
-    plan: starter  # Free plan - no storage needed
+    plan: standard  # $7/month - workers don't have free tier
     envVars:
       - key: PRIMARY_URL
         value: https://chroma-primary.onrender.com
