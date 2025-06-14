@@ -10,7 +10,7 @@ services:
       name: chroma-primary-data
       mountPath: /chroma/chroma
       sizeGB: 10
-    healthCheckPath: /api/v1/heartbeat
+    healthCheckPath: /api/v2/version
     envVars:
       - key: CHROMA_SERVER_HOST
         value: 0.0.0.0
@@ -34,7 +34,7 @@ services:
       name: chroma-replica-data
       mountPath: /chroma/chroma
       sizeGB: 10
-    healthCheckPath: /api/v1/heartbeat
+    healthCheckPath: /api/v2/version
     envVars:
       - key: CHROMA_SERVER_HOST
         value: 0.0.0.0
