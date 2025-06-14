@@ -289,10 +289,17 @@ class ProductionSyncService:
         for rec in recommendations:
             self.store_upgrade_recommendation(rec)
         
-        # Log urgent recommendations
+        # Log urgent recommendations and send Slack alerts
         urgent_recs = [r for r in recommendations if r['urgency'] == 'high']
         if urgent_recs:
-            logger.warning(f"🚨 URGENT: Resource upgrade recommended - {urgent_recs[0]['reason']}")
+            rec = urgent_recs[0]
+            logger.warning(f"🚨 URGENT: Resource upgrade recommended - {rec['reason']}")
+            self.send_slack_upgrade_alert(rec)
+        
+        # Send Slack for medium priority recommendations (daily limit)
+        medium_recs = [r for r in recommendations if r['urgency'] == 'medium']
+        if medium_recs:
+            self.send_slack_upgrade_alert(medium_recs[0], frequency_limit=True)
     
     def store_upgrade_recommendation(self, recommendation: dict):
         """Store upgrade recommendation in database"""
@@ -313,6 +320,89 @@ class ProductionSyncService:
                 conn.commit()
         except Exception as e:
             logger.debug(f"Failed to store recommendation: {e}")
+    
+    def send_slack_upgrade_alert(self, recommendation: dict, frequency_limit: bool = False):
+        """Send Slack notification for upgrade recommendations"""
+        webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+        if not webhook_url:
+            return
+        
+        # Check frequency limiting for non-urgent alerts
+        if frequency_limit:
+            try:
+                with psycopg2.connect(self.database_url) as conn:
+                    with conn.cursor() as cursor:
+                        # Check if we've sent this type of alert in the last 24 hours
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM upgrade_recommendations 
+                            WHERE recommendation_type = %s AND urgency = %s 
+                            AND created_at > NOW() - INTERVAL '24 hours'
+                        """, [recommendation['type'], recommendation['urgency']])
+                        
+                        recent_count = cursor.fetchone()[0]
+                        if recent_count > 1:  # Already sent today
+                            return
+            except Exception:
+                pass  # If check fails, send anyway
+        
+        # Determine alert styling
+        urgency = recommendation['urgency']
+        emoji = "🚨" if urgency == "high" else "⚠️" if urgency == "medium" else "ℹ️"
+        color = "danger" if urgency == "high" else "warning" if urgency == "medium" else "good"
+        
+        # Format service name
+        service_name = f"chroma-sync ({recommendation['type']} upgrade needed)"
+        
+        # Create Slack message
+        message = f"*{recommendation['reason']}*\n"
+        message += f"Current Usage: {recommendation['current']:.1f}%\n"
+        message += f"Recommended: {recommendation['recommended_tier']} plan\n"
+        message += f"Cost Impact: ${recommendation['cost']}/month\n"
+        message += f"Urgency: {urgency.title()}"
+        
+        payload = {
+            "text": f"{emoji} ChromaDB Upgrade Needed",
+            "attachments": [
+                {
+                    "color": color,
+                    "title": service_name,
+                    "text": message,
+                    "footer": "ChromaDB Resource Monitoring",
+                    "ts": int(time.time()),
+                    "fields": [
+                        {
+                            "title": "Resource Type",
+                            "value": recommendation['type'].title(),
+                            "short": True
+                        },
+                        {
+                            "title": "Current Usage", 
+                            "value": f"{recommendation['current']:.1f}%",
+                            "short": True
+                        },
+                        {
+                            "title": "Recommended Plan",
+                            "value": recommendation['recommended_tier'],
+                            "short": True
+                        },
+                        {
+                            "title": "Monthly Cost",
+                            "value": f"${recommendation['cost']}",
+                            "short": True
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        try:
+            response = requests.post(webhook_url, json=payload, timeout=10)
+            if response.status_code == 200:
+                logger.info(f"📱 Slack upgrade alert sent: {recommendation['type']} {urgency}")
+            else:
+                logger.warning(f"❌ Slack alert failed: HTTP {response.status_code}")
+        except Exception as e:
+            logger.debug(f"Failed to send Slack notification: {e}")
     
     def get_total_documents_synced(self) -> int:
         """Get total documents currently synced"""

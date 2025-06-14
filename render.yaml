@@ -130,6 +130,9 @@ services:
         value: "false"  # Set to "true" for coordinator instance only
       - key: SYNC_CHUNK_SIZE
         value: "1000"   # Documents per chunk in distributed mode
+      # Slack Notifications for Upgrade Alerts
+      - key: SLACK_WEBHOOK_URL
+        sync: false     # Set your Slack webhook URL in Render dashboard
 
 databases:
   # Optional: PostgreSQL for storing failover state and metrics
