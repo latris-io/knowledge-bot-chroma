@@ -330,30 +330,39 @@ def proxy(path):
         # Prepare request kwargs
         request_kwargs = {}
         
-        # Handle request body carefully to avoid Flask JSON parsing errors
-        if request.data:
-            # Raw data available
-            request_kwargs['data'] = request.data
-            # Check if it's JSON content and set appropriate content type
-            content_type = request.headers.get('content-type', '')
-            if 'application/json' in content_type.lower():
-                try:
-                    import json
-                    request_kwargs['json'] = json.loads(request.data.decode('utf-8'))
-                    del request_kwargs['data']  # Use json instead of data
-                except:
-                    pass  # Keep as data if JSON parsing fails
-        elif hasattr(request, 'form') and request.form:
-            request_kwargs['data'] = dict(request.form)
-        
-        # Handle headers - only pass essential headers
+        # Handle headers very carefully - only pass essential ones
         essential_headers = {}
         for header_name, header_value in request.headers:
             header_lower = header_name.lower()
-            if header_lower in ['authorization', 'user-agent', 'accept', 'content-type']:
+            # Only pass through specific headers we know are safe
+            if header_lower in ['authorization', 'user-agent', 'accept']:
                 essential_headers[header_name] = header_value
         
         request_kwargs['headers'] = essential_headers
+        
+        # Handle request body only if we have data, and be very careful
+        try:
+            if hasattr(request, 'get_data'):
+                body_data = request.get_data()
+                if body_data:
+                    # Check content type from headers
+                    content_type = ''
+                    for header_name, header_value in request.headers:
+                        if header_name.lower() == 'content-type':
+                            content_type = header_value.lower()
+                            break
+                    
+                    if 'application/json' in content_type:
+                        try:
+                            import json
+                            request_kwargs['json'] = json.loads(body_data.decode('utf-8'))
+                        except:
+                            request_kwargs['data'] = body_data
+                    else:
+                        request_kwargs['data'] = body_data
+        except Exception as e:
+            # If we can't get body data safely, just skip it
+            logger.debug(f"Could not get request body: {e}")
         
         # Route through load balancer
         load_balancer.stats["total_requests"] += 1
