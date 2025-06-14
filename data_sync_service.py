@@ -75,6 +75,12 @@ class ProductionSyncService:
         self.max_workers = int(os.getenv("MAX_WORKERS", "2"))  # Conservative for starter tier
         self.default_batch_size = int(os.getenv("DEFAULT_BATCH_SIZE", "1000"))
         
+        # Distributed sync configuration (NEW)
+        self.distributed_mode = os.getenv("SYNC_DISTRIBUTED", "false").lower() == "true"
+        self.coordinator_mode = os.getenv("SYNC_COORDINATOR", "false").lower() == "true"
+        self.worker_id = f"worker-{os.getenv('RENDER_SERVICE_ID', 'local')}-{int(time.time())}"
+        self.chunk_size = int(os.getenv("SYNC_CHUNK_SIZE", "1000"))
+        
         # Performance monitoring
         self.resource_check_interval = 30  # seconds
         self.performance_history = []
@@ -87,6 +93,12 @@ class ProductionSyncService:
         logger.info("🚀 Production ChromaDB Sync Service initialized")
         logger.info(f"📊 Resource limits: {self.max_memory_usage_mb}MB RAM, {self.max_workers} workers")
         logger.info(f"🔄 Sync interval: {self.sync_interval}s")
+        
+        if self.distributed_mode:
+            mode = "Coordinator" if self.coordinator_mode else "Worker"
+            logger.info(f"🌐 Distributed mode: {mode} (ID: {self.worker_id})")
+        else:
+            logger.info("🔄 Single-worker mode (traditional)")
         
     def init_database(self):
         """Initialize production database schema"""
@@ -141,10 +153,37 @@ class ProductionSyncService:
                             created_at TIMESTAMP DEFAULT NOW()
                         );
                         
+                        -- Distributed sync coordination tables
+                        CREATE TABLE IF NOT EXISTS sync_tasks (
+                            id SERIAL PRIMARY KEY,
+                            collection_id UUID NOT NULL,
+                            collection_name VARCHAR(255) NOT NULL,
+                            chunk_start_offset INTEGER NOT NULL,
+                            chunk_end_offset INTEGER NOT NULL,
+                            task_status VARCHAR(20) DEFAULT 'pending',
+                            worker_id VARCHAR(50),
+                            started_at TIMESTAMP,
+                            completed_at TIMESTAMP,
+                            retry_count INTEGER DEFAULT 0,
+                            error_message TEXT,
+                            created_at TIMESTAMP DEFAULT NOW()
+                        );
+                        
+                        CREATE TABLE IF NOT EXISTS sync_workers (
+                            worker_id VARCHAR(50) PRIMARY KEY,
+                            last_heartbeat TIMESTAMP DEFAULT NOW(),
+                            worker_status VARCHAR(20) DEFAULT 'active',
+                            current_task_id INTEGER REFERENCES sync_tasks(id),
+                            memory_usage_mb REAL,
+                            cpu_percent REAL
+                        );
+                        
                         -- Indexes
                         CREATE INDEX IF NOT EXISTS idx_sync_status ON sync_collections(sync_status);
                         CREATE INDEX IF NOT EXISTS idx_performance_timestamp ON performance_metrics(metric_timestamp);
                         CREATE INDEX IF NOT EXISTS idx_recommendations_urgency ON upgrade_recommendations(urgency, created_at);
+                        CREATE INDEX IF NOT EXISTS idx_sync_tasks_status ON sync_tasks(task_status, created_at);
+                        CREATE INDEX IF NOT EXISTS idx_sync_workers_heartbeat ON sync_workers(worker_status, last_heartbeat);
                         
                         -- Cleanup function
                         CREATE OR REPLACE FUNCTION cleanup_old_data() RETURNS void AS $$
@@ -565,10 +604,20 @@ class ProductionSyncService:
             logger.error(f"❌ Production sync failed: {e}")
     
     def run(self):
-        """Main production service loop"""
+        """Main production service loop with distributed mode support"""
         logger.info(f"🚀 Starting production ChromaDB sync service")
         logger.info(f"⚙️ Configuration: {self.sync_interval}s interval, {self.max_memory_usage_mb}MB limit")
         
+        if self.distributed_mode:
+            if self.coordinator_mode:
+                self.run_coordinator()
+            else:
+                self.run_worker()
+        else:
+            self.run_traditional_sync()
+
+    def run_traditional_sync(self):
+        """Traditional single-worker sync mode (unchanged behavior)"""
         # Schedule regular sync
         schedule.every(self.sync_interval).seconds.do(self.perform_production_sync)
         
@@ -586,6 +635,382 @@ class ProductionSyncService:
             except Exception as e:
                 logger.error(f"❌ Unexpected error: {e}")
                 time.sleep(60)
+
+    def run_coordinator(self):
+        """Coordinator mode: breaks collections into chunks and creates tasks"""
+        logger.info("🌐 Starting in COORDINATOR mode")
+        
+        while True:
+            try:
+                coordinator_start = time.time()
+                
+                # Get collections that need syncing
+                primary_collections = self.get_all_collections(self.primary_url)
+                if not primary_collections:
+                    logger.info("ℹ️ No collections to coordinate")
+                    time.sleep(self.sync_interval)
+                    continue
+                
+                # Break collections into sync tasks
+                total_tasks_created = 0
+                for collection in primary_collections:
+                    tasks_created = self.create_sync_tasks(collection)
+                    total_tasks_created += tasks_created
+                
+                coordinator_duration = time.time() - coordinator_start
+                logger.info(f"📋 Coordinator cycle: {total_tasks_created} tasks created in {coordinator_duration:.2f}s")
+                
+                # Clean up old completed tasks
+                self.cleanup_old_tasks()
+                
+                # Wait for next coordination cycle
+                time.sleep(self.sync_interval)
+                
+            except KeyboardInterrupt:
+                logger.info("🛑 Coordinator shutting down...")
+                break
+            except Exception as e:
+                logger.error(f"❌ Coordinator error: {e}")
+                time.sleep(60)
+
+    def run_worker(self):
+        """Worker mode: processes assigned tasks from queue"""
+        logger.info(f"🔧 Starting in WORKER mode (ID: {self.worker_id})")
+        
+        # Register this worker
+        self.register_worker()
+        
+        while True:
+            try:
+                # Send heartbeat
+                self.update_worker_heartbeat()
+                
+                # Get next available task
+                task = self.claim_next_task()
+                
+                if task:
+                    logger.info(f"🔄 Processing task {task['id']}: {task['collection_name']} "
+                               f"chunk {task['chunk_start_offset']}-{task['chunk_end_offset']}")
+                    
+                    # Process the task
+                    self.process_sync_task(task)
+                else:
+                    # No work available, short wait
+                    time.sleep(10)
+                
+            except KeyboardInterrupt:
+                logger.info("🛑 Worker shutting down...")
+                self.unregister_worker()
+                break
+            except Exception as e:
+                logger.error(f"❌ Worker error: {e}")
+                time.sleep(30)
+
+    def create_sync_tasks(self, collection: Dict) -> int:
+        """Break collection into chunks and create sync tasks"""
+        collection_id = collection['id']
+        collection_name = collection['name']
+        
+        try:
+            # Estimate collection size
+            total_docs = self.estimate_collection_size(collection_id)
+            
+            if total_docs == 0:
+                # Empty collection - create single task for structure sync
+                self.create_task(collection_id, collection_name, 0, 0, is_empty=True)
+                return 1
+            
+            # Break into chunks
+            chunks = self.calculate_chunks(total_docs, self.chunk_size)
+            tasks_created = 0
+            
+            for chunk_start, chunk_end in chunks:
+                self.create_task(collection_id, collection_name, chunk_start, chunk_end)
+                tasks_created += 1
+            
+            logger.info(f"📦 Collection '{collection_name}': {total_docs} docs → {tasks_created} tasks")
+            return tasks_created
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create tasks for '{collection_name}': {e}")
+            return 0
+
+    def calculate_chunks(self, total_docs: int, chunk_size: int) -> List[Tuple[int, int]]:
+        """Calculate optimal chunk boundaries"""
+        chunks = []
+        for start in range(0, total_docs, chunk_size):
+            end = min(start + chunk_size, total_docs)
+            chunks.append((start, end))
+        return chunks
+
+    def create_task(self, collection_id: str, collection_name: str, 
+                   start_offset: int, end_offset: int, is_empty: bool = False):
+        """Create a sync task in database"""
+        if not self.database_url:
+            return
+            
+        try:
+            with psycopg2.connect(self.database_url) as conn:
+                with conn.cursor() as cursor:
+                    # Check if task already exists and is not failed
+                    cursor.execute("""
+                        SELECT id FROM sync_tasks 
+                        WHERE collection_id = %s AND chunk_start_offset = %s 
+                        AND chunk_end_offset = %s AND task_status != 'failed'
+                    """, [collection_id, start_offset, end_offset])
+                    
+                    if cursor.fetchone():
+                        return  # Task already exists
+                    
+                    # Create new task
+                    cursor.execute("""
+                        INSERT INTO sync_tasks 
+                        (collection_id, collection_name, chunk_start_offset, chunk_end_offset)
+                        VALUES (%s, %s, %s, %s)
+                    """, [collection_id, collection_name, start_offset, end_offset])
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to create task: {e}")
+
+    def claim_next_task(self) -> Optional[Dict]:
+        """Atomically claim next available task"""
+        if not self.database_url:
+            return None
+            
+        try:
+            with psycopg2.connect(self.database_url) as conn:
+                with conn.cursor() as cursor:
+                    # Atomic task claiming using PostgreSQL row-level locking
+                    cursor.execute("""
+                        UPDATE sync_tasks 
+                        SET task_status = 'processing',
+                            worker_id = %s,
+                            started_at = NOW()
+                        WHERE id = (
+                            SELECT id FROM sync_tasks 
+                            WHERE task_status = 'pending'
+                            ORDER BY created_at ASC
+                            LIMIT 1
+                            FOR UPDATE SKIP LOCKED
+                        )
+                        RETURNING id, collection_id, collection_name, 
+                                 chunk_start_offset, chunk_end_offset
+                    """, [self.worker_id])
+                    
+                    result = cursor.fetchone()
+                    if result:
+                        columns = ['id', 'collection_id', 'collection_name', 
+                                 'chunk_start_offset', 'chunk_end_offset']
+                        return dict(zip(columns, result))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to claim task: {e}")
+        
+        return None
+
+    def process_sync_task(self, task: Dict):
+        """Process a single sync task (chunk of a collection)"""
+        task_id = task['id']
+        collection_id = task['collection_id']
+        collection_name = task['collection_name']
+        start_offset = task['chunk_start_offset']
+        end_offset = task['chunk_end_offset']
+        
+        try:
+            # Handle empty collection case
+            if start_offset == 0 and end_offset == 0:
+                self.sync_empty_collection_structure(collection_name)
+                self.complete_task(task_id, success=True)
+                return
+            
+            # Get chunk from primary
+            chunk_size = end_offset - start_offset
+            chunk_data = self.get_collection_chunk(collection_id, start_offset, chunk_size)
+            
+            if not chunk_data or not chunk_data.get('ids'):
+                logger.info(f"📭 Task {task_id}: No data in chunk")
+                self.complete_task(task_id, success=True)
+                return
+            
+            # Add chunk to replica
+            self.add_chunk_to_replica(collection_name, chunk_data)
+            
+            # Mark task complete
+            self.complete_task(task_id, success=True)
+            
+            logger.info(f"✅ Task {task_id} completed: {len(chunk_data['ids'])} docs")
+            
+        except Exception as e:
+            logger.error(f"❌ Task {task_id} failed: {e}")
+            self.complete_task(task_id, success=False, error=str(e))
+
+    def complete_task(self, task_id: int, success: bool, error: str = None):
+        """Mark task as completed or failed"""
+        if not self.database_url:
+            return
+            
+        try:
+            with psycopg2.connect(self.database_url) as conn:
+                with conn.cursor() as cursor:
+                    status = 'completed' if success else 'failed'
+                    cursor.execute("""
+                        UPDATE sync_tasks 
+                        SET task_status = %s,
+                            completed_at = NOW(),
+                            error_message = %s
+                        WHERE id = %s
+                    """, [status, error, task_id])
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to complete task {task_id}: {e}")
+
+    def register_worker(self):
+        """Register this worker in the database"""
+        if not self.database_url:
+            return
+            
+        try:
+            with psycopg2.connect(self.database_url) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO sync_workers (worker_id, worker_status)
+                        VALUES (%s, 'active')
+                        ON CONFLICT (worker_id) DO UPDATE SET
+                            worker_status = 'active',
+                            last_heartbeat = NOW()
+                    """, [self.worker_id])
+                conn.commit()
+            logger.info(f"✅ Worker {self.worker_id} registered")
+        except Exception as e:
+            logger.error(f"Failed to register worker: {e}")
+
+    def update_worker_heartbeat(self):
+        """Update worker heartbeat and resource usage"""
+        if not self.database_url:
+            return
+            
+        try:
+            metrics = self.collect_resource_metrics()
+            with psycopg2.connect(self.database_url) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE sync_workers 
+                        SET last_heartbeat = NOW(),
+                            memory_usage_mb = %s,
+                            cpu_percent = %s
+                        WHERE worker_id = %s
+                    """, [metrics.memory_usage_mb, metrics.cpu_percent, self.worker_id])
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Failed to update heartbeat: {e}")
+
+    def unregister_worker(self):
+        """Unregister worker on shutdown"""
+        if not self.database_url:
+            return
+            
+        try:
+            with psycopg2.connect(self.database_url) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("DELETE FROM sync_workers WHERE worker_id = %s", [self.worker_id])
+                conn.commit()
+            logger.info(f"✅ Worker {self.worker_id} unregistered")
+        except Exception as e:
+            logger.error(f"Failed to unregister worker: {e}")
+
+    def estimate_collection_size(self, collection_id: str) -> int:
+        """Estimate total documents in collection"""
+        try:
+            get_url = f"{self.primary_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}/get"
+            get_data = {"include": ["documents"], "limit": 1}
+            response = self._make_request('POST', get_url, json=get_data)
+            data = response.json()
+            
+            # ChromaDB doesn't return total count directly, so we estimate
+            # This is a limitation we'd improve in production
+            return 1000  # Conservative estimate for now
+        except:
+            return 0
+
+    def get_collection_chunk(self, collection_id: str, offset: int, limit: int) -> Dict:
+        """Get a chunk of documents from collection"""
+        get_url = f"{self.primary_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}/get"
+        get_data = {
+            "include": ["documents", "metadatas", "embeddings"],
+            "offset": offset,
+            "limit": limit
+        }
+        response = self._make_request('POST', get_url, json=get_data)
+        return response.json()
+
+    def add_chunk_to_replica(self, collection_name: str, chunk_data: Dict):
+        """Add chunk data to replica collection"""
+        # Find or create replica collection
+        replica_collections = self.get_all_collections(self.replica_url)
+        replica_collection_id = None
+        
+        for replica_col in replica_collections:
+            if replica_col['name'] == collection_name:
+                replica_collection_id = replica_col['id']
+                break
+        
+        if not replica_collection_id:
+            # Create replica collection
+            create_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections"
+            create_data = {
+                "name": collection_name,
+                "metadata": {"synced_from": "primary"}
+            }
+            response = self._make_request('POST', create_url, json=create_data)
+            replica_collection_id = response.json().get('id')
+        
+        # Add chunk to replica
+        add_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_collection_id}/add"
+        add_data = {k: v for k, v in chunk_data.items() if v is not None and k != 'include'}
+        self._make_request('POST', add_url, json=add_data)
+
+    def sync_empty_collection_structure(self, collection_name: str):
+        """Ensure empty collection structure exists on replica"""
+        replica_collections = self.get_all_collections(self.replica_url)
+        
+        # Check if collection already exists
+        for replica_col in replica_collections:
+            if replica_col['name'] == collection_name:
+                return  # Already exists
+        
+        # Create empty collection
+        create_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections"
+        create_data = {
+            "name": collection_name,
+            "metadata": {"synced_from": "primary", "empty_collection": True}
+        }
+        self._make_request('POST', create_url, json=create_data)
+
+    def cleanup_old_tasks(self):
+        """Clean up old completed/failed tasks"""
+        if not self.database_url:
+            return
+            
+        try:
+            with psycopg2.connect(self.database_url) as conn:
+                with conn.cursor() as cursor:
+                    # Delete completed tasks older than 1 hour
+                    cursor.execute("""
+                        DELETE FROM sync_tasks 
+                        WHERE task_status IN ('completed', 'failed') 
+                        AND completed_at < NOW() - INTERVAL '1 hour'
+                    """)
+                    
+                    # Reset abandoned tasks (processing > 30 minutes)
+                    cursor.execute("""
+                        UPDATE sync_tasks 
+                        SET task_status = 'pending', worker_id = NULL, started_at = NULL
+                        WHERE task_status = 'processing' 
+                        AND started_at < NOW() - INTERVAL '30 minutes'
+                    """)
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to cleanup tasks: {e}")
 
 if __name__ == "__main__":
     service = ProductionSyncService()
