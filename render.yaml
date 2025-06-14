@@ -47,7 +47,7 @@ services:
       - key: INSTANCE_PRIORITY
         value: 80
 
-  # Load Balancer / Failover Controller
+  # True Load Balancer with multiple strategies
   - type: web
     name: chroma-load-balancer
     env: docker
@@ -64,6 +64,8 @@ services:
         value: 30
       - key: FAILURE_THRESHOLD
         value: 3
+      - key: LOAD_BALANCE_STRATEGY
+        value: write_primary  # Options: round_robin, random, priority, write_primary
       - key: SLACK_WEBHOOK_URL
         sync: false
 

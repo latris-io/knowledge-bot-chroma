@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ChromaDB Load Balancer for Render
-Proxies requests to healthy ChromaDB instances with automatic failover
+ChromaDB True Load Balancer for Render
+Now with data sync, we can do actual load balancing!
 """
 
 import os
@@ -11,6 +11,7 @@ import logging
 from flask import Flask, request, jsonify, Response
 from werkzeug.exceptions import ServiceUnavailable
 import threading
+import random
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 
@@ -29,8 +30,9 @@ class ChromaInstance:
         self.last_check = datetime.now()
         self.failure_count = 0
         self.last_failure = None
+        self.request_count = 0  # For round-robin
 
-class LoadBalancer:
+class TrueLoadBalancer:
     def __init__(self):
         self.instances = [
             ChromaInstance(
@@ -45,15 +47,95 @@ class LoadBalancer:
             )
         ]
         
+        self.load_balance_strategy = os.getenv("LOAD_BALANCE_STRATEGY", "round_robin")
+        # Options: "round_robin", "random", "priority", "write_primary"
+        
         self.check_interval = int(os.getenv("CHECK_INTERVAL", "30"))
         self.failure_threshold = int(os.getenv("FAILURE_THRESHOLD", "3"))
         self.request_timeout = int(os.getenv("REQUEST_TIMEOUT", "30"))
+        
+        self.current_instance_index = 0  # For round-robin
         
         # Start health monitoring thread
         self.health_thread = threading.Thread(target=self.health_monitor_loop, daemon=True)
         self.health_thread.start()
         
-        logger.info(f"Load balancer initialized with {len(self.instances)} instances")
+        logger.info(f"True load balancer initialized with strategy: {self.load_balance_strategy}")
+
+    def get_healthy_instances(self) -> List[ChromaInstance]:
+        """Get all healthy instances"""
+        return [inst for inst in self.instances if inst.is_healthy]
+
+    def get_instance_round_robin(self) -> Optional[ChromaInstance]:
+        """Round-robin load balancing"""
+        healthy_instances = self.get_healthy_instances()
+        if not healthy_instances:
+            return None
+        
+        # Rotate through healthy instances
+        instance = healthy_instances[self.current_instance_index % len(healthy_instances)]
+        self.current_instance_index += 1
+        
+        logger.debug(f"Round-robin selected: {instance.name}")
+        return instance
+
+    def get_instance_random(self) -> Optional[ChromaInstance]:
+        """Random load balancing"""
+        healthy_instances = self.get_healthy_instances()
+        if not healthy_instances:
+            return None
+        
+        instance = random.choice(healthy_instances)
+        logger.debug(f"Random selected: {instance.name}")
+        return instance
+
+    def get_instance_priority(self) -> Optional[ChromaInstance]:
+        """Priority-based (original failover behavior)"""
+        healthy_instances = self.get_healthy_instances()
+        if not healthy_instances:
+            return None
+        
+        instance = max(healthy_instances, key=lambda x: x.priority)
+        logger.debug(f"Priority selected: {instance.name}")
+        return instance
+
+    def get_instance_write_primary(self, method: str) -> Optional[ChromaInstance]:
+        """Writes to primary, reads distributed"""
+        healthy_instances = self.get_healthy_instances()
+        if not healthy_instances:
+            return None
+        
+        # Writes go to primary only
+        if method in ['POST', 'PUT', 'DELETE', 'PATCH']:
+            primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
+            if primary:
+                logger.debug(f"Write operation routed to primary")
+                return primary
+            else:
+                # Primary down, use any healthy instance
+                instance = healthy_instances[0]
+                logger.warning(f"Primary down, write routed to {instance.name}")
+                return instance
+        
+        # Reads can go anywhere (round-robin)
+        instance = healthy_instances[self.current_instance_index % len(healthy_instances)]
+        self.current_instance_index += 1
+        logger.debug(f"Read operation routed to {instance.name}")
+        return instance
+
+    def get_target_instance(self, method: str = "GET") -> Optional[ChromaInstance]:
+        """Get target instance based on load balancing strategy"""
+        if self.load_balance_strategy == "round_robin":
+            return self.get_instance_round_robin()
+        elif self.load_balance_strategy == "random":
+            return self.get_instance_random()
+        elif self.load_balance_strategy == "priority":
+            return self.get_instance_priority()
+        elif self.load_balance_strategy == "write_primary":
+            return self.get_instance_write_primary(method)
+        else:
+            # Default to round-robin
+            return self.get_instance_round_robin()
 
     def check_instance_health(self, instance: ChromaInstance) -> bool:
         """Check if a ChromaDB instance is healthy"""
@@ -86,16 +168,6 @@ class LoadBalancer:
                 instance.is_healthy = False
                 instance.last_failure = datetime.now()
 
-    def get_healthy_instance(self) -> Optional[ChromaInstance]:
-        """Get the best healthy instance"""
-        healthy_instances = [inst for inst in self.instances if inst.is_healthy]
-        
-        if not healthy_instances:
-            return None
-        
-        # Return instance with highest priority
-        return max(healthy_instances, key=lambda x: x.priority)
-
     def health_monitor_loop(self):
         """Background health monitoring loop"""
         while True:
@@ -117,7 +189,7 @@ class LoadBalancer:
         
         try:
             payload = {
-                "text": f"ChromaDB Load Balancer Alert: {message}",
+                "text": f"ChromaDB True Load Balancer Alert: {message}",
                 "timestamp": datetime.now().isoformat()
             }
             requests.post(webhook_url, json=payload, timeout=10)
@@ -170,15 +242,16 @@ class LoadBalancer:
             raise ServiceUnavailable(f"Proxy error: {str(e)}")
 
 # Initialize load balancer
-lb = LoadBalancer()
+lb = TrueLoadBalancer()
 
 @app.route('/health')
 def health_check():
     """Load balancer health check endpoint"""
-    healthy_instances = [inst for inst in lb.instances if inst.is_healthy]
+    healthy_instances = lb.get_healthy_instances()
     
     return jsonify({
         "status": "healthy" if healthy_instances else "unhealthy",
+        "strategy": lb.load_balance_strategy,
         "instances": [
             {
                 "name": inst.name,
@@ -186,6 +259,7 @@ def health_check():
                 "healthy": inst.is_healthy,
                 "priority": inst.priority,
                 "failure_count": inst.failure_count,
+                "request_count": inst.request_count,
                 "last_check": inst.last_check.isoformat()
             }
             for inst in lb.instances
@@ -196,11 +270,16 @@ def health_check():
 @app.route('/status')
 def status():
     """Detailed status endpoint"""
+    healthy_count = len(lb.get_healthy_instances())
+    total_requests = sum(inst.request_count for inst in lb.instances)
+    
     return jsonify({
         "load_balancer": {
+            "strategy": lb.load_balance_strategy,
             "check_interval": lb.check_interval,
             "failure_threshold": lb.failure_threshold,
-            "request_timeout": lb.request_timeout
+            "request_timeout": lb.request_timeout,
+            "total_requests": total_requests
         },
         "instances": [
             {
@@ -209,20 +288,27 @@ def status():
                 "healthy": inst.is_healthy,
                 "priority": inst.priority,
                 "failure_count": inst.failure_count,
+                "request_count": inst.request_count,
+                "request_percentage": (inst.request_count / total_requests * 100) if total_requests > 0 else 0,
                 "last_check": inst.last_check.isoformat(),
                 "last_failure": inst.last_failure.isoformat() if inst.last_failure else None
             }
             for inst in lb.instances
         ],
+        "summary": {
+            "healthy_instances": healthy_count,
+            "total_instances": len(lb.instances),
+            "current_strategy": lb.load_balance_strategy
+        },
         "timestamp": datetime.now().isoformat()
     })
 
 @app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 def proxy(path):
-    """Proxy all requests to healthy ChromaDB instance"""
-    # Get healthy instance
-    target_instance = lb.get_healthy_instance()
+    """Proxy requests using true load balancing"""
+    # Get target instance based on strategy
+    target_instance = lb.get_target_instance(request.method)
     
     if not target_instance:
         logger.error("No healthy ChromaDB instances available")
@@ -230,6 +316,9 @@ def proxy(path):
             "error": "No healthy ChromaDB instances available",
             "timestamp": datetime.now().isoformat()
         }), 503
+    
+    # Track request
+    target_instance.request_count += 1
     
     # Construct full path
     full_path = f"/{path}" if path else ""
@@ -241,12 +330,13 @@ def proxy(path):
             request.method
         )
     except ServiceUnavailable as e:
-        # Try next healthy instance if available
-        remaining_instances = [inst for inst in lb.instances 
-                             if inst.is_healthy and inst != target_instance]
+        # Try another healthy instance if available
+        remaining_instances = [inst for inst in lb.get_healthy_instances() 
+                             if inst != target_instance]
         
         if remaining_instances:
-            backup_instance = max(remaining_instances, key=lambda x: x.priority)
+            backup_instance = remaining_instances[0]  # Use first available
+            backup_instance.request_count += 1
             logger.info(f"Retrying with backup instance: {backup_instance.name}")
             return lb.proxy_request(
                 backup_instance.url,
