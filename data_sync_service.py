@@ -2,15 +2,17 @@
 """
 ChromaDB Data Synchronization Service
 Syncs data from primary to replica instance for true redundancy
+Fixed: Uses direct HTTP requests with proper Accept-Encoding headers to avoid compression issues
 """
 
 import os
 import time
 import logging
 import schedule
-import chromadb
+import requests
+import json
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,91 +23,165 @@ class ChromaDataSync:
         self.replica_url = os.getenv("REPLICA_URL", "https://chroma-replica.onrender.com")
         self.sync_interval = int(os.getenv("SYNC_INTERVAL", "300"))  # 5 minutes
         
-        # Initialize clients
-        self.primary_client = None
-        self.replica_client = None
+        # Ensure URLs don't have trailing slashes
+        self.primary_url = self.primary_url.rstrip('/')
+        self.replica_url = self.replica_url.rstrip('/')
         
-        self.connect_clients()
+        logger.info(f"ChromaDB Sync Service initialized")
+        logger.info(f"Primary: {self.primary_url}")
+        logger.info(f"Replica: {self.replica_url}")
         
-    def connect_clients(self):
-        """Connect to both ChromaDB instances"""
-        try:
-            # Extract host from URL for ChromaDB client
-            primary_host = self.primary_url.replace("https://", "").replace("http://", "")
-            replica_host = self.replica_url.replace("https://", "").replace("http://", "")
-            
-            self.primary_client = chromadb.HttpClient(
-                host=primary_host,
-                port=443 if "https" in self.primary_url else 8000,
-                ssl="https" in self.primary_url
-            )
-            
-            self.replica_client = chromadb.HttpClient(
-                host=replica_host,
-                port=443 if "https" in self.replica_url else 8000,
-                ssl="https" in self.replica_url
-            )
-            
-            logger.info("Connected to both ChromaDB instances")
-            
-        except Exception as e:
-            logger.error(f"Failed to connect to ChromaDB instances: {e}")
-            raise
+    def _make_request(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Make HTTP request with compression-fix headers"""
+        # Apply the same fix that resolved load balancer compression issues
+        headers = kwargs.get('headers', {})
+        headers.update({
+            'Accept-Encoding': '',  # Request uncompressed content
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        })
+        kwargs['headers'] = headers
+        
+        response = requests.request(method, url, **kwargs)
+        response.raise_for_status()
+        return response
 
-    def get_all_collections(self, client) -> List[str]:
+    def get_all_collections(self, base_url: str) -> List[Dict]:
         """Get list of all collections from a ChromaDB instance"""
         try:
-            collections = client.list_collections()
-            return [col.name for col in collections]
+            url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections"
+            response = self._make_request('GET', url)
+            collections = response.json()
+            logger.debug(f"Found {len(collections)} collections at {base_url}")
+            return collections
         except Exception as e:
-            logger.error(f"Failed to list collections: {e}")
+            logger.error(f"Failed to list collections from {base_url}: {e}")
             return []
 
-    def sync_collection(self, collection_name: str) -> bool:
+    def get_collection_data(self, base_url: str, collection_id: str) -> Optional[Dict]:
+        """Get all data from a collection"""
+        try:
+            url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}/get"
+            data = {
+                "include": ["documents", "metadatas", "embeddings"],
+                "limit": 10000  # Large limit to get all data
+            }
+            response = self._make_request('POST', url, json=data)
+            result = response.json()
+            logger.debug(f"Retrieved {len(result.get('ids', []))} documents from collection {collection_id}")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to get collection data from {base_url}/{collection_id}: {e}")
+            return None
+
+    def create_collection(self, base_url: str, collection_name: str) -> Optional[str]:
+        """Create a new collection"""
+        try:
+            url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections"
+            data = {
+                "name": collection_name,
+                "metadata": {}
+            }
+            response = self._make_request('POST', url, json=data)
+            result = response.json()
+            collection_id = result.get('id')
+            logger.info(f"Created collection '{collection_name}' with ID {collection_id}")
+            return collection_id
+        except Exception as e:
+            logger.error(f"Failed to create collection '{collection_name}': {e}")
+            return None
+
+    def clear_collection(self, base_url: str, collection_id: str):
+        """Clear all documents from a collection"""
+        try:
+            # First get all document IDs
+            data = self.get_collection_data(base_url, collection_id)
+            if not data or not data.get('ids'):
+                return
+            
+            # Delete all documents
+            url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}/delete"
+            delete_data = {"ids": data['ids']}
+            self._make_request('POST', url, json=delete_data)
+            logger.info(f"Cleared {len(data['ids'])} documents from collection {collection_id}")
+        except Exception as e:
+            logger.warning(f"Could not clear collection {collection_id}: {e}")
+
+    def add_documents_to_collection(self, base_url: str, collection_id: str, data: Dict):
+        """Add documents to a collection"""
+        try:
+            if not data.get('ids'):
+                return
+                
+            url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}/add"
+            
+            # Prepare data for ChromaDB API
+            add_data = {
+                "ids": data['ids'],
+                "documents": data.get('documents'),
+                "metadatas": data.get('metadatas'),
+                "embeddings": data.get('embeddings')
+            }
+            
+            # Remove None values
+            add_data = {k: v for k, v in add_data.items() if v is not None}
+            
+            self._make_request('POST', url, json=add_data)
+            logger.info(f"Added {len(data['ids'])} documents to collection {collection_id}")
+        except Exception as e:
+            logger.error(f"Failed to add documents to collection {collection_id}: {e}")
+
+    def delete_collection(self, base_url: str, collection_name: str):
+        """Delete a collection by name"""
+        try:
+            url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+            self._make_request('DELETE', url)
+            logger.info(f"Deleted collection '{collection_name}'")
+        except Exception as e:
+            logger.warning(f"Could not delete collection '{collection_name}': {e}")
+
+    def sync_collection(self, primary_collection: Dict, replica_collections: List[Dict]) -> bool:
         """Sync a single collection from primary to replica"""
         try:
-            # Get primary collection
-            primary_collection = self.primary_client.get_collection(collection_name)
+            collection_name = primary_collection['name']
+            collection_id = primary_collection['id']
             
-            # Get all data from primary
-            result = primary_collection.get(include=['documents', 'metadatas', 'embeddings'])
+            logger.info(f"Syncing collection '{collection_name}' ({collection_id})")
             
-            if not result['ids']:
-                logger.info(f"Collection {collection_name} is empty, skipping")
+            # Get all data from primary collection
+            primary_data = self.get_collection_data(self.primary_url, collection_id)
+            if not primary_data:
+                logger.error(f"Could not retrieve data from primary collection '{collection_name}'")
+                return False
+            
+            if not primary_data.get('ids'):
+                logger.info(f"Collection '{collection_name}' is empty, skipping")
                 return True
             
-            # Get or create replica collection
-            try:
-                replica_collection = self.replica_client.get_collection(collection_name)
-            except:
-                # Collection doesn't exist, create it
-                replica_collection = self.replica_client.create_collection(collection_name)
-                logger.info(f"Created collection {collection_name} on replica")
+            # Find or create replica collection
+            replica_collection_id = None
+            for replica_col in replica_collections:
+                if replica_col['name'] == collection_name:
+                    replica_collection_id = replica_col['id']
+                    break
+            
+            if not replica_collection_id:
+                # Create collection on replica
+                replica_collection_id = self.create_collection(self.replica_url, collection_name)
+                if not replica_collection_id:
+                    return False
             
             # Clear replica collection (full sync approach)
-            try:
-                existing_ids = replica_collection.get()['ids']
-                if existing_ids:
-                    replica_collection.delete(ids=existing_ids)
-                    logger.info(f"Cleared {len(existing_ids)} existing documents from replica")
-            except Exception as e:
-                logger.warning(f"Could not clear replica collection: {e}")
+            self.clear_collection(self.replica_url, replica_collection_id)
             
             # Add all documents to replica
-            if result['documents']:
-                replica_collection.add(
-                    ids=result['ids'],
-                    documents=result['documents'],
-                    metadatas=result['metadatas'] if result['metadatas'] else None,
-                    embeddings=result['embeddings'] if result['embeddings'] else None
-                )
-                
-                logger.info(f"Synced {len(result['ids'])} documents to collection {collection_name}")
+            self.add_documents_to_collection(self.replica_url, replica_collection_id, primary_data)
             
+            logger.info(f"Successfully synced collection '{collection_name}' with {len(primary_data['ids'])} documents")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to sync collection {collection_name}: {e}")
+            logger.error(f"Failed to sync collection '{collection_name}': {e}")
             return False
 
     def perform_full_sync(self):
@@ -114,38 +190,38 @@ class ChromaDataSync:
             start_time = time.time()
             logger.info("Starting full data synchronization...")
             
-            # Get all collections from primary
-            primary_collections = self.get_all_collections(self.primary_client)
+            # Get all collections from both instances
+            primary_collections = self.get_all_collections(self.primary_url)
+            replica_collections = self.get_all_collections(self.replica_url)
             
             if not primary_collections:
                 logger.info("No collections found on primary instance")
                 return
             
-            # Sync each collection
+            logger.info(f"Primary has {len(primary_collections)} collections")
+            logger.info(f"Replica has {len(replica_collections)} collections")
+            
+            # Sync each collection from primary to replica
             synced_collections = 0
             total_documents = 0
             
-            for collection_name in primary_collections:
-                if self.sync_collection(collection_name):
+            for primary_collection in primary_collections:
+                if self.sync_collection(primary_collection, replica_collections):
                     synced_collections += 1
                     
                     # Count documents synced
                     try:
-                        replica_collection = self.replica_client.get_collection(collection_name)
-                        doc_count = len(replica_collection.get()['ids'])
-                        total_documents += doc_count
+                        replica_data = self.get_collection_data(self.replica_url, primary_collection['id'])
+                        if replica_data:
+                            total_documents += len(replica_data.get('ids', []))
                     except:
                         pass
             
             # Clean up collections that exist on replica but not on primary
-            replica_collections = self.get_all_collections(self.replica_client)
-            for collection_name in replica_collections:
-                if collection_name not in primary_collections:
-                    try:
-                        self.replica_client.delete_collection(collection_name)
-                        logger.info(f"Deleted orphaned collection {collection_name} from replica")
-                    except Exception as e:
-                        logger.warning(f"Could not delete collection {collection_name}: {e}")
+            primary_names = {col['name'] for col in primary_collections}
+            for replica_collection in replica_collections:
+                if replica_collection['name'] not in primary_names:
+                    self.delete_collection(self.replica_url, replica_collection['name'])
             
             sync_time = time.time() - start_time
             logger.info(f"Sync completed: {synced_collections}/{len(primary_collections)} collections, "
@@ -158,10 +234,10 @@ class ChromaDataSync:
         """Check if both instances are healthy"""
         try:
             # Test primary
-            primary_collections = self.get_all_collections(self.primary_client)
+            primary_collections = self.get_all_collections(self.primary_url)
             
             # Test replica  
-            replica_collections = self.get_all_collections(self.replica_client)
+            replica_collections = self.get_all_collections(self.replica_url)
             
             logger.info(f"Health check: Primary({len(primary_collections)} collections), "
                        f"Replica({len(replica_collections)} collections)")
