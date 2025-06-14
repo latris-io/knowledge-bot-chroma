@@ -279,22 +279,17 @@ class TrueLoadBalancer:
                 
                 # Handle JSON responses properly to avoid binary corruption
                 if response.headers.get('content-type', '').startswith('application/json'):
-                    try:
-                        # Use response.text which properly handles encoding and decompression
-                        # requests library automatically handles gzip/deflate decompression
-                        response_text = response.text
-                        
-                        # Verify it's valid JSON by attempting to parse it
-                        json.loads(response_text)
-                        
-                        # Return clean JSON response with minimal headers
-                        return Response(
-                            response_text,
-                            status=response.status_code,
-                            mimetype='application/json'
-                        )
-                    except (json.JSONDecodeError, ValueError) as e:
-                        logger.warning(f"Failed to parse JSON response: {e}, falling back to raw content")
+                    # Always use response.text for JSON content-type to ensure decompression
+                    # requests library automatically handles gzip/deflate decompression
+                    response_text = response.text
+                    
+                    # Return clean JSON response without trying to validate it
+                    # This avoids any fallback to binary handling
+                    return Response(
+                        response_text,
+                        status=response.status_code,
+                        mimetype='application/json'
+                    )
                 
                 # For non-JSON responses, handle normally with simplified headers  
                 response_headers = {}
