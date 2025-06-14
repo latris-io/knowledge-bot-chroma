@@ -209,12 +209,21 @@ class ChromaDataSync:
                 if self.sync_collection(primary_collection, replica_collections):
                     synced_collections += 1
                     
-                    # Count documents synced
+                    # Count documents synced - find the correct replica collection ID
                     try:
-                        replica_data = self.get_collection_data(self.replica_url, primary_collection['id'])
-                        if replica_data:
-                            total_documents += len(replica_data.get('ids', []))
-                    except:
+                        # Find the replica collection with the same name
+                        replica_collection_id = None
+                        for replica_col in replica_collections:
+                            if replica_col['name'] == primary_collection['name']:
+                                replica_collection_id = replica_col['id']
+                                break
+                        
+                        if replica_collection_id:
+                            replica_data = self.get_collection_data(self.replica_url, replica_collection_id)
+                            if replica_data:
+                                total_documents += len(replica_data.get('ids', []))
+                    except Exception as e:
+                        logger.debug(f"Could not count documents for {primary_collection['name']}: {e}")
                         pass
             
             # Clean up collections that exist on replica but not on primary
