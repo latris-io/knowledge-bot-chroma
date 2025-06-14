@@ -46,9 +46,52 @@ class ChromaDataSync:
         response.raise_for_status()
         return response
 
+    def get_all_databases(self, base_url: str) -> List[Dict]:
+        """Get list of all databases from a ChromaDB instance"""
+        try:
+            url = f"{base_url}/api/v2/tenants/default_tenant/databases"
+            response = self._make_request('GET', url)
+            databases = response.json()
+            logger.debug(f"Found {len(databases)} databases at {base_url}")
+            return databases
+        except Exception as e:
+            logger.error(f"Failed to list databases from {base_url}: {e}")
+            return []
+
+    def create_database(self, base_url: str, database_name: str) -> bool:
+        """Create a database if it doesn't exist"""
+        try:
+            url = f"{base_url}/api/v2/tenants/default_tenant/databases"
+            data = {"name": database_name}
+            response = self._make_request('POST', url, json=data)
+            logger.info(f"Created database '{database_name}' on {base_url}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create database '{database_name}': {e}")
+            return False
+
+    def ensure_database_exists(self, base_url: str, database_name: str = "default_database") -> bool:
+        """Ensure a database exists, create if missing"""
+        databases = self.get_all_databases(base_url)
+        
+        # Check if database already exists
+        for db in databases:
+            if db.get('name') == database_name:
+                logger.debug(f"Database '{database_name}' already exists on {base_url}")
+                return True
+        
+        # Create the database
+        logger.info(f"Database '{database_name}' missing on {base_url}, creating...")
+        return self.create_database(base_url, database_name)
+
     def get_all_collections(self, base_url: str) -> List[Dict]:
         """Get list of all collections from a ChromaDB instance"""
         try:
+            # First ensure the database exists
+            if not self.ensure_database_exists(base_url):
+                logger.error(f"Cannot access collections - database setup failed on {base_url}")
+                return []
+            
             url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections"
             response = self._make_request('GET', url)
             collections = response.json()
