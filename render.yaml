@@ -1,3 +1,7 @@
+# Deploy directly to Knowledge Bot project
+# Add this at the top of render.yaml to specify the project
+project: knowledge-bot
+
 services:
   # Primary ChromaDB instance
   - type: web
