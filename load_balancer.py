@@ -279,15 +279,14 @@ class TrueLoadBalancer:
                 
                 # Handle JSON responses properly to avoid corruption
                 if response.headers.get('content-type', '').startswith('application/json'):
-                    # For JSON responses, ensure we have clean JSON
+                    # For JSON responses, use response.text to ensure proper decoding
                     try:
-                        # Parse and re-serialize to ensure clean JSON
-                        json_data = response.json()
-                        clean_json = json.dumps(json_data, ensure_ascii=False)
+                        # Verify it's valid JSON by parsing it
+                        json.loads(response.text)
                         
-                        # Return clean JSON response
+                        # Return the properly decoded text response
                         return Response(
-                            clean_json,
+                            response.text,
                             status=response.status_code,
                             mimetype='application/json'
                         )
