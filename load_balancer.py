@@ -130,9 +130,19 @@ class TrueLoadBalancer:
         try:
             url = f"{target_url}{path}"
             
-            # Simple debugging for the problematic endpoint
-            if "collections/" in path and "/get" in path:
-                logger.info(f"🔍 Processing collection GET request: {method} {path}")
+            # Enhanced debugging for the problematic endpoint
+            is_collection_get = "collections/" in path and "/get" in path
+            if is_collection_get:
+                logger.info(f"🔍 DEBUG - Collection GET endpoint detected")
+                logger.info(f"🔍 DEBUG - Method: {method}")
+                logger.info(f"🔍 DEBUG - Path: {path}")
+                logger.info(f"🔍 DEBUG - Target URL: {url}")
+                logger.info(f"🔍 DEBUG - Request headers: {dict(request.headers)}")
+                logger.info(f"🔍 DEBUG - Request is_json: {request.is_json}")
+                if request.is_json:
+                    logger.info(f"🔍 DEBUG - Request JSON body: {request.json}")
+                elif request.data:
+                    logger.info(f"🔍 DEBUG - Request data: {request.data}")
             
             if method == 'GET':
                 # Add query parameters
@@ -142,6 +152,13 @@ class TrueLoadBalancer:
                 
                 # Simple GET request
                 response = requests.get(url, timeout=self.request_timeout)
+                
+                if is_collection_get:
+                    logger.info(f"🔍 DEBUG - GET Response status: {response.status_code}")
+                    logger.info(f"🔍 DEBUG - GET Response headers: {dict(response.headers)}")
+                    logger.info(f"🔍 DEBUG - GET Response content type: {response.headers.get('content-type')}")
+                    logger.info(f"🔍 DEBUG - GET Response encoding: {response.encoding}")
+                    logger.info(f"🔍 DEBUG - GET Response text (first 500 chars): {response.text[:500]}")
                 
                 return Response(
                     response.text,
@@ -170,20 +187,45 @@ class TrueLoadBalancer:
                 if request.args:
                     req_params["params"] = request.args
                 
+                if is_collection_get:
+                    logger.info(f"🔍 DEBUG - Request params being sent to ChromaDB: {req_params}")
+                
                 # Make the request
                 response = requests.request(method, url, **req_params)
                 
-                # Simple debugging for the problematic endpoint
-                if "collections/" in path and "/get" in path:
-                    logger.info(f"🔍 ChromaDB response: {response.status_code}, content-type: {response.headers.get('content-type')}")
-                    logger.info(f"🔍 Response text (first 200 chars): {response.text[:200]}")
+                # Enhanced debugging for the problematic endpoint
+                if is_collection_get:
+                    logger.info(f"🔍 DEBUG - ChromaDB response status: {response.status_code}")
+                    logger.info(f"🔍 DEBUG - ChromaDB response headers: {dict(response.headers)}")
+                    logger.info(f"🔍 DEBUG - ChromaDB response content-type: {response.headers.get('content-type')}")
+                    logger.info(f"🔍 DEBUG - ChromaDB response content-encoding: {response.headers.get('content-encoding')}")
+                    logger.info(f"🔍 DEBUG - ChromaDB response encoding: {response.encoding}")
+                    logger.info(f"🔍 DEBUG - ChromaDB response apparent_encoding: {response.apparent_encoding}")
+                    logger.info(f"🔍 DEBUG - ChromaDB response.content length: {len(response.content)}")
+                    logger.info(f"🔍 DEBUG - ChromaDB response.text length: {len(response.text)}")
+                    logger.info(f"🔍 DEBUG - ChromaDB response.content (first 100 bytes as hex): {response.content[:100].hex()}")
+                    logger.info(f"🔍 DEBUG - ChromaDB response.text (first 500 chars): {response.text[:500]}")
+                    
+                    # Try to detect if content is compressed
+                    if response.content[:2] == b'\x1f\x8b':
+                        logger.info(f"🔍 DEBUG - DETECTED GZIP COMPRESSION in response.content!")
+                    if response.content[:2] == b'\x78\x9c':
+                        logger.info(f"🔍 DEBUG - DETECTED DEFLATE COMPRESSION in response.content!")
                 
                 # Return response using response.text to handle any compression automatically
-                return Response(
+                final_response = Response(
                     response.text,
                     status=response.status_code,
                     mimetype='application/json' if 'json' in response.headers.get('content-type', '') else None
                 )
+                
+                if is_collection_get:
+                    logger.info(f"🔍 DEBUG - Final Flask response status: {final_response.status_code}")
+                    logger.info(f"🔍 DEBUG - Final Flask response mimetype: {final_response.mimetype}")
+                    logger.info(f"🔍 DEBUG - Final Flask response data length: {len(final_response.get_data())}")
+                    logger.info(f"🔍 DEBUG - Final Flask response data (first 500 chars): {final_response.get_data(as_text=True)[:500]}")
+                
+                return final_response
             
         except requests.exceptions.Timeout:
             logger.error(f"Request timeout to {target_url}")
