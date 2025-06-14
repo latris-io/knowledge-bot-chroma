@@ -1,0 +1,102 @@
+services:
+  # Primary ChromaDB instance
+  - type: web
+    name: chroma-primary
+    env: docker
+    dockerfilePath: ./Dockerfile
+    region: oregon
+    plan: starter
+    disk:
+      name: chroma-primary-data
+      mountPath: /chroma/chroma
+      sizeGB: 10
+    healthCheckPath: /api/v1/heartbeat
+    envVars:
+      - key: CHROMA_SERVER_HOST
+        value: 0.0.0.0
+      - key: CHROMA_SERVER_HTTP_PORT
+        value: 8000
+      - key: CHROMA_PERSIST_DIRECTORY
+        value: /chroma/chroma
+      - key: INSTANCE_ROLE
+        value: primary
+      - key: INSTANCE_PRIORITY
+        value: 100
+
+  # Replica ChromaDB instance
+  - type: web
+    name: chroma-replica
+    env: docker
+    dockerfilePath: ./Dockerfile
+    region: oregon
+    plan: starter
+    disk:
+      name: chroma-replica-data
+      mountPath: /chroma/chroma
+      sizeGB: 10
+    healthCheckPath: /api/v1/heartbeat
+    envVars:
+      - key: CHROMA_SERVER_HOST
+        value: 0.0.0.0
+      - key: CHROMA_SERVER_HTTP_PORT
+        value: 8000
+      - key: CHROMA_PERSIST_DIRECTORY
+        value: /chroma/chroma
+      - key: INSTANCE_ROLE
+        value: replica
+      - key: INSTANCE_PRIORITY
+        value: 80
+
+  # Load Balancer / Failover Controller
+  - type: web
+    name: chroma-load-balancer
+    env: docker
+    dockerfilePath: ./Dockerfile.loadbalancer
+    region: oregon
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: PRIMARY_URL
+        value: https://chroma-primary.onrender.com
+      - key: REPLICA_URL
+        value: https://chroma-replica.onrender.com
+      - key: CHECK_INTERVAL
+        value: 30
+      - key: FAILURE_THRESHOLD
+        value: 3
+      - key: NOTIFICATION_WEBHOOK
+        fromService:
+          type: web
+          name: chroma-load-balancer
+          envVarKey: SLACK_WEBHOOK_URL
+
+  # Background worker for health monitoring and failover
+  - type: worker
+    name: chroma-monitor
+    env: docker
+    dockerfilePath: ./Dockerfile.monitor
+    region: oregon
+    plan: starter
+    envVars:
+      - key: PRIMARY_URL
+        value: https://chroma-primary.onrender.com
+      - key: REPLICA_URL
+        value: https://chroma-replica.onrender.com
+      - key: LOAD_BALANCER_URL
+        value: https://chroma-load-balancer.onrender.com
+      - key: CHECK_INTERVAL
+        value: 30
+      - key: FAILURE_THRESHOLD
+        value: 3
+      - key: RENDER_API_KEY
+        sync: false
+      - key: NOTIFICATION_WEBHOOK
+        sync: false
+
+databases:
+  # Optional: PostgreSQL for storing failover state and metrics
+  - name: chroma-metadata
+    databaseName: chroma_ha
+    user: chroma_user
+    region: oregon
+    plan: free 
