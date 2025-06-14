@@ -11,6 +11,7 @@ import chromadb
 import argparse
 import logging
 from datetime import datetime
+from safe_test_collections import create_production_safe_test_client
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,13 +21,12 @@ class ChromaDBTestSuite:
     def __init__(self, load_balancer_url: str):
         self.load_balancer_url = load_balancer_url
         self.test_results = []
-        self.test_data_cleanup = []
         
-        # Initialize client
-        host = load_balancer_url.replace("https://", "").replace("http://", "")
-        ssl = load_balancer_url.startswith("https://")
-        port = 443 if ssl else 8000
-        self.client = chromadb.HttpClient(host=host, port=port, ssl=ssl)
+        # Initialize production-safe client and collection manager
+        self.client, self.collection_manager = create_production_safe_test_client(load_balancer_url)
+        
+        logger.info("🔒 Production-safe test suite initialized")
+        logger.info(f"🧪 Test session ID: {self.collection_manager.session_id}")
         
     def log_test_result(self, test_name: str, passed: bool, details: str = ""):
         """Log test result"""
@@ -77,12 +77,9 @@ class ChromaDBTestSuite:
         """Test basic ChromaDB operations"""
         logger.info("📊 Testing Basic Operations...")
         
-        test_collection_name = f"test_basic_{int(time.time())}"
-        self.test_data_cleanup.append(test_collection_name)
-        
         try:
-            # Create collection
-            collection = self.client.get_or_create_collection(test_collection_name)
+            # Create production-safe test collection
+            collection = self.collection_manager.create_test_collection("basic_operations")
             
             # Try to add documents with automatic embeddings first
             try:
@@ -188,28 +185,18 @@ class ChromaDBTestSuite:
         except Exception as e:
             self.log_test_result("Failover Simulation", False, f"Test failed: {str(e)}")
     
-    def cleanup_test_data(self):
-        """Clean up test collections"""
-        logger.info("🧹 Cleaning up test data...")
-        
-        for collection_name in self.test_data_cleanup:
-            try:
-                self.client.delete_collection(collection_name)
-                logger.info(f"Deleted test collection: {collection_name}")
-            except Exception as e:
-                logger.warning(f"Could not delete {collection_name}: {e}")
-    
     def run_all_tests(self):
-        """Run all tests"""
+        """Run all tests with automatic cleanup"""
         logger.info("🧪 Starting ChromaDB HA Test Suite...")
+        logger.info(f"🔒 Using production-safe collections with prefix: {self.collection_manager.TEST_PREFIX}")
         
-        self.test_basic_connectivity()
-        self.test_load_balancer_health()
-        self.test_basic_operations()
-        self.test_load_distribution()
-        self.test_failover_simulation()
-        
-        self.cleanup_test_data()
+        # Use context manager for automatic cleanup
+        with self.collection_manager:
+            self.test_basic_connectivity()
+            self.test_load_balancer_health()
+            self.test_basic_operations()
+            self.test_load_distribution()
+            self.test_failover_simulation()
         
         # Generate report
         total_tests = len(self.test_results)

@@ -14,6 +14,7 @@ import statistics
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
+from safe_test_collections import create_production_safe_test_client
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,13 +24,12 @@ class AdvancedTestSuite:
     def __init__(self, load_balancer_url: str):
         self.load_balancer_url = load_balancer_url
         self.test_results = []
-        self.test_data_cleanup = []
         
-        # Initialize client
-        host = load_balancer_url.replace("https://", "").replace("http://", "")
-        ssl = load_balancer_url.startswith("https://")
-        port = 443 if ssl else 8000
-        self.client = chromadb.HttpClient(host=host, port=port, ssl=ssl)
+        # Initialize production-safe client and collection manager
+        self.client, self.collection_manager = create_production_safe_test_client(load_balancer_url)
+        
+        logger.info("🔒 Production-safe advanced test suite initialized")
+        logger.info(f"🧪 Test session ID: {self.collection_manager.session_id}")
     
     def log_test_result(self, test_name: str, passed: bool, details: str = "", metrics: dict = None):
         """Log test result with optional performance metrics"""
@@ -53,11 +53,9 @@ class AdvancedTestSuite:
         """Test write performance"""
         logger.info(f"📝 Testing Write Performance ({doc_count} documents)...")
         
-        test_collection_name = f"test_write_perf_{int(time.time())}"
-        self.test_data_cleanup.append(test_collection_name)
-        
         try:
-            collection = self.client.get_or_create_collection(test_collection_name)
+            # Create production-safe test collection
+            collection = self.collection_manager.create_test_collection("write_performance")
             
             # Generate test documents
             docs = [f"Performance test document {i} about testing" for i in range(doc_count)]
@@ -108,8 +106,9 @@ class AdvancedTestSuite:
         """Test concurrent user access"""
         logger.info(f"👥 Testing Concurrent Users ({user_count} users, {duration_seconds}s)...")
         
-        test_collection_name = f"test_concurrent_{int(time.time())}"
-        self.test_data_cleanup.append(test_collection_name)
+        # Create production-safe test collection
+        test_collection = self.collection_manager.create_test_collection("concurrent_users")
+        test_collection_name = test_collection.name
         
         def user_simulation(user_id: int, duration: int) -> dict:
             """Simulate a user for specified duration"""
@@ -119,7 +118,8 @@ class AdvancedTestSuite:
                     port=443 if self.load_balancer_url.startswith("https://") else 8000,
                     ssl=self.load_balancer_url.startswith("https://")
                 )
-                collection = client.get_or_create_collection(test_collection_name)
+                # Connect to the existing test collection
+                collection = client.get_collection(test_collection_name)
                 
                 start_time = time.time()
                 operations = {"writes": 0, "queries": 0, "errors": 0}
@@ -209,32 +209,21 @@ class AdvancedTestSuite:
         except Exception as e:
             self.log_test_result("Concurrent Users", False, f"Test failed: {str(e)}")
     
-    def cleanup_test_data(self):
-        """Clean up all test collections"""
-        logger.info("🧹 Cleaning up test data...")
-        
-        for collection_name in self.test_data_cleanup:
-            try:
-                self.client.delete_collection(collection_name)
-                logger.info(f"Deleted test collection: {collection_name}")
-            except Exception as e:
-                logger.warning(f"Could not delete collection {collection_name}: {e}")
-    
     def run_performance_tests(self, config: dict = None):
-        """Run comprehensive performance tests"""
+        """Run comprehensive performance tests with automatic cleanup"""
         logger.info("🚀 Starting Advanced Performance Test Suite...")
+        logger.info(f"🔒 Using production-safe collections with prefix: {self.collection_manager.TEST_PREFIX}")
         
         config = config or {}
         
-        # Performance tests
-        self.test_write_performance(config.get('write_doc_count', 50))
-        self.test_concurrent_users(
-            config.get('concurrent_users', 3),
-            config.get('duration_seconds', 20)
-        )
-        
-        # Cleanup
-        self.cleanup_test_data()
+        # Use context manager for automatic cleanup
+        with self.collection_manager:
+            # Performance tests
+            self.test_write_performance(config.get('write_doc_count', 50))
+            self.test_concurrent_users(
+                config.get('concurrent_users', 3),
+                config.get('duration_seconds', 20)
+            )
         
         # Generate report
         return self.generate_performance_report()

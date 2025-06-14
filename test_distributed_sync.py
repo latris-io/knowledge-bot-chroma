@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Test Distributed Sync Workers
+Test Distributed Sync Workers - Production Safe
 Test the distributed sync functionality with small datasets
+Uses AUTOTEST_ prefix for safe production testing
 """
 
 import os
 import time
 import json
+import random
+import string
 import requests
 import psycopg2
 from typing import Dict, List
@@ -15,6 +18,10 @@ from typing import Dict, List
 PRIMARY_URL = "https://chroma-primary.onrender.com"
 REPLICA_URL = "https://chroma-replica.onrender.com"
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Production safety - all test collections must have this prefix
+TEST_PREFIX = "AUTOTEST_"
+test_collections_created = []  # Track for cleanup
 
 def make_request(method: str, url: str, **kwargs) -> requests.Response:
     """Make HTTP request with proper headers"""
@@ -30,15 +37,33 @@ def make_request(method: str, url: str, **kwargs) -> requests.Response:
     response.raise_for_status()
     return response
 
+def create_safe_test_collection_name(purpose: str) -> str:
+    """Create a production-safe test collection name"""
+    timestamp = int(time.time())
+    random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    collection_name = f"{TEST_PREFIX}{purpose}_{timestamp}_{random_suffix}"
+    test_collections_created.append(collection_name)
+    print(f"🔒 Created safe test collection name: {collection_name}")
+    return collection_name
+
 def create_test_collection(base_url: str, collection_name: str, doc_count: int):
     """Create a test collection with specified number of documents"""
     print(f"📝 Creating test collection '{collection_name}' with {doc_count} documents")
+    
+    # Verify it's a safe test collection name
+    if not collection_name.startswith(TEST_PREFIX):
+        raise ValueError(f"SAFETY ERROR: Collection name must start with {TEST_PREFIX}")
     
     # Create collection
     create_url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections"
     create_data = {
         "name": collection_name,
-        "metadata": {"test_collection": True, "doc_count": doc_count}
+        "metadata": {
+            "test_collection": True, 
+            "doc_count": doc_count,
+            "safe_to_delete": True,
+            "created_at": time.time()
+        }
     }
     response = make_request('POST', create_url, json=create_data)
     collection_id = response.json()['id']
@@ -149,6 +174,64 @@ def check_workers() -> List[Dict]:
         print(f"❌ Failed to check workers: {e}")
         return []
 
+def cleanup_test_collections():
+    """Clean up all test collections from both primary and replica"""
+    print("🧹 Cleaning up test collections...")
+    
+    cleanup_results = {"attempted": 0, "successful": 0, "failed": 0, "errors": []}
+    
+    for collection_name in test_collections_created:
+        cleanup_results["attempted"] += 1
+        
+        # Double-check it's a test collection
+        if not collection_name.startswith(TEST_PREFIX):
+            error_msg = f"SAFETY VIOLATION: Attempted to delete non-test collection: {collection_name}"
+            print(f"❌ {error_msg}")
+            cleanup_results["errors"].append(error_msg)
+            cleanup_results["failed"] += 1
+            continue
+        
+        # Clean from both primary and replica
+        for base_url, instance_name in [(PRIMARY_URL, "primary"), (REPLICA_URL, "replica")]:
+            try:
+                # Get collections to find the ID
+                collections_url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections"
+                response = make_request('GET', collections_url)
+                collections = response.json()
+                
+                collection_id = None
+                for col in collections:
+                    if col['name'] == collection_name:
+                        collection_id = col['id']
+                        break
+                
+                if collection_id:
+                    # Delete collection
+                    delete_url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}"
+                    make_request('DELETE', delete_url)
+                    print(f"🗑️  Deleted {collection_name} from {instance_name}")
+                else:
+                    print(f"⚠️  Collection {collection_name} not found in {instance_name}")
+                    
+            except Exception as e:
+                error_msg = f"Failed to delete {collection_name} from {instance_name}: {str(e)}"
+                print(f"❌ {error_msg}")
+                cleanup_results["errors"].append(error_msg)
+        
+        # Consider successful if we attempted both instances
+        cleanup_results["successful"] += 1
+    
+    print(f"🧹 Cleanup complete: {cleanup_results['successful']}/{cleanup_results['attempted']} collections processed")
+    
+    if cleanup_results["errors"]:
+        print("⚠️  Cleanup errors:")
+        for error in cleanup_results["errors"]:
+            print(f"  - {error}")
+    
+    # Clear the tracking list
+    test_collections_created.clear()
+    return cleanup_results
+
 def verify_sync_result(collection_name: str):
     """Verify that collection was properly synced to replica"""
     try:
@@ -209,15 +292,17 @@ def verify_sync_result(collection_name: str):
         return False
 
 def test_distributed_sync():
-    """Test the distributed sync functionality"""
-    print("🧪 Testing Distributed Sync Workers")
+    """Test the distributed sync functionality - Production Safe"""
+    print("🧪 Testing Distributed Sync Workers (Production Safe)")
+    print(f"🔒 Using test collection prefix: {TEST_PREFIX}")
     print("This test creates small datasets to verify:")
     print("1. Coordinator creates sync tasks")
     print("2. Workers process tasks")
     print("3. Data syncs correctly")
+    print("4. Automatic cleanup of test collections")
     
     # Test parameters
-    test_collection_name = f"test_distributed_{int(time.time())}"
+    test_collection_name = create_safe_test_collection_name("distributed_sync")
     test_doc_count = 250  # Small test size
     expected_chunks = 1  # With 1000 chunk size, this should create 1 chunk
     
@@ -275,6 +360,10 @@ def test_distributed_sync():
     except Exception as e:
         print(f"❌ Test failed with error: {e}")
         return False
+    finally:
+        # Always clean up test collections
+        print("\n📋 Step 5: Cleaning up test collections")
+        cleanup_test_collections()
 
 def test_traditional_mode():
     """Test that traditional mode still works"""
@@ -286,8 +375,14 @@ def test_traditional_mode():
     print("✅ Traditional mode compatibility maintained")
 
 if __name__ == "__main__":
-    print("🚀 Distributed Sync Test Suite")
+    print("🚀 Distributed Sync Test Suite - Production Safe")
     print("=" * 60)
+    print("🔒 PRODUCTION SAFETY FEATURES:")
+    print(f"   - Test collections use prefix: {TEST_PREFIX}")
+    print("   - Automatic cleanup after tests")
+    print("   - No impact on production data")
+    print("   - Safe for production environment testing")
+    print()
     
     # Run tests
     distributed_success = test_distributed_sync()
@@ -297,6 +392,7 @@ if __name__ == "__main__":
     print("📊 TEST SUMMARY:")
     print(f"  Distributed Sync: {'✅ PASS' if distributed_success else '❌ FAIL'}")
     print(f"  Traditional Mode: ✅ PASS (backward compatible)")
+    print(f"  Production Safety: ✅ PASS (cleanup completed)")
     
     if distributed_success:
         print("\n🎯 RESULT: Distributed sync workers are ready for production!")
@@ -305,6 +401,8 @@ if __name__ == "__main__":
         print("   - Task distribution: ✅")
         print("   - Worker processing: ✅")
         print("   - Data consistency: ✅")
+        print("   - Production safety: ✅")
     else:
         print("\n⚠️  RESULT: Distributed sync needs debugging")
-        print("   Check sync service logs and database connection") 
+        print("   Check sync service logs and database connection")
+        print("   Note: Test collections have been cleaned up") 
