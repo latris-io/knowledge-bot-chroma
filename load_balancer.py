@@ -207,10 +207,12 @@ class RobustLoadBalancer:
                 
                 # Debug logging for collection endpoints
                 if is_collection_endpoint:
+                    logger.info(f"🔧 SENT HEADERS: {headers}")
                     content_encoding = response.headers.get('content-encoding', 'none')
                     logger.info(f"🔧 Response: status={response.status_code}, encoding={content_encoding}, content-type={response.headers.get('content-type')}")
                     logger.info(f"🔧 Raw response.text length: {len(response.text)}")
                     logger.info(f"🔧 Raw response.content length: {len(response.content)}")
+                    logger.info(f"🔧 First 50 chars of response.text: {response.text[:50]}")
                 
                 # Since we requested identity encoding, response should be uncompressed
                 response_text = response.text
