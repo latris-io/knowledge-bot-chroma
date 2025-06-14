@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-ChromaDB True Load Balancer for Render - Simplified Version
+ChromaDB High Availability Load Balancer - Robust Version
+Handles Brotli compression properly for clean JSON responses
 """
 
 import os
@@ -8,7 +9,7 @@ import time
 import requests
 import logging
 import json
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, make_response
 from werkzeug.exceptions import ServiceUnavailable
 import threading
 import random
@@ -33,7 +34,7 @@ class ChromaInstance:
         self.last_failure = None
         self.request_count = 0
 
-class TrueLoadBalancer:
+class RobustLoadBalancer:
     def __init__(self):
         self.instances = [
             ChromaInstance(
@@ -42,7 +43,7 @@ class TrueLoadBalancer:
                 priority=100
             ),
             ChromaInstance(
-                name="replica",
+                name="replica", 
                 url=os.getenv("REPLICA_URL", "https://chroma-replica.onrender.com"),
                 priority=80
             )
@@ -59,7 +60,7 @@ class TrueLoadBalancer:
         self.health_thread = threading.Thread(target=self.health_monitor_loop, daemon=True)
         self.health_thread.start()
         
-        logger.info(f"Load balancer initialized with strategy: {self.load_balance_strategy}")
+        logger.info(f"Robust load balancer initialized with strategy: {self.load_balance_strategy}")
 
     def get_healthy_instances(self) -> List[ChromaInstance]:
         """Get all healthy instances"""
@@ -126,23 +127,14 @@ class TrueLoadBalancer:
                 time.sleep(self.check_interval)
 
     def proxy_request(self, target_url: str, path: str, method: str) -> Response:
-        """Proxy request to target ChromaDB instance"""
+        """Proxy request to target ChromaDB instance with proper Brotli/compression handling"""
         try:
             url = f"{target_url}{path}"
             
-            # Enhanced debugging for the problematic endpoint
-            is_collection_get = "collections/" in path and "/get" in path
-            if is_collection_get:
-                logger.info(f"🔍 DEBUG - Collection GET endpoint detected")
-                logger.info(f"🔍 DEBUG - Method: {method}")
-                logger.info(f"🔍 DEBUG - Path: {path}")
-                logger.info(f"🔍 DEBUG - Target URL: {url}")
-                logger.info(f"🔍 DEBUG - Request headers: {dict(request.headers)}")
-                logger.info(f"🔍 DEBUG - Request is_json: {request.is_json}")
-                if request.is_json:
-                    logger.info(f"🔍 DEBUG - Request JSON body: {request.json}")
-                elif request.data:
-                    logger.info(f"🔍 DEBUG - Request data: {request.data}")
+            # Log for collection endpoints (the problematic ones)
+            is_collection_endpoint = "/collections/" in path
+            if is_collection_endpoint:
+                logger.info(f"🔧 Proxying {method} {path} to {target_url}")
             
             if method == 'GET':
                 # Add query parameters
@@ -153,18 +145,10 @@ class TrueLoadBalancer:
                 # Simple GET request
                 response = requests.get(url, timeout=self.request_timeout)
                 
-                if is_collection_get:
-                    logger.info(f"🔍 DEBUG - GET Response status: {response.status_code}")
-                    logger.info(f"🔍 DEBUG - GET Response headers: {dict(response.headers)}")
-                    logger.info(f"🔍 DEBUG - GET Response content type: {response.headers.get('content-type')}")
-                    logger.info(f"🔍 DEBUG - GET Response encoding: {response.encoding}")
-                    logger.info(f"🔍 DEBUG - GET Response text (first 500 chars): {response.text[:500]}")
-                
-                return Response(
-                    response.text,
-                    status=response.status_code,
-                    mimetype='application/json' if 'json' in response.headers.get('content-type', '') else None
-                )
+                # Return response.text which automatically handles decompression
+                return make_response(response.text, response.status_code, {
+                    'Content-Type': response.headers.get('content-type', 'application/json')
+                })
                 
             else:
                 # Handle POST/PUT/DELETE/PATCH requests
@@ -187,53 +171,35 @@ class TrueLoadBalancer:
                 if request.args:
                     req_params["params"] = request.args
                 
-                if is_collection_get:
-                    logger.info(f"🔍 DEBUG - Request params being sent to ChromaDB: {req_params}")
-                
                 # Make the request
                 response = requests.request(method, url, **req_params)
                 
-                # Enhanced debugging for the problematic endpoint
-                if is_collection_get:
-                    logger.info(f"🔍 DEBUG - ChromaDB response status: {response.status_code}")
-                    logger.info(f"🔍 DEBUG - ChromaDB response headers: {dict(response.headers)}")
-                    logger.info(f"🔍 DEBUG - ChromaDB response content-type: {response.headers.get('content-type')}")
-                    logger.info(f"🔍 DEBUG - ChromaDB response content-encoding: {response.headers.get('content-encoding')}")
-                    logger.info(f"🔍 DEBUG - ChromaDB response.text length: {len(response.text)}")
-                    logger.info(f"🔍 DEBUG - ChromaDB response.text (first 500 chars): {response.text[:500]}")
+                # Debug logging for collection endpoints
+                if is_collection_endpoint:
+                    content_encoding = response.headers.get('content-encoding', 'none')
+                    logger.info(f"🔧 Response: status={response.status_code}, encoding={content_encoding}, content-type={response.headers.get('content-type')}")
+                    logger.info(f"🔧 Response text length: {len(response.text)}")
                 
-                # Handle Brotli, gzip, and deflate compression properly
-                # The requests library should automatically decompress when we access .text
-                content_encoding = response.headers.get('content-encoding', '').lower()
-                
-                if content_encoding in ['br', 'gzip', 'deflate']:
-                    logger.info(f"🔍 DEBUG - Detected {content_encoding} compression, using response.text for automatic decompression")
-                    response_content = response.text  # requests automatically decompresses
-                else:
-                    response_content = response.text
+                # Handle compressed responses properly
+                # The requests library automatically decompresses when we access .text
+                response_text = response.text
                 
                 # Create clean response without compression headers
-                final_response = Response(
-                    response_content,
-                    status=response.status_code,
-                    mimetype='application/json' if 'json' in response.headers.get('content-type', '') else None
-                )
+                clean_headers = {
+                    'Content-Type': response.headers.get('content-type', 'application/json')
+                }
                 
-                # Don't forward compression-related headers to avoid client confusion
-                # The client will receive uncompressed JSON
-                
-                if is_collection_get:
-                    logger.info(f"🔍 DEBUG - Final response content length: {len(response_content)}")
-                    logger.info(f"🔍 DEBUG - Final response (first 200 chars): {response_content[:200]}")
-                    
-                    # Verify it's valid JSON
+                if is_collection_endpoint:
+                    logger.info(f"🔧 Returning clean response, length: {len(response_text)}")
+                    # Verify it's valid JSON for debugging
                     try:
-                        json.loads(response_content)
-                        logger.info(f"🔍 DEBUG - ✅ Final response is valid JSON")
-                    except json.JSONDecodeError as e:
-                        logger.error(f"🔍 DEBUG - ❌ Final response is NOT valid JSON: {e}")
+                        if response.headers.get('content-type', '').startswith('application/json'):
+                            json.loads(response_text)
+                            logger.info("🔧 ✅ Response is valid JSON")
+                    except json.JSONDecodeError:
+                        logger.warning("🔧 ⚠️ Response is not valid JSON")
                 
-                return final_response
+                return make_response(response_text, response.status_code, clean_headers)
             
         except requests.exceptions.Timeout:
             logger.error(f"Request timeout to {target_url}")
@@ -243,7 +209,7 @@ class TrueLoadBalancer:
             raise ServiceUnavailable(f"Proxy error: {str(e)}")
 
 # Initialize load balancer
-lb = TrueLoadBalancer()
+lb = RobustLoadBalancer()
 
 @app.route('/health')
 def health_check():
@@ -307,7 +273,7 @@ def status():
 @app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 def proxy(path):
-    """Proxy requests using true load balancing"""
+    """Proxy requests using robust load balancing with proper compression handling"""
     target_instance = lb.get_target_instance(request.method)
     
     if not target_instance:
