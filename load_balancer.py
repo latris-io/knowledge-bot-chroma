@@ -219,11 +219,17 @@ class TrueLoadBalancer:
             # Copy important headers but exclude problematic ones
             for key, value in request.headers.items():
                 lower_key = key.lower()
-                if lower_key not in ['host', 'content-length', 'connection', 'upgrade-insecure-requests']:
-                    headers[key] = value
+                # Be more restrictive about which headers to forward for GET requests
+                if method == 'GET':
+                    if lower_key in ['authorization', 'accept', 'user-agent', 'x-forwarded-for', 'x-real-ip']:
+                        headers[key] = value
+                else:
+                    # For non-GET requests, forward most headers
+                    if lower_key not in ['host', 'content-length', 'connection', 'upgrade-insecure-requests']:
+                        headers[key] = value
             
-            # Ensure proper Content-Type only for requests with body content
-            if method in ['POST', 'PUT', 'PATCH'] and request.data and 'content-type' not in [k.lower() for k in headers.keys()]:
+            # Only add Content-Type for requests that actually have body content
+            if method in ['POST', 'PUT', 'PATCH'] and (request.data or request.json) and 'content-type' not in [k.lower() for k in headers.keys()]:
                 headers['Content-Type'] = 'application/json'
             
             req_params["headers"] = headers
