@@ -455,8 +455,6 @@ class ProductionSyncService:
             logger.error(f"❌ Failed to get collections from {base_url}: {e}")
             return []
 
-
-
     def calculate_optimal_batch_size(self, collection_id: str, estimated_total: int) -> int:
         """Calculate optimal batch size based on current memory usage"""
         current_memory = psutil.virtual_memory()
@@ -629,6 +627,80 @@ class ProductionSyncService:
         except Exception as e:
             logger.error(f"Failed to update collection state: {e}")
     
+    def sync_deletions(self):
+        """Sync deletions from primary to replica - remove collections that don't exist on primary"""
+        try:
+            logger.info("🗑️ Starting deletion sync...")
+            
+            # Get collections from both instances
+            primary_collections = self.get_all_collections(self.primary_url)
+            replica_collections = self.get_all_collections(self.replica_url)
+            
+            if not replica_collections:
+                logger.info("ℹ️ No collections on replica to check for deletion")
+                return {'deleted': 0, 'errors': []}
+            
+            # Create set of primary collection names for fast lookup
+            primary_names = {col['name'] for col in primary_collections}
+            
+            deleted_count = 0
+            deletion_errors = []
+            
+            # Find collections on replica that don't exist on primary
+            for replica_col in replica_collections:
+                collection_name = replica_col['name']
+                
+                # Skip if collection exists on primary
+                if collection_name in primary_names:
+                    continue
+                
+                # Safety check: Only auto-delete test collections to prevent accidents
+                if not collection_name.startswith('AUTOTEST_'):
+                    logger.warning(f"⚠️ Found orphaned non-test collection on replica: {collection_name} (manual review needed)")
+                    continue
+                
+                try:
+                    logger.info(f"🗑️ Deleting orphaned collection from replica: {collection_name}")
+                    
+                    # Delete from replica
+                    delete_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+                    self._make_request('DELETE', delete_url)
+                    
+                    deleted_count += 1
+                    logger.info(f"✅ Deleted orphaned collection: {collection_name}")
+                    
+                    # Small delay to avoid overwhelming the server
+                    time.sleep(0.2)
+                    
+                except Exception as e:
+                    error_msg = f"Failed to delete {collection_name}: {str(e)}"
+                    logger.error(f"❌ {error_msg}")
+                    deletion_errors.append(error_msg)
+            
+            # Log summary
+            if deleted_count > 0:
+                logger.info(f"🗑️ Deletion sync complete: {deleted_count} orphaned collections removed")
+                
+                # Send Slack notification for significant deletions
+                if deleted_count > 5:
+                    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+                    if webhook_url:
+                        try:
+                            payload = {
+                                "text": f"🗑️ ChromaDB Sync: Cleaned up {deleted_count} orphaned test collections from replica"
+                            }
+                            requests.post(webhook_url, json=payload, timeout=10)
+                        except:
+                            pass  # Don't fail sync for notification issues
+            else:
+                logger.info("✅ No orphaned collections found - replica in sync")
+            
+            return {'deleted': deleted_count, 'errors': deletion_errors}
+            
+        except Exception as e:
+            logger.error(f"❌ Deletion sync failed: {e}")
+            return {'deleted': 0, 'errors': [str(e)]}
+
     def perform_production_sync(self):
         """Perform full production sync with monitoring and reporting"""
         try:
@@ -640,6 +712,9 @@ class ProductionSyncService:
             # Get collections from both instances
             primary_collections = self.get_all_collections(self.primary_url)
             replica_collections = self.get_all_collections(self.replica_url)
+            
+            # ENHANCED: Sync deletions first (new functionality)
+            deletion_results = self.sync_deletions()
             
             if not primary_collections:
                 logger.info("ℹ️ No collections found on primary instance")
@@ -676,10 +751,11 @@ class ProductionSyncService:
             end_memory = psutil.virtual_memory().used / 1024 / 1024
             memory_delta = end_memory - start_memory
             
-            # Log comprehensive results
+            # ENHANCED: Log comprehensive results including deletions
             logger.info(f"🎯 Sync cycle completed:")
             logger.info(f"   ✅ Successful: {successful_syncs}/{len(primary_collections)} collections")
             logger.info(f"   📄 Documents: {total_documents:,} synced")
+            logger.info(f"   🗑️ Deletions: {deletion_results['deleted']} orphaned collections removed")
             logger.info(f"   ⏱️ Duration: {total_duration:.2f}s")
             logger.info(f"   🧠 Memory: {memory_delta:+.1f}MB delta")
             
