@@ -277,10 +277,7 @@ class TrueLoadBalancer:
                 # Make the request
                 response = requests.request(method, url, **req_params)
                 
-                # For API requests, return response content directly
-                pass
-                
-                # For non-JSON responses, handle normally
+                # For all non-GET responses, handle normally with simplified headers
                 response_headers = {}
                 for key, value in response.headers.items():
                     # Skip headers that might cause compression issues
