@@ -165,11 +165,12 @@ class RobustLoadBalancer:
                     query_string = urlencode(request.args)
                     url = f"{url}?{query_string}"
                 
-                # Simple GET request
-                response = requests.get(url, timeout=self.request_timeout)
+                # Simple GET request with explicit no compression
+                headers = {'Accept-Encoding': 'identity'}
+                response = requests.get(url, headers=headers, timeout=self.request_timeout)
                 
-                # Use explicit decompression to ensure clean content
-                response_text = self.decompress_response(response)
+                # Since we requested identity encoding, response should be uncompressed
+                response_text = response.text
                 flask_response = make_response(response_text, response.status_code, {
                     'Content-Type': response.headers.get('content-type', 'application/json'),
                     'Cache-Control': 'no-transform'
@@ -188,11 +189,13 @@ class RobustLoadBalancer:
                 elif request.data:
                     req_params["data"] = request.data
                 
-                # Copy headers (excluding problematic ones)
+                # Copy headers (excluding problematic ones) and force no compression
                 headers = {}
                 for key, value in request.headers.items():
-                    if key.lower() not in ['host', 'content-length', 'connection']:
+                    if key.lower() not in ['host', 'content-length', 'connection', 'accept-encoding']:
                         headers[key] = value
+                # Explicitly request uncompressed content
+                headers['Accept-Encoding'] = 'identity'
                 req_params["headers"] = headers
                 
                 # Add query parameters
@@ -209,8 +212,8 @@ class RobustLoadBalancer:
                     logger.info(f"🔧 Raw response.text length: {len(response.text)}")
                     logger.info(f"🔧 Raw response.content length: {len(response.content)}")
                 
-                # Handle compressed responses properly with explicit decompression
-                response_text = self.decompress_response(response)
+                # Since we requested identity encoding, response should be uncompressed
+                response_text = response.text
                 
                 # Create clean response without compression headers
                 # CRITICAL: Remove all compression-related headers to prevent double compression
@@ -220,15 +223,15 @@ class RobustLoadBalancer:
                 }
                 
                 if is_collection_endpoint:
-                    logger.info(f"🔧 Decompressed response length: {len(response_text)}")
+                    logger.info(f"🔧 Uncompressed response length: {len(response_text)}")
                     logger.info(f"🔧 Returning clean response, length: {len(response_text)}")
                     # Verify it's valid JSON for debugging
                     try:
                         if response.headers.get('content-type', '').startswith('application/json'):
                             json.loads(response_text)
-                            logger.info("🔧 ✅ Decompressed response is valid JSON")
+                            logger.info("🔧 ✅ Uncompressed response is valid JSON")
                     except json.JSONDecodeError:
-                        logger.warning("🔧 ⚠️ Decompressed response is not valid JSON")
+                        logger.warning("🔧 ⚠️ Uncompressed response is not valid JSON")
                         logger.warning(f"🔧 First 100 chars: {response_text[:100]}")
                 
                 # Create response that explicitly prevents compression
