@@ -285,7 +285,7 @@ class TrueLoadBalancer:
                         response_headers[key] = value
                 
                 flask_response = Response(
-                    response.content,
+                    response.text,
                     status=response.status_code,
                     headers=response_headers
                 )
