@@ -222,8 +222,10 @@ class TrueLoadBalancer:
                 if lower_key not in ['host', 'content-length', 'connection', 'upgrade-insecure-requests']:
                     headers[key] = value
             
-            # ChromaDB v2 API requires Content-Type: application/json for ALL requests, including GET
-            headers['Content-Type'] = 'application/json'
+            # ChromaDB v2 API requires Content-Type: application/json for requests with JSON bodies
+            # But GET requests without body should not have Content-Type header
+            if method in ['POST', 'PUT', 'PATCH', 'DELETE'] or request.data or request.json:
+                headers['Content-Type'] = 'application/json'
             
             req_params["headers"] = headers
             
