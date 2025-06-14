@@ -32,8 +32,24 @@ echo "🔌 Waiting for ChromaDB to start listening..."
 sleep 15  # Give more initial time
 
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    # Test with more verbose output for debugging
-    if curl -f http://localhost:8000/api/v1/heartbeat > /dev/null 2>&1; then
+    # Try multiple health check endpoints (v1 API is deprecated in 1.0.12)
+    HEALTH_CHECK_PASSED=false
+    
+    # Try version endpoint first (usually most reliable)
+    if curl -f -s http://localhost:8000/api/v1/version > /dev/null 2>&1; then
+        HEALTH_CHECK_PASSED=true
+    # Try heartbeat endpoint  
+    elif curl -f -s http://localhost:8000/api/v1/heartbeat > /dev/null 2>&1; then
+        HEALTH_CHECK_PASSED=true
+    # Try root endpoint
+    elif curl -f -s http://localhost:8000/ > /dev/null 2>&1; then
+        HEALTH_CHECK_PASSED=true
+    # Try health endpoint
+    elif curl -f -s http://localhost:8000/health > /dev/null 2>&1; then
+        HEALTH_CHECK_PASSED=true
+    fi
+    
+    if [ "$HEALTH_CHECK_PASSED" = true ]; then
         echo "✅ ChromaDB is ready and responding to health checks!"
         break
     else
@@ -52,14 +68,19 @@ done
 if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
     echo "❌ ChromaDB failed to become ready within $MAX_RETRIES seconds"
     echo "🔍 Checking ChromaDB status..."
-    curl -v http://localhost:8000/api/v1/heartbeat || echo "Health check failed"
+    echo "Testing version endpoint:"
+    curl -v http://localhost:8000/api/v1/version || echo "Version endpoint failed"
+    echo "Testing heartbeat endpoint:"
+    curl -v http://localhost:8000/api/v1/heartbeat || echo "Heartbeat endpoint failed"
+    echo "Testing root endpoint:"
+    curl -v http://localhost:8000/ || echo "Root endpoint failed"
     echo "📋 ChromaDB process status:"
     ps aux | grep chroma || echo "No ChromaDB process found"
     exit 1
 fi
 
 echo "🎉 ChromaDB is fully initialized and ready!"
-echo "🌐 Health check endpoint: http://localhost:8000/api/v1/heartbeat"
+echo "🌐 Available endpoints: /api/v1/version, /api/v1/heartbeat, /"
 echo "📊 Connect to ChromaDB at: http://localhost:8000"
 
 # Keep the script running and monitor ChromaDB
