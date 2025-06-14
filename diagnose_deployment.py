@@ -73,8 +73,8 @@ def diagnose_chromadb_deployment():
     print(f"⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     services = [
-        ("Primary ChromaDB", "https://chroma-primary.onrender.com/api/v1/heartbeat"),
-        ("Replica ChromaDB", "https://chroma-replica.onrender.com/api/v1/heartbeat"),
+        ("Primary ChromaDB", "https://chroma-primary.onrender.com/api/v2/version"),
+        ("Replica ChromaDB", "https://chroma-replica.onrender.com/api/v2/version"),
         ("Load Balancer", "https://chroma-load-balancer.onrender.com/health"),
     ]
     

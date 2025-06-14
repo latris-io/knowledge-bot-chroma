@@ -141,7 +141,7 @@ class TrueLoadBalancer:
         """Check if a ChromaDB instance is healthy"""
         try:
             response = requests.get(
-                f"{instance.url}/api/v1/heartbeat",
+                f"{instance.url}/api/v2/version",
                 timeout=10
             )
             return response.status_code == 200

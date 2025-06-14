@@ -81,7 +81,7 @@ class RenderMonitor:
         start_time = time.time()
         
         try:
-            response = requests.get(f"{url}/api/v1/heartbeat", timeout=10)
+            response = requests.get(f"{url}/api/v2/version", timeout=10)
             response_time = int((time.time() - start_time) * 1000)
             
             is_healthy = response.status_code == 200
