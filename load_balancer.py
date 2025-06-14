@@ -212,8 +212,15 @@ class TrueLoadBalancer:
                     query_string = urlencode(request.args)
                     url = f"{url}?{query_string}"
                 
-                # Make simple GET request exactly like health check
-                response = requests.get(url, timeout=self.request_timeout)
+                # Make simple GET request exactly like health check - use same timeout too!
+                response = requests.get(url, timeout=10)
+                
+                # Return the response as simply as possible
+                return Response(
+                    response.text,
+                    status=response.status_code,
+                    content_type=response.headers.get('content-type', 'application/json')
+                )
                 
             else:
                 # For non-GET requests, use full parameter handling
@@ -247,21 +254,21 @@ class TrueLoadBalancer:
                 
                 # Make the request
                 response = requests.request(method, url, **req_params)
-            
-            # Create Flask response with proper headers
-            response_headers = {}
-            for key, value in response.headers.items():
-                # Skip headers that might cause issues
-                if key.lower() not in ['content-encoding', 'transfer-encoding']:
-                    response_headers[key] = value
-            
-            flask_response = Response(
-                response.content,
-                status=response.status_code,
-                headers=response_headers
-            )
-            
-            return flask_response
+                
+                # Create Flask response with proper headers
+                response_headers = {}
+                for key, value in response.headers.items():
+                    # Skip headers that might cause issues
+                    if key.lower() not in ['content-encoding', 'transfer-encoding']:
+                        response_headers[key] = value
+                
+                flask_response = Response(
+                    response.content,
+                    status=response.status_code,
+                    headers=response_headers
+                )
+                
+                return flask_response
             
         except requests.exceptions.Timeout:
             logger.error(f"Request timeout to {target_url}")
