@@ -176,7 +176,7 @@ class StableLoadBalancer:
             # Simple session for this request
             session = requests.Session()
             
-            # Set base headers
+            # Start with default headers
             headers = {
                 'Accept-Encoding': '',  # No compression
                 'Accept': 'application/json'
@@ -185,6 +185,12 @@ class StableLoadBalancer:
             # Only set Content-Type for requests that have data
             if 'json' in kwargs or 'data' in kwargs or method in ['POST', 'PUT', 'PATCH']:
                 headers['Content-Type'] = 'application/json'
+            
+            # Merge with any headers passed in kwargs, giving priority to incoming headers
+            if 'headers' in kwargs:
+                headers.update(kwargs['headers'])
+                # Remove headers from kwargs since we'll set them on session
+                del kwargs['headers']
             
             session.headers.update(headers)
             
