@@ -213,19 +213,26 @@ class TrueLoadBalancer:
             elif request.json:
                 req_params["json"] = request.json
             
-            # Prepare headers - be more selective and add required headers
+            # Prepare headers - for GET requests, use minimal headers like health check
             headers = {}
             
-            # Copy important headers but exclude problematic ones
-            for key, value in request.headers.items():
-                lower_key = key.lower()
-                if lower_key not in ['host', 'content-length', 'connection', 'upgrade-insecure-requests']:
-                    headers[key] = value
-            
-            # ChromaDB v2 API requires Content-Type: application/json for requests with JSON bodies
-            # But GET requests without body should not have Content-Type header
-            if method in ['POST', 'PUT', 'PATCH', 'DELETE'] or request.data or request.json:
-                headers['Content-Type'] = 'application/json'
+            if method == 'GET':
+                # For GET requests, use minimal headers (like health check that works)
+                # Only forward essential headers
+                for key, value in request.headers.items():
+                    lower_key = key.lower()
+                    if lower_key in ['authorization', 'user-agent']:
+                        headers[key] = value
+            else:
+                # For non-GET requests, forward most headers and add Content-Type
+                for key, value in request.headers.items():
+                    lower_key = key.lower()
+                    if lower_key not in ['host', 'content-length', 'connection', 'upgrade-insecure-requests']:
+                        headers[key] = value
+                
+                # Add Content-Type for requests with bodies
+                if request.data or request.json:
+                    headers['Content-Type'] = 'application/json'
             
             req_params["headers"] = headers
             
