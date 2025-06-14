@@ -8,6 +8,7 @@ import os
 import time
 import requests
 import logging
+import json
 from flask import Flask, request, jsonify, Response
 from werkzeug.exceptions import ServiceUnavailable
 import threading
@@ -237,11 +238,10 @@ class TrueLoadBalancer:
                             req_params["json"] = request.json
                         elif request.data:
                             # Try to parse as JSON first
-                            import json as json_module
                             try:
-                                json_data = json_module.loads(request.data.decode('utf-8'))
+                                json_data = json.loads(request.data.decode('utf-8'))
                                 req_params["json"] = json_data
-                            except (json_module.JSONDecodeError, UnicodeDecodeError):
+                            except (json.JSONDecodeError, UnicodeDecodeError):
                                 # If not valid JSON, send as raw data
                                 req_params["data"] = request.data
                         else:
