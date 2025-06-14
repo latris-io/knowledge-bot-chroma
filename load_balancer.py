@@ -315,13 +315,27 @@ class TrueLoadBalancer:
                 logger.info(f"  Raw content (first 200 bytes): {response.content[:200]}")
                 logger.info(f"  Text content (first 500 chars): {response.text[:500]}")
                 
-                # Return response using Flask's make_response for better compatibility
-                from flask import make_response
-                flask_response = make_response(response.text, response.status_code)
+                # Handle compressed responses properly
+                # Check if the response is compressed
+                content_encoding = response.headers.get('content-encoding', '').lower()
                 
-                # Set content type if it's JSON
+                if content_encoding in ['gzip', 'deflate']:
+                    # Use response.text which handles decompression automatically
+                    response_content = response.text
+                    logger.info(f"🔍 DEBUG - Decompressed response: {len(response_content)} chars")
+                else:
+                    # Use response.text for uncompressed content
+                    response_content = response.text
+                
+                # Create Flask response with clean content
+                from flask import make_response
+                flask_response = make_response(response_content, response.status_code)
+                
+                # Set content type if it's JSON (without compression headers)
                 if 'json' in response.headers.get('content-type', ''):
                     flask_response.headers['Content-Type'] = 'application/json'
+                    # Don't forward compression headers to avoid client confusion
+                    # flask_response.headers.pop('Content-Encoding', None)
                 
                 # Debug: Log what we're returning
                 logger.info(f"🔍 DEBUG - Flask response:")
