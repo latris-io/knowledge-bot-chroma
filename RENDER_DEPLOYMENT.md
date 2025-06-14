@@ -122,7 +122,7 @@ PRIMARY_URL=https://chroma-primary.onrender.com
 REPLICA_URL=https://chroma-replica.onrender.com
 CHECK_INTERVAL=30
 FAILURE_THRESHOLD=3
-NOTIFICATION_WEBHOOK=https://hooks.slack.com/services/YOUR/WEBHOOK
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK
 ```
 
 #### **Monitor (`chroma-monitor`)**
@@ -132,7 +132,7 @@ REPLICA_URL=https://chroma-replica.onrender.com
 LOAD_BALANCER_URL=https://chroma-load-balancer.onrender.com
 CHECK_INTERVAL=30
 FAILURE_THRESHOLD=3
-NOTIFICATION_WEBHOOK=https://hooks.slack.com/services/YOUR/WEBHOOK
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK
 DATABASE_URL=postgres://user:pass@hostname:port/database
 ```
 
@@ -203,7 +203,7 @@ collection = client.get_or_create_collection("knowledge-base")
 
 2. **Add to Environment Variables:**
    ```bash
-   NOTIFICATION_WEBHOOK=https://hooks.slack.com/services/YOUR/WEBHOOK
+   SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK
    ```
 
 3. **Test Notifications:**

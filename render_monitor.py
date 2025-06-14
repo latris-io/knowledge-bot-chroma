@@ -30,7 +30,7 @@ class RenderMonitor:
         
         self.check_interval = int(os.getenv("CHECK_INTERVAL", "30"))
         self.failure_threshold = int(os.getenv("FAILURE_THRESHOLD", "3"))
-        self.notification_webhook = os.getenv("NOTIFICATION_WEBHOOK")
+        self.notification_webhook = os.getenv("SLACK_WEBHOOK_URL")
         
         # Database connection for storing metrics (optional)
         self.db_url = os.getenv("DATABASE_URL")

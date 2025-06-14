@@ -64,11 +64,8 @@ services:
         value: 30
       - key: FAILURE_THRESHOLD
         value: 3
-      - key: NOTIFICATION_WEBHOOK
-        fromService:
-          type: web
-          name: chroma-load-balancer
-          envVarKey: SLACK_WEBHOOK_URL
+      - key: SLACK_WEBHOOK_URL
+        sync: false
 
   # Background worker for health monitoring and failover
   - type: worker
@@ -91,7 +88,7 @@ services:
 # API key is optional - only needed for advanced service management
       # - key: RENDER_API_KEY
       #   sync: false
-      - key: NOTIFICATION_WEBHOOK
+      - key: SLACK_WEBHOOK_URL
         sync: false
       - key: DATABASE_URL
         fromDatabase:

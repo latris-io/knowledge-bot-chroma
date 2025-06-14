@@ -111,7 +111,7 @@ class LoadBalancer:
 
     def send_notification(self, message: str):
         """Send notification about health changes"""
-        webhook_url = os.getenv("NOTIFICATION_WEBHOOK")
+        webhook_url = os.getenv("SLACK_WEBHOOK_URL")
         if not webhook_url:
             return
         

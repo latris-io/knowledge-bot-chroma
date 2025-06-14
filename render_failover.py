@@ -122,7 +122,7 @@ class RenderFailover:
     
     def notify_failover_event(self, event_type: str, details: Dict) -> bool:
         """Send failover event notification"""
-        webhook_url = os.getenv("NOTIFICATION_WEBHOOK")
+        webhook_url = os.getenv("SLACK_WEBHOOK_URL")
         if not webhook_url:
             return False
             
