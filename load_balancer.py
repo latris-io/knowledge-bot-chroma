@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Stable ChromaDB High Availability Load Balancer
+Stable ChromaDB High Availability Load Balancer v2.0
 Simplified version focused on core consistency without complex caching
+FORCE REBUILD: 2025-06-14-v2
 """
 
 import os
@@ -17,6 +18,9 @@ from dataclasses import dataclass, field
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Version identifier for debugging
+VERSION = "2.0-stable-rebuild"
 
 @dataclass
 class ChromaInstance:
@@ -81,7 +85,7 @@ class StableLoadBalancer:
         self.health_thread = threading.Thread(target=self.health_monitor_loop, daemon=True)
         self.health_thread.start()
         
-        logger.info(f"🚀 Stable load balancer initialized")
+        logger.info(f"🚀 Stable load balancer v{VERSION} initialized")
         logger.info(f"🎯 Read replica ratio: {self.read_replica_ratio * 100}%")
 
     def extract_collection_identifier(self, path: str) -> Optional[str]:
