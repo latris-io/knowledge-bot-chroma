@@ -95,6 +95,21 @@ services:
           name: chroma-metadata
           property: connectionString
 
+  # Data synchronization worker
+  - type: worker
+    name: chroma-sync
+    env: docker
+    dockerfilePath: ./Dockerfile.sync
+    region: oregon
+    plan: starter
+    envVars:
+      - key: PRIMARY_URL
+        value: https://chroma-primary.onrender.com
+      - key: REPLICA_URL
+        value: https://chroma-replica.onrender.com
+      - key: SYNC_INTERVAL
+        value: 300  # 5 minutes
+
 databases:
   # Optional: PostgreSQL for storing failover state and metrics
   - name: chroma-metadata
