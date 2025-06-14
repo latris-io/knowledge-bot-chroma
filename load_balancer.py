@@ -277,7 +277,26 @@ class TrueLoadBalancer:
                 # Make the request
                 response = requests.request(method, url, **req_params)
                 
-                # For all non-GET responses, handle normally with simplified headers
+                # Handle JSON responses properly to avoid binary corruption
+                if response.headers.get('content-type', '').startswith('application/json'):
+                    try:
+                        # Use response.text which properly handles encoding and decompression
+                        # requests library automatically handles gzip/deflate decompression
+                        response_text = response.text
+                        
+                        # Verify it's valid JSON by attempting to parse it
+                        json.loads(response_text)
+                        
+                        # Return clean JSON response with minimal headers
+                        return Response(
+                            response_text,
+                            status=response.status_code,
+                            mimetype='application/json'
+                        )
+                    except (json.JSONDecodeError, ValueError) as e:
+                        logger.warning(f"Failed to parse JSON response: {e}, falling back to raw content")
+                
+                # For non-JSON responses, handle normally with simplified headers  
                 response_headers = {}
                 for key, value in response.headers.items():
                     # Skip headers that might cause compression issues
