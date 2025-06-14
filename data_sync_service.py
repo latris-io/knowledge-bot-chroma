@@ -123,7 +123,7 @@ class ChromaDataSync:
             url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections"
             data = {
                 "name": collection_name,
-                "metadata": {}
+                "metadata": {"synced_from": "primary"}
             }
             response = self._make_request('POST', url, json=data)
             result = response.json()
