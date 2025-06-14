@@ -1,0 +1,25 @@
+{
+  "load_balancer_url": "https://chroma-load-balancer.onrender.com",
+  "primary_url": "https://chroma-primary.onrender.com",
+  "replica_url": "https://chroma-replica.onrender.com",
+  "slack_webhook": "https://hooks.slack.com/services/YOUR/WEBHOOK/URL",
+  "test_timeout": 30,
+  "load_test_duration": 60,
+  "load_test_concurrent_users": 10,
+  "test_scenarios": {
+    "basic_connectivity": true,
+    "load_balancer_health": true,
+    "chromadb_operations": true,
+    "load_distribution": true,
+    "failover_simulation": true,
+    "data_sync_verification": true,
+    "performance_benchmarks": false,
+    "concurrent_load_test": false
+  },
+  "performance_settings": {
+    "benchmark_documents": 100,
+    "benchmark_queries": 50,
+    "concurrent_users": 5,
+    "test_duration_seconds": 30
+  }
+} 
