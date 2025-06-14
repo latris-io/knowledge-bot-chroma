@@ -12,7 +12,7 @@ COPY requirements.loadbalancer.txt ./
 RUN pip install --no-cache-dir -r requirements.loadbalancer.txt
 
 # Copy load balancer application
-COPY load_balancer.py ./
+COPY stable_load_balancer.py ./
 COPY render_failover.py ./
 
 EXPOSE 8000
@@ -22,4 +22,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Start the load balancer
-CMD ["python", "load_balancer.py"] 
+CMD ["python", "stable_load_balancer.py"] 

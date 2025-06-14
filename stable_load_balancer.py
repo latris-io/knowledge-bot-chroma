@@ -277,4 +277,80 @@ load_balancer = StableLoadBalancer()
 
 def get_load_balancer():
     """Get the global load balancer instance"""
-    return load_balancer 
+    return load_balancer
+
+# Add Flask web server
+from flask import Flask, request, Response, jsonify
+import json
+
+app = Flask(__name__)
+
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    try:
+        status = load_balancer.get_status()
+        return jsonify({
+            "status": "healthy",
+            "service": "ChromaDB Load Balancer",
+            "healthy_instances": status["healthy_instances"],
+            "total_instances": status["total_instances"]
+        })
+    except Exception as e:
+        return jsonify({"status": "unhealthy", "error": str(e)}), 503
+
+@app.route('/status')
+def status():
+    """Detailed status endpoint"""
+    try:
+        status = load_balancer.get_status()
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'])
+@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'])
+def proxy(path):
+    """Proxy all requests to ChromaDB instances"""
+    try:
+        # Get request details
+        method = request.method
+        url_path = f"/{path}" if path else "/"
+        headers = dict(request.headers)
+        
+        # Get request data
+        request_kwargs = {}
+        if request.data:
+            request_kwargs['data'] = request.data
+        elif request.json:
+            request_kwargs['json'] = request.json
+        elif request.form:
+            request_kwargs['data'] = request.form
+            
+        # Add query parameters
+        if request.query_string:
+            url_path += f"?{request.query_string.decode()}"
+            
+        # Remove problematic headers
+        headers.pop('Host', None)
+        headers.pop('Content-Length', None)
+        request_kwargs['headers'] = headers
+        
+        # Route through load balancer
+        response = load_balancer.handle_request(method, url_path, **request_kwargs)
+        
+        # Return response
+        return Response(
+            response.content,
+            status=response.status_code,
+            headers=dict(response.headers)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in proxy: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
+
+if __name__ == '__main__':
+    logger.info("🚀 Starting Flask web server")
+    port = int(os.environ.get('PORT', 8000))
+    app.run(host='0.0.0.0', port=port, debug=False) 
