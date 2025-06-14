@@ -279,22 +279,14 @@ class TrueLoadBalancer:
                 
                 # Handle JSON responses properly to avoid corruption
                 if response.headers.get('content-type', '').startswith('application/json'):
-                    # For JSON responses, ensure we return clean content without compression
+                    # For JSON responses, return clean text without compression artifacts
                     try:
                         # Use response.text for proper encoding handling
-                        response_text = response.text
+                        json_text = response.text
                         # Verify it's valid JSON
-                        json.loads(response_text)
-                        
-                        # Create Flask response with proper headers
-                        flask_response = Response(
-                            response_text,
-                            status=response.status_code,
-                            mimetype='application/json'
-                        )
-                        # Remove any compression headers that might cause issues
-                        flask_response.headers.pop('Content-Encoding', None)
-                        return flask_response
+                        json.loads(json_text)
+                        # Return simple tuple response (content, status, headers)
+                        return (json_text, response.status_code, {'Content-Type': 'application/json'})
                         
                     except (json.JSONDecodeError, ValueError) as e:
                         logger.warning(f"Failed to parse JSON response: {e}, falling back to basic response")
