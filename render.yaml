@@ -57,7 +57,7 @@ services:
     env: docker
     dockerfilePath: ./Dockerfile.loadbalancer
     region: oregon
-    plan: starter  # Free plan - no storage needed
+    plan: standard  # $7/month - cheapest plan with disk support
     healthCheckPath: /health
     envVars:
       - key: PRIMARY_URL
