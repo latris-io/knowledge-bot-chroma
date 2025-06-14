@@ -1,0 +1,36 @@
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    cron \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy cleanup scripts
+COPY cleanup_service.py .
+COPY test_cleanup_systems.py .
+
+# Create log directory
+RUN mkdir -p /var/log/cleanup
+
+# Create cleanup script that runs periodically
+RUN echo '#!/bin/bash\n\
+echo "$(date): Starting cleanup cycle"\n\
+python /app/cleanup_service.py --run >> /var/log/cleanup/cleanup.log 2>&1\n\
+echo "$(date): Cleanup cycle completed"\n\
+' > /app/run_cleanup.sh && chmod +x /app/run_cleanup.sh
+
+# Create cron job for regular cleanup (daily at 2 AM UTC)
+RUN echo "0 2 * * * /app/run_cleanup.sh" > /etc/cron.d/cleanup-cron && \
+    chmod 0644 /etc/cron.d/cleanup-cron && \
+    crontab /etc/cron.d/cleanup-cron
+
+# Default command - run cleanup service with cron
+CMD ["sh", "-c", "cron && tail -f /var/log/cleanup/cleanup.log"] 

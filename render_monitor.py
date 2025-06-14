@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ChromaDB Background Monitor for Render
-Advanced monitoring and failover management
+Advanced monitoring and failover management with comprehensive cleanup
 """
 
 import os
@@ -14,6 +14,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import psycopg2
 from psycopg2.extras import DictCursor
+
+# Import cleanup service
+from cleanup_service import DatabaseCleanupService
 
 # Configure logging
 logging.basicConfig(
@@ -36,10 +39,13 @@ class RenderMonitor:
         self.db_url = os.getenv("DATABASE_URL")
         self.db_conn = None
         
+        # Initialize comprehensive cleanup service
+        self.cleanup_service = DatabaseCleanupService()
+        
         if self.db_url:
             self.init_database()
         
-        logger.info("Render monitor initialized")
+        logger.info("Render monitor initialized with comprehensive cleanup capabilities")
 
     def init_database(self):
         """Initialize database connection and tables"""
@@ -209,6 +215,30 @@ class RenderMonitor:
         except Exception as e:
             logger.error(f"Failed to send notification: {e}")
 
+    def run_comprehensive_cleanup(self):
+        """Run comprehensive database cleanup for all tables"""
+        logger.info("🧹 Starting comprehensive database cleanup")
+        
+        try:
+            # Run the full cleanup service
+            results = self.cleanup_service.run_cleanup()
+            
+            # Log results  
+            total_deleted = results.get('total_deleted', 0)
+            if total_deleted > 0:
+                logger.info(f"🗑️ Comprehensive cleanup complete: {total_deleted:,} records deleted")
+                
+                # Send Slack notification for significant cleanup
+                if total_deleted > 10000:
+                    message = f"Database cleanup completed: {total_deleted:,} old records removed"
+                    self.send_notification(message, "info")
+            else:
+                logger.info("✅ No cleanup needed - all data within retention periods")
+                
+        except Exception as e:
+            logger.error(f"❌ Comprehensive cleanup failed: {e}")
+            self.send_notification(f"Database cleanup failed: {str(e)}", "error")
+
     def cleanup_old_metrics(self):
         """Clean up old health metrics (keep last 7 days)"""
         if not self.db_conn:
@@ -299,10 +329,15 @@ class RenderMonitor:
         
         # Schedule regular tasks
         schedule.every(self.check_interval).seconds.do(self.monitor_check)
-        schedule.every().hour.do(self.cleanup_old_metrics)
+        schedule.every().hour.do(self.cleanup_old_metrics)  # Legacy cleanup (hourly)
+        schedule.every().day.at("02:00").do(self.run_comprehensive_cleanup)  # Full cleanup (daily)
         
         # Initial check
         self.monitor_check()
+        
+        # Run initial comprehensive cleanup
+        logger.info("🧹 Running initial comprehensive cleanup...")
+        self.run_comprehensive_cleanup()
         
         # Main loop
         while True:
