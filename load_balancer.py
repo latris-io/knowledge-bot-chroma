@@ -277,21 +277,8 @@ class TrueLoadBalancer:
                 # Make the request
                 response = requests.request(method, url, **req_params)
                 
-                # Handle JSON responses properly to avoid corruption
-                if response.headers.get('content-type', '').startswith('application/json'):
-                    # For JSON responses, return clean text without compression artifacts
-                    try:
-                        # Use response.text for proper encoding handling
-                        json_text = response.text
-                        # Verify it's valid JSON
-                        json.loads(json_text)
-                        # Return simple tuple response (content, status, headers)
-                        return (json_text, response.status_code, {'Content-Type': 'application/json'})
-                        
-                    except (json.JSONDecodeError, ValueError) as e:
-                        logger.warning(f"Failed to parse JSON response: {e}, falling back to basic response")
-                        # Fall back to basic response if JSON parsing fails
-                        pass
+                # For API requests, return response content directly
+                pass
                 
                 # For non-JSON responses, handle normally
                 response_headers = {}
