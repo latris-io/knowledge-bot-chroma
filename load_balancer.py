@@ -15,6 +15,7 @@ import threading
 import random
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -209,7 +210,6 @@ class TrueLoadBalancer:
                 
                 # Add query parameters to URL if present
                 if request.args:
-                    from urllib.parse import urlencode
                     query_string = urlencode(request.args)
                     url = f"{url}?{query_string}"
                 
