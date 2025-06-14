@@ -47,7 +47,7 @@ class TrueLoadBalancer:
             )
         ]
         
-        self.load_balance_strategy = os.getenv("LOAD_BALANCE_STRATEGY", "round_robin")
+        self.load_balance_strategy = os.getenv("LOAD_BALANCE_STRATEGY", "write_primary")
         # Options: "round_robin", "random", "priority", "write_primary"
         
         self.check_interval = int(os.getenv("CHECK_INTERVAL", "30"))
@@ -229,10 +229,30 @@ class TrueLoadBalancer:
                     "allow_redirects": False
                 }
                 
-                # Handle request body - prioritize JSON for structured data
-                if request.is_json and request.json is not None:
-                    req_params["json"] = request.json
+                # Handle request body - improved JSON handling for ChromaDB client
+                if request.content_type and 'application/json' in request.content_type:
+                    # For JSON requests, try to get the JSON data safely
+                    try:
+                        if request.is_json and request.json is not None:
+                            req_params["json"] = request.json
+                        elif request.data:
+                            # Try to parse as JSON first
+                            import json as json_module
+                            try:
+                                json_data = json_module.loads(request.data.decode('utf-8'))
+                                req_params["json"] = json_data
+                            except (json_module.JSONDecodeError, UnicodeDecodeError):
+                                # If not valid JSON, send as raw data
+                                req_params["data"] = request.data
+                        else:
+                            # No body data
+                            pass
+                    except Exception as e:
+                        logger.warning(f"JSON handling error: {e}, falling back to raw data")
+                        if request.data:
+                            req_params["data"] = request.data
                 elif request.data:
+                    # Non-JSON data
                     req_params["data"] = request.data
                 
                 # Prepare headers for non-GET requests
@@ -357,6 +377,7 @@ def proxy(path):
     
     # Track request
     target_instance.request_count += 1
+    logger.debug(f"Request routed to {target_instance.name}, new count: {target_instance.request_count}")
     
     # Construct full path
     full_path = f"/{path}" if path else ""

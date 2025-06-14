@@ -138,9 +138,9 @@ class ChromaDBTestSuite:
                 for inst in initial_status['instances']
             }
             
-            # Make multiple requests
+            # Make multiple requests to a proxied endpoint (not /health which is handled locally)
             for i in range(10):
-                requests.get(f"{self.load_balancer_url}/health")
+                requests.get(f"{self.load_balancer_url}/api/v2/version")
             
             # Get final counts
             final_response = requests.get(f"{self.load_balancer_url}/status")
