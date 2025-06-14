@@ -69,7 +69,7 @@ services:
       - key: FAILURE_THRESHOLD
         value: 3
       - key: LOAD_BALANCE_STRATEGY
-        value: write_primary  # Options: round_robin, random, priority, write_primary
+        value: write_primary
       - key: SLACK_WEBHOOK_URL
         sync: false
 
@@ -91,9 +91,6 @@ services:
         value: 30
       - key: FAILURE_THRESHOLD
         value: 3
-# API key is optional - only needed for advanced service management
-      # - key: RENDER_API_KEY
-      #   sync: false
       - key: SLACK_WEBHOOK_URL
         sync: false
       - key: DATABASE_URL
@@ -118,21 +115,19 @@ services:
           name: chroma-metadata
           property: connectionString
       - key: SYNC_INTERVAL
-        value: 300  # 5 minutes
+        value: 300
       - key: MAX_MEMORY_MB
         value: "400"
       - key: MAX_WORKERS
         value: "2"
-      # Distributed Sync Configuration (Set SYNC_DISTRIBUTED=true to enable)
       - key: SYNC_DISTRIBUTED
-        value: "false"  # Change to "true" to enable distributed mode
+        value: "false"
       - key: SYNC_COORDINATOR
-        value: "false"  # Set to "true" for coordinator instance only
+        value: "false"
       - key: SYNC_CHUNK_SIZE
-        value: "1000"   # Documents per chunk in distributed mode
-      # Slack Notifications for Upgrade Alerts
+        value: "1000"
       - key: SLACK_WEBHOOK_URL
-        sync: false     # Set your Slack webhook URL in Render dashboard
+        sync: false
 
 databases:
   # Optional: PostgreSQL for storing failover state and metrics
