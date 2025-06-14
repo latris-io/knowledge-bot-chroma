@@ -146,9 +146,13 @@ class RobustLoadBalancer:
                 response = requests.get(url, timeout=self.request_timeout)
                 
                 # Return response.text which automatically handles decompression
-                return make_response(response.text, response.status_code, {
-                    'Content-Type': response.headers.get('content-type', 'application/json')
+                flask_response = make_response(response.text, response.status_code, {
+                    'Content-Type': response.headers.get('content-type', 'application/json'),
+                    'Cache-Control': 'no-transform'
                 })
+                flask_response.headers['Content-Encoding'] = 'identity'  # Explicitly no compression
+                flask_response.headers['Vary'] = 'Accept-Encoding'
+                return flask_response
                 
             else:
                 # Handle POST/PUT/DELETE/PATCH requests
@@ -185,8 +189,10 @@ class RobustLoadBalancer:
                 response_text = response.text
                 
                 # Create clean response without compression headers
+                # CRITICAL: Remove all compression-related headers to prevent double compression
                 clean_headers = {
-                    'Content-Type': response.headers.get('content-type', 'application/json')
+                    'Content-Type': response.headers.get('content-type', 'application/json'),
+                    'Cache-Control': 'no-transform'  # Prevent Cloudflare from compressing again
                 }
                 
                 if is_collection_endpoint:
@@ -199,7 +205,11 @@ class RobustLoadBalancer:
                     except json.JSONDecodeError:
                         logger.warning("🔧 ⚠️ Response is not valid JSON")
                 
-                return make_response(response_text, response.status_code, clean_headers)
+                # Create response that explicitly prevents compression
+                flask_response = make_response(response_text, response.status_code, clean_headers)
+                flask_response.headers['Content-Encoding'] = 'identity'  # Explicitly no compression
+                flask_response.headers['Vary'] = 'Accept-Encoding'
+                return flask_response
             
         except requests.exceptions.Timeout:
             logger.error(f"Request timeout to {target_url}")
