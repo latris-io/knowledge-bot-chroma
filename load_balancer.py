@@ -248,14 +248,22 @@ class OptimizedLoadBalancer:
                 healthy.append(instance)
         return healthy
 
-    def track_write_operation(self, path: str, collection_id: str = None):
+    def track_write_operation(self, path: str, collection_identifier: str = None, response_data: dict = None):
         """Track write operations for read-after-write consistency"""
-        if collection_id:
+        if collection_identifier:
             # Track collection creation/modification
-            self.recent_writes[collection_id] = time.time()
+            self.recent_writes[collection_identifier] = time.time()
+            
+            # If we have response data with UUID, track that too
+            if response_data and isinstance(response_data, dict):
+                collection_id = response_data.get('id')
+                if collection_id and collection_id != collection_identifier:
+                    self.recent_writes[collection_id] = time.time()
+                    logger.debug(f"🔗 Tracking both name [{collection_identifier}] and UUID [{collection_id}]")
+            
             # Invalidate cache for this collection
-            self.collection_cache["primary"].discard(collection_id)
-            self.collection_cache["replica"].discard(collection_id)
+            self.collection_cache["primary"].discard(collection_identifier)
+            self.collection_cache["replica"].discard(collection_identifier)
         
         # Clean up old entries (older than consistency window)
         current_time = time.time()
@@ -264,25 +272,48 @@ class OptimizedLoadBalancer:
             if current_time - timestamp < self.write_consistency_window
         }
 
-    def should_use_primary_for_consistency(self, path: str, collection_name: str = None) -> bool:
-        """Check if we should use primary for read-after-write consistency"""
-        if not collection_name:
-            # Extract collection name from path if possible
-            if '/collections/' in path:
-                try:
-                    collection_name = path.split('/collections/')[-1].split('/')[0]
-                except:
-                    pass
+    def extract_collection_identifier(self, path: str) -> str:
+        """Extract collection identifier (name or UUID) from path"""
+        if '/collections/' not in path:
+            return None
         
-        if collection_name and collection_name in self.recent_writes:
-            write_time = self.recent_writes[collection_name]
+        try:
+            # Extract the identifier after /collections/
+            parts = path.split('/collections/')
+            if len(parts) < 2:
+                return None
+            
+            identifier = parts[1].split('/')[0]
+            
+            # Handle both UUIDs and names
+            if len(identifier) == 36 and '-' in identifier:
+                # Looks like a UUID (e.g., 0946b159-4dc4-4da5-af3b-baea8b31cc14)
+                return identifier
+            elif identifier.startswith('AUTOTEST_'):
+                # Test collection name
+                return identifier
+            elif len(identifier) > 10:
+                # Other collection name
+                return identifier
+            
+            return None
+        except:
+            return None
+
+    def should_use_primary_for_consistency(self, path: str, collection_identifier: str = None) -> bool:
+        """Check if we should use primary for read-after-write consistency"""
+        if not collection_identifier:
+            collection_identifier = self.extract_collection_identifier(path)
+        
+        if collection_identifier and collection_identifier in self.recent_writes:
+            write_time = self.recent_writes[collection_identifier]
             if time.time() - write_time < self.write_consistency_window:
-                logger.debug(f"🔄 Using PRIMARY for consistency: {collection_name} (recent write)")
+                logger.debug(f"🔄 Using PRIMARY for consistency: {collection_identifier} (recent write)")
                 return True
         
         return False
 
-    def verify_collection_exists(self, collection_name: str, instance: ChromaInstance) -> bool:
+    def verify_collection_exists(self, collection_identifier: str, instance: ChromaInstance) -> bool:
         """Verify collection exists on specific instance with caching"""
         current_time = time.time()
         
@@ -291,7 +322,7 @@ class OptimizedLoadBalancer:
             self.refresh_collection_cache()
         
         # Check cache first
-        if collection_name in self.collection_cache.get(instance.name, set()):
+        if collection_identifier in self.collection_cache.get(instance.name, set()):
             return True
         
         # Verify directly if not in cache
@@ -300,18 +331,39 @@ class OptimizedLoadBalancer:
             if not session:
                 return False
             
-            url = f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+            # Handle both UUID and name lookups
+            if len(collection_identifier) == 36 and '-' in collection_identifier:
+                # UUID - use direct collection endpoint
+                url = f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_identifier}"
+            else:
+                # Name - need to search through collections
+                url = f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections"
+            
             response = session.get(url, timeout=5)
             
-            exists = response.status_code == 200
+            if len(collection_identifier) == 36 and '-' in collection_identifier:
+                # Direct UUID lookup
+                exists = response.status_code == 200
+            else:
+                # Name lookup - search through collections
+                if response.status_code == 200:
+                    collections_data = response.json()
+                    exists = any(
+                        collection.get('name') == collection_identifier 
+                        for collection in collections_data 
+                        if isinstance(collection, dict)
+                    )
+                else:
+                    exists = False
+            
             if exists:
-                self.collection_cache[instance.name].add(collection_name)
+                self.collection_cache[instance.name].add(collection_identifier)
             
             self.connection_pool.return_session(session)
             return exists
             
         except Exception as e:
-            logger.debug(f"Collection verification failed for {collection_name} on {instance.name}: {e}")
+            logger.debug(f"Collection verification failed for {collection_identifier} on {instance.name}: {e}")
             return False
 
     def refresh_collection_cache(self):
@@ -358,45 +410,39 @@ class OptimizedLoadBalancer:
             logger.error("❌ No healthy instances available")
             return None
         
-        # Extract collection name from path for consistency checks
-        collection_name = None
-        if '/collections/' in path:
-            try:
-                collection_name = path.split('/collections/')[-1].split('/')[0]
-                # Handle UUID vs name cases
-                if len(collection_name) > 50:  # Likely a UUID
-                    collection_name = None
-            except:
-                pass
+        # Extract collection identifier from path for consistency checks
+        collection_identifier = self.extract_collection_identifier(path)
         
         # Write operations always go to primary
         if method in ['POST', 'PUT', 'DELETE'] or any(op in path for op in ['add', 'update', 'delete', 'upsert']):
             primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
             if primary:
-                # Track write operations for consistency
-                if collection_name and method in ['POST', 'PUT']:
-                    self.track_write_operation(path, collection_name)
+                # Track write operations for consistency (we'll get the UUID from response)
+                if collection_identifier and method in ['POST', 'PUT']:
+                    self.track_write_operation(path, collection_identifier)
                 return primary
             return healthy_instances[0]
         
         # Read operations with consistency checks
         if method == 'GET' or any(op in path for op in ['query', 'get']):
             # Check for read-after-write consistency requirements
-            if collection_name and self.should_use_primary_for_consistency(path, collection_name):
+            if collection_identifier and self.should_use_primary_for_consistency(path, collection_identifier):
                 primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
                 if primary:
+                    logger.debug(f"🎯 Forcing PRIMARY for consistency: {collection_identifier}")
                     return primary
             
             # Normal read distribution with fallback logic
             if random.random() < self.read_replica_ratio:
                 replica = next((inst for inst in healthy_instances if inst.name == "replica"), None)
                 if replica:
-                    # Verify collection exists on replica if we know the collection name
-                    if collection_name:
-                        if self.verify_collection_exists(collection_name, replica):
+                    # Verify collection exists on replica if we know the collection identifier
+                    if collection_identifier:
+                        if self.verify_collection_exists(collection_identifier, replica):
+                            logger.debug(f"✅ Collection {collection_identifier} found on replica")
                             return replica
                         else:
-                            logger.debug(f"🔄 Collection {collection_name} not on replica, using primary")
+                            logger.debug(f"🔄 Collection {collection_identifier} not on replica, using primary")
                             primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
                             if primary:
                                 return primary
@@ -456,7 +502,8 @@ class OptimizedLoadBalancer:
             
             # Handle 404 errors with automatic fallback for read operations
             if response.status_code == 404 and method == 'GET' and instance.name == "replica":
-                logger.debug(f"🔄 404 on replica, trying primary for: {path}")
+                collection_identifier = self.extract_collection_identifier(path)
+                logger.debug(f"🔄 404 on replica for {collection_identifier}, trying primary")
                 
                 # Try primary instance
                 primary = next((inst for inst in self.instances if inst.name == "primary" and inst.is_healthy), None)
@@ -475,12 +522,23 @@ class OptimizedLoadBalancer:
                             circuit_breaker.record_failure()
                             self.circuit_breakers[primary.name].record_success()
                             
+                            logger.debug(f"✅ Primary fallback successful for {collection_identifier}")
                             return primary_response
                             
                         except Exception as primary_error:
                             logger.debug(f"Primary fallback also failed: {primary_error}")
                         finally:
                             self.connection_pool.return_session(primary_session)
+            
+            # Track successful collection creation with UUID
+            if response.status_code in [200, 201] and method == 'POST' and '/collections' in path:
+                try:
+                    collection_identifier = self.extract_collection_identifier(path)
+                    if collection_identifier and response.headers.get('content-type', '').startswith('application/json'):
+                        response_data = response.json()
+                        self.track_write_operation(path, collection_identifier, response_data)
+                except Exception as e:
+                    logger.debug(f"Could not track collection creation: {e}")
             
             # Record success/failure normally
             response_time = time.time() - start_time
