@@ -101,7 +101,7 @@ services:
           name: chroma-metadata
           property: connectionString
 
-  # Data synchronization worker
+  # Data synchronization worker (with distributed mode support)
   - type: worker
     name: chroma-sync
     env: docker
@@ -113,8 +113,23 @@ services:
         value: https://chroma-primary.onrender.com
       - key: REPLICA_URL
         value: https://chroma-replica.onrender.com
+      - key: DATABASE_URL
+        fromDatabase:
+          name: chroma-metadata
+          property: connectionString
       - key: SYNC_INTERVAL
         value: 300  # 5 minutes
+      - key: MAX_MEMORY_MB
+        value: "400"
+      - key: MAX_WORKERS
+        value: "2"
+      # Distributed Sync Configuration (Set SYNC_DISTRIBUTED=true to enable)
+      - key: SYNC_DISTRIBUTED
+        value: "false"  # Change to "true" to enable distributed mode
+      - key: SYNC_COORDINATOR
+        value: "false"  # Set to "true" for coordinator instance only
+      - key: SYNC_CHUNK_SIZE
+        value: "1000"   # Documents per chunk in distributed mode
 
 databases:
   # Optional: PostgreSQL for storing failover state and metrics
