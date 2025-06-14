@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ChromaDB High Availability Load Balancer - Robust Version
-Handles Brotli compression properly for clean JSON responses
+ChromaDB High Availability Load Balancer - Clean Uncompressed Version
+Forces uncompressed JSON responses to eliminate corruption issues
 """
 
 import os
@@ -9,8 +9,6 @@ import time
 import requests
 import logging
 import json
-import gzip
-import brotli
 from flask import Flask, request, jsonify, Response, make_response
 from werkzeug.exceptions import ServiceUnavailable
 import threading
@@ -18,7 +16,6 @@ import random
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
-from io import BytesIO
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,7 +34,7 @@ class ChromaInstance:
         self.last_failure = None
         self.request_count = 0
 
-class RobustLoadBalancer:
+class CleanLoadBalancer:
     def __init__(self):
         self.instances = [
             ChromaInstance(
@@ -63,7 +60,7 @@ class RobustLoadBalancer:
         self.health_thread = threading.Thread(target=self.health_monitor_loop, daemon=True)
         self.health_thread.start()
         
-        logger.info(f"Robust load balancer initialized with strategy: {self.load_balance_strategy}")
+        logger.info(f"Clean load balancer initialized with strategy: {self.load_balance_strategy}")
 
     def get_healthy_instances(self) -> List[ChromaInstance]:
         """Get all healthy instances"""
@@ -95,7 +92,9 @@ class RobustLoadBalancer:
     def check_instance_health(self, instance: ChromaInstance) -> bool:
         """Check if a ChromaDB instance is healthy"""
         try:
-            response = requests.get(f"{instance.url}/api/v2/version", timeout=10)
+            # Use uncompressed health check request
+            headers = {'Accept-Encoding': ''}
+            response = requests.get(f"{instance.url}/api/v2/version", headers=headers, timeout=10)
             return response.status_code == 200
         except:
             return False
@@ -129,28 +128,8 @@ class RobustLoadBalancer:
                 logger.error(f"Error in health monitor: {e}")
                 time.sleep(self.check_interval)
 
-    def decompress_response(self, response) -> str:
-        """Properly decompress response content based on encoding"""
-        content_encoding = response.headers.get('content-encoding', '').lower()
-        
-        if content_encoding == 'gzip':
-            try:
-                return gzip.decompress(response.content).decode('utf-8')
-            except:
-                # Fallback to response.text if manual decompression fails
-                return response.text
-        elif content_encoding == 'br':
-            try:
-                return brotli.decompress(response.content).decode('utf-8')
-            except:
-                # Fallback to response.text if manual decompression fails
-                return response.text
-        else:
-            # No compression or identity
-            return response.text
-
     def proxy_request(self, target_url: str, path: str, method: str) -> Response:
-        """Proxy request to target ChromaDB instance with proper Brotli/compression handling"""
+        """Proxy request with forced uncompressed responses"""
         try:
             url = f"{target_url}{path}"
             
@@ -165,19 +144,15 @@ class RobustLoadBalancer:
                     query_string = urlencode(request.args)
                     url = f"{url}?{query_string}"
                 
-                # Simple GET request with explicit no compression
-                headers = {'Accept-Encoding': 'identity'}
+                # Force uncompressed GET request
+                headers = {
+                    'Accept-Encoding': '',  # Empty = no compression
+                    'Accept': 'application/json'
+                }
                 response = requests.get(url, headers=headers, timeout=self.request_timeout)
                 
-                # Since we requested identity encoding, response should be uncompressed
-                response_text = response.text
-                flask_response = make_response(response_text, response.status_code, {
-                    'Content-Type': response.headers.get('content-type', 'application/json'),
-                    'Cache-Control': 'no-transform'
-                })
-                flask_response.headers['Content-Encoding'] = 'identity'  # Explicitly no compression
-                flask_response.headers['Vary'] = 'Accept-Encoding'
-                return flask_response
+                # Return clean response
+                return self.create_clean_response(response, is_collection_endpoint)
                 
             else:
                 # Handle POST/PUT/DELETE/PATCH requests
@@ -189,13 +164,15 @@ class RobustLoadBalancer:
                 elif request.data:
                     req_params["data"] = request.data
                 
-                # Copy headers (excluding problematic ones) and force no compression
+                # Create clean headers with no compression
                 headers = {}
                 for key, value in request.headers.items():
                     if key.lower() not in ['host', 'content-length', 'connection', 'accept-encoding']:
                         headers[key] = value
-                # Explicitly request uncompressed content
-                headers['Accept-Encoding'] = 'identity'
+                
+                # Force no compression with empty Accept-Encoding
+                headers['Accept-Encoding'] = ''  # Empty = no compression
+                headers['Accept'] = 'application/json'
                 req_params["headers"] = headers
                 
                 # Add query parameters
@@ -210,37 +187,11 @@ class RobustLoadBalancer:
                     logger.info(f"🔧 SENT HEADERS: {headers}")
                     content_encoding = response.headers.get('content-encoding', 'none')
                     logger.info(f"🔧 Response: status={response.status_code}, encoding={content_encoding}, content-type={response.headers.get('content-type')}")
-                    logger.info(f"🔧 Raw response.text length: {len(response.text)}")
-                    logger.info(f"🔧 Raw response.content length: {len(response.content)}")
-                    logger.info(f"🔧 First 50 chars of response.text: {response.text[:50]}")
+                    logger.info(f"🔧 Response.text length: {len(response.text)}")
+                    logger.info(f"🔧 Response.content length: {len(response.content)}")
+                    logger.info(f"🔧 First 50 chars of response.text: {repr(response.text[:50])}")
                 
-                # Since we requested identity encoding, response should be uncompressed
-                response_text = response.text
-                
-                # Create clean response without compression headers
-                # CRITICAL: Remove all compression-related headers to prevent double compression
-                clean_headers = {
-                    'Content-Type': response.headers.get('content-type', 'application/json'),
-                    'Cache-Control': 'no-transform'  # Prevent Cloudflare from compressing again
-                }
-                
-                if is_collection_endpoint:
-                    logger.info(f"🔧 Uncompressed response length: {len(response_text)}")
-                    logger.info(f"🔧 Returning clean response, length: {len(response_text)}")
-                    # Verify it's valid JSON for debugging
-                    try:
-                        if response.headers.get('content-type', '').startswith('application/json'):
-                            json.loads(response_text)
-                            logger.info("🔧 ✅ Uncompressed response is valid JSON")
-                    except json.JSONDecodeError:
-                        logger.warning("🔧 ⚠️ Uncompressed response is not valid JSON")
-                        logger.warning(f"🔧 First 100 chars: {response_text[:100]}")
-                
-                # Create response that explicitly prevents compression
-                flask_response = make_response(response_text, response.status_code, clean_headers)
-                flask_response.headers['Content-Encoding'] = 'identity'  # Explicitly no compression
-                flask_response.headers['Vary'] = 'Accept-Encoding'
-                return flask_response
+                return self.create_clean_response(response, is_collection_endpoint)
             
         except requests.exceptions.Timeout:
             logger.error(f"Request timeout to {target_url}")
@@ -249,8 +200,36 @@ class RobustLoadBalancer:
             logger.error(f"Proxy error to {target_url}: {e}")
             raise ServiceUnavailable(f"Proxy error: {str(e)}")
 
+    def create_clean_response(self, response, is_collection_endpoint: bool) -> Response:
+        """Create a clean Flask response without compression"""
+        response_text = response.text
+        
+        # Debug logging for collection endpoints
+        if is_collection_endpoint:
+            logger.info(f"🔧 Creating clean response, length: {len(response_text)}")
+            # Verify it's valid JSON for debugging
+            try:
+                if response.headers.get('content-type', '').startswith('application/json'):
+                    json.loads(response_text)
+                    logger.info("🔧 ✅ Response is valid JSON")
+            except json.JSONDecodeError:
+                logger.warning("🔧 ⚠️ Response is not valid JSON")
+                logger.warning(f"🔧 First 100 chars: {repr(response_text[:100])}")
+        
+        # Create response with clean headers that prevent compression
+        clean_headers = {
+            'Content-Type': response.headers.get('content-type', 'application/json'),
+            'Cache-Control': 'no-transform',  # Prevent Cloudflare compression
+        }
+        
+        flask_response = make_response(response_text, response.status_code, clean_headers)
+        flask_response.headers['Content-Encoding'] = 'identity'  # Explicitly no compression
+        flask_response.headers['Vary'] = 'Accept-Encoding'
+        
+        return flask_response
+
 # Initialize load balancer
-lb = RobustLoadBalancer()
+lb = CleanLoadBalancer()
 
 @app.route('/health')
 def health_check():
@@ -258,7 +237,7 @@ def health_check():
     healthy_instances = lb.get_healthy_instances()
     
     return jsonify({
-        "status": "healthy" if healthy_instances else "unhealthy",
+        "status": "healthy" if healthy_instances else "unhealthy", 
         "strategy": lb.load_balance_strategy,
         "instances": [
             {
@@ -314,7 +293,7 @@ def status():
 @app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 def proxy(path):
-    """Proxy requests using robust load balancing with proper compression handling"""
+    """Proxy requests with forced uncompressed responses"""
     target_instance = lb.get_target_instance(request.method)
     
     if not target_instance:
@@ -350,4 +329,4 @@ def proxy(path):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    app.run(host="0.0.0.0", port=port, debug=False) 
+    app.run(host="0.0.0.0", port=port, debug=False)
