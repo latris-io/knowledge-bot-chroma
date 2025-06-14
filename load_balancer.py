@@ -277,11 +277,30 @@ class TrueLoadBalancer:
                 # Make the request
                 response = requests.request(method, url, **req_params)
                 
-                # Create Flask response with proper headers
+                # Handle JSON responses properly to avoid corruption
+                if response.headers.get('content-type', '').startswith('application/json'):
+                    # For JSON responses, ensure we have clean JSON
+                    try:
+                        # Parse and re-serialize to ensure clean JSON
+                        json_data = response.json()
+                        clean_json = json.dumps(json_data, ensure_ascii=False)
+                        
+                        # Return clean JSON response
+                        return Response(
+                            clean_json,
+                            status=response.status_code,
+                            mimetype='application/json'
+                        )
+                    except (json.JSONDecodeError, ValueError) as e:
+                        logger.warning(f"Failed to parse JSON response: {e}, falling back to text")
+                        # Fall back to text response if JSON parsing fails
+                        pass
+                
+                # For non-JSON responses, handle normally
                 response_headers = {}
                 for key, value in response.headers.items():
-                    # Skip headers that might cause issues
-                    if key.lower() not in ['content-encoding', 'transfer-encoding']:
+                    # Skip headers that might cause compression issues
+                    if key.lower() not in ['content-encoding', 'transfer-encoding', 'content-length']:
                         response_headers[key] = value
                 
                 flask_response = Response(
