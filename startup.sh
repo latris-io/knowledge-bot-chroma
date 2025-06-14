@@ -32,20 +32,20 @@ echo "🔌 Waiting for ChromaDB to start listening..."
 sleep 15  # Give more initial time
 
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    # Try multiple health check endpoints (v1 API is deprecated in 1.0.12)
+    # Try v2 API endpoints (v1 API is deprecated in 1.0.12)
     HEALTH_CHECK_PASSED=false
     
-    # Try version endpoint first (usually most reliable)
-    if curl -f -s http://localhost:8000/api/v1/version > /dev/null 2>&1; then
+    # Try v2 version endpoint first (most reliable for v2 API)
+    if curl -f -s http://localhost:8000/api/v2/version > /dev/null 2>&1; then
         HEALTH_CHECK_PASSED=true
-    # Try heartbeat endpoint  
-    elif curl -f -s http://localhost:8000/api/v1/heartbeat > /dev/null 2>&1; then
+    # Try v2 heartbeat endpoint  
+    elif curl -f -s http://localhost:8000/api/v2/heartbeat > /dev/null 2>&1; then
         HEALTH_CHECK_PASSED=true
-    # Try root endpoint
-    elif curl -f -s http://localhost:8000/ > /dev/null 2>&1; then
+    # Try v2 collections endpoint (simple GET to check API is working)
+    elif curl -f -s http://localhost:8000/api/v2/collections > /dev/null 2>&1; then
         HEALTH_CHECK_PASSED=true
-    # Try health endpoint
-    elif curl -f -s http://localhost:8000/health > /dev/null 2>&1; then
+    # Fallback: accept v1 deprecation response as "working" (410 Gone means API is responding)
+    elif curl -s http://localhost:8000/api/v1/version 2>&1 | grep -q "410"; then
         HEALTH_CHECK_PASSED=true
     fi
     
@@ -68,19 +68,27 @@ done
 if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
     echo "❌ ChromaDB failed to become ready within $MAX_RETRIES seconds"
     echo "🔍 Checking ChromaDB status..."
-    echo "Testing version endpoint:"
-    curl -v http://localhost:8000/api/v1/version || echo "Version endpoint failed"
-    echo "Testing heartbeat endpoint:"
-    curl -v http://localhost:8000/api/v1/heartbeat || echo "Heartbeat endpoint failed"
-    echo "Testing root endpoint:"
-    curl -v http://localhost:8000/ || echo "Root endpoint failed"
+    echo "Testing v2 version endpoint:"
+    curl -v http://localhost:8000/api/v2/version || echo "V2 version endpoint failed"
+    echo "Testing v2 heartbeat endpoint:"
+    curl -v http://localhost:8000/api/v2/heartbeat || echo "V2 heartbeat endpoint failed"
+    echo "Testing v2 collections endpoint:"
+    curl -v http://localhost:8000/api/v2/collections || echo "V2 collections endpoint failed"
+    echo "Testing v1 version (for comparison):"
+    curl -v http://localhost:8000/api/v1/version || echo "V1 version endpoint failed"
     echo "📋 ChromaDB process status:"
-    ps aux | grep chroma || echo "No ChromaDB process found"
+    if kill -0 $CHROMA_PID 2>/dev/null; then
+        echo "ChromaDB process (PID: $CHROMA_PID) is still running"
+    else
+        echo "ChromaDB process (PID: $CHROMA_PID) is not running"
+    fi
+    echo "Process list (if available):"
+    ps aux | grep chroma 2>/dev/null || echo "ps command not available"
     exit 1
 fi
 
 echo "🎉 ChromaDB is fully initialized and ready!"
-echo "🌐 Available endpoints: /api/v1/version, /api/v1/heartbeat, /"
+echo "🌐 Available v2 endpoints: /api/v2/version, /api/v2/heartbeat, /api/v2/collections"
 echo "📊 Connect to ChromaDB at: http://localhost:8000"
 
 # Keep the script running and monitor ChromaDB
