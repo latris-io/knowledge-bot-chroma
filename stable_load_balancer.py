@@ -330,27 +330,30 @@ def proxy(path):
         # Prepare request kwargs
         request_kwargs = {}
         
-        # Handle request body
+        # Handle request body carefully to avoid Flask JSON parsing errors
         if request.data:
+            # Raw data available
             request_kwargs['data'] = request.data
-        elif request.json:
-            request_kwargs['json'] = request.json
-        elif request.form:
-            request_kwargs['data'] = request.form
+            # Check if it's JSON content and set appropriate content type
+            content_type = request.headers.get('content-type', '')
+            if 'application/json' in content_type.lower():
+                try:
+                    import json
+                    request_kwargs['json'] = json.loads(request.data.decode('utf-8'))
+                    del request_kwargs['data']  # Use json instead of data
+                except:
+                    pass  # Keep as data if JSON parsing fails
+        elif hasattr(request, 'form') and request.form:
+            request_kwargs['data'] = dict(request.form)
         
-        # Handle headers - only pass essential headers, let load balancer set the rest
+        # Handle headers - only pass essential headers
         essential_headers = {}
-        if 'authorization' in request.headers:
-            essential_headers['Authorization'] = request.headers['authorization']
-        if 'user-agent' in request.headers:
-            essential_headers['User-Agent'] = request.headers['user-agent']
-        if 'accept' in request.headers:
-            essential_headers['Accept'] = request.headers['accept']
+        for header_name, header_value in request.headers:
+            header_lower = header_name.lower()
+            if header_lower in ['authorization', 'user-agent', 'accept', 'content-type']:
+                essential_headers[header_name] = header_value
         
-        # Override any existing headers in request_kwargs
-        if 'headers' not in request_kwargs:
-            request_kwargs['headers'] = {}
-        request_kwargs['headers'].update(essential_headers)
+        request_kwargs['headers'] = essential_headers
         
         # Route through load balancer
         load_balancer.stats["total_requests"] += 1
