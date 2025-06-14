@@ -204,6 +204,11 @@ class TrueLoadBalancer:
             url = f"{target_url}{path}"
             
             if method == 'GET':
+                # Debug: Log GET request details
+                logger.info(f"🔍 DEBUG - GET request:")
+                logger.info(f"  URL: {url}")
+                logger.info(f"  Headers: {dict(request.headers)}")
+                
                 # For GET requests, make them EXACTLY like working health checks
                 # Health check: requests.get(f"{instance.url}/api/v2/version", timeout=10)
                 # This works perfectly, so replicate it exactly
@@ -212,16 +217,30 @@ class TrueLoadBalancer:
                 if request.args:
                     query_string = urlencode(request.args)
                     url = f"{url}?{query_string}"
+                    logger.info(f"  Final URL with params: {url}")
                 
                 # Make simple GET request exactly like health check - use same timeout too!
                 response = requests.get(url, timeout=10)
                 
+                # Debug: Log GET response details
+                logger.info(f"🔍 DEBUG - GET response:")
+                logger.info(f"  Status: {response.status_code}")
+                logger.info(f"  Content-Type: {response.headers.get('content-type', 'None')}")
+                logger.info(f"  Response text (first 500 chars): {response.text[:500]}")
+                
                 # Create proper Flask Response object but keep it simple
-                return Response(
+                flask_response = Response(
                     response.text,
                     status=response.status_code,
                     mimetype='application/json'
                 )
+                
+                # Debug: Log what we're returning for GET
+                logger.info(f"🔍 DEBUG - GET Flask response:")
+                logger.info(f"  Status: {flask_response.status_code}")
+                logger.info(f"  Content-Type: {flask_response.mimetype}")
+                
+                return flask_response
                 
             else:
                 # For non-GET requests, use full parameter handling
@@ -274,8 +293,27 @@ class TrueLoadBalancer:
                 if request.args:
                     req_params["params"] = request.args
                 
+                # Debug: Log incoming request details
+                logger.info(f"🔍 DEBUG - Incoming request:")
+                logger.info(f"  Method: {method}")
+                logger.info(f"  URL: {url}")
+                logger.info(f"  Headers: {dict(request.headers)}")
+                if hasattr(request, 'data') and request.data:
+                    logger.info(f"  Body: {request.data[:500]}...")  # First 500 chars
+                
                 # Make the request
                 response = requests.request(method, url, **req_params)
+                
+                # Debug: Log ChromaDB response details
+                logger.info(f"🔍 DEBUG - ChromaDB response:")
+                logger.info(f"  Status: {response.status_code}")
+                logger.info(f"  Headers: {dict(response.headers)}")
+                logger.info(f"  Content-Type: {response.headers.get('content-type', 'None')}")
+                logger.info(f"  Content-Encoding: {response.headers.get('content-encoding', 'None')}")
+                logger.info(f"  Raw content length: {len(response.content)}")
+                logger.info(f"  Text content length: {len(response.text)}")
+                logger.info(f"  Raw content (first 200 bytes): {response.content[:200]}")
+                logger.info(f"  Text content (first 500 chars): {response.text[:500]}")
                 
                 # Return response using Flask's make_response for better compatibility
                 from flask import make_response
@@ -284,6 +322,12 @@ class TrueLoadBalancer:
                 # Set content type if it's JSON
                 if 'json' in response.headers.get('content-type', ''):
                     flask_response.headers['Content-Type'] = 'application/json'
+                
+                # Debug: Log what we're returning
+                logger.info(f"🔍 DEBUG - Flask response:")
+                logger.info(f"  Status: {flask_response.status_code}")
+                logger.info(f"  Content-Type: {flask_response.headers.get('Content-Type', 'None')}")
+                logger.info(f"  Response data (first 500 chars): {str(flask_response.data)[:500]}")
                 
                 return flask_response
             
