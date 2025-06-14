@@ -15,8 +15,8 @@ RUN mkdir -p /chroma/chroma
 
 EXPOSE 8000
 
-# Add health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+# Add health check with longer start period for ChromaDB initialization
+HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=5 \
     CMD curl -f http://localhost:8000/api/v1/heartbeat || exit 1
 
 # ✅ Launch the Chroma server with persistent storage
