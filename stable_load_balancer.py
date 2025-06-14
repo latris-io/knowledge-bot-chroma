@@ -316,28 +316,45 @@ def proxy(path):
         # Get request details
         method = request.method
         url_path = f"/{path}" if path else "/"
-        headers = dict(request.headers)
         
-        # Get request data
+        # Add query parameters
+        if request.query_string:
+            url_path += f"?{request.query_string.decode()}"
+        
+        # Prepare request kwargs
         request_kwargs = {}
+        
+        # Handle request body
         if request.data:
             request_kwargs['data'] = request.data
         elif request.json:
             request_kwargs['json'] = request.json
         elif request.form:
             request_kwargs['data'] = request.form
-            
-        # Add query parameters
-        if request.query_string:
-            url_path += f"?{request.query_string.decode()}"
-            
-        # Remove problematic headers
-        headers.pop('Host', None)
-        headers.pop('Content-Length', None)
-        request_kwargs['headers'] = headers
+        
+        # Handle headers - only pass essential headers, let load balancer set the rest
+        essential_headers = {}
+        if 'authorization' in request.headers:
+            essential_headers['Authorization'] = request.headers['authorization']
+        if 'user-agent' in request.headers:
+            essential_headers['User-Agent'] = request.headers['user-agent']
+        if 'accept' in request.headers:
+            essential_headers['Accept'] = request.headers['accept']
+        
+        # Override any existing headers in request_kwargs
+        if 'headers' not in request_kwargs:
+            request_kwargs['headers'] = {}
+        request_kwargs['headers'].update(essential_headers)
         
         # Route through load balancer
-        response = load_balancer.handle_request(method, url_path, **request_kwargs)
+        load_balancer.stats["total_requests"] += 1
+        
+        instance = load_balancer.select_instance(method, url_path)
+        if not instance:
+            raise Exception("No healthy instances available")
+        
+        response = load_balancer.make_request(instance, method, url_path, **request_kwargs)
+        load_balancer.stats["successful_requests"] += 1
         
         # Return response
         return Response(
@@ -347,6 +364,7 @@ def proxy(path):
         )
         
     except Exception as e:
+        load_balancer.stats["failed_requests"] += 1
         logger.error(f"Error in proxy: {str(e)}")
         return jsonify({"error": "Internal server error"}), 500
 
