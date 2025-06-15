@@ -1016,7 +1016,7 @@ class UnifiedWALLoadBalancer:
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
             return response
-            return flask_response
+            return response.content, response.status_code, {"Content-Type": "application/json"}
             
         except Exception as e:
             logger.warning(f"Direct request to {instance.name} failed: {e}")
@@ -1229,7 +1229,7 @@ class UnifiedWALLoadBalancer:
                 logger.info(f"Response preview: {response.content[:100]}")
             
             return response
-            return flask_response
+            return response.content, response.status_code, {"Content-Type": "application/json"}
             
         except Exception as e:
             target_instance.update_stats(False)
@@ -1373,7 +1373,7 @@ if __name__ == '__main__':
             if 'application/json' not in (response.headers.get('Content-Type', '') if hasattr(response, 'headers') else ''):
                 flask_response.headers['Content-Type'] = 'application/json'
                 
-            return flask_response
+            return response.content, response.status_code, {"Content-Type": "application/json"}
         except Exception as e:
             import traceback
             logger.error(f"Request forwarding failed for {request.method} /{path}: {e}")
