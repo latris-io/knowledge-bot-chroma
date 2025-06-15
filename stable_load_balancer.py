@@ -127,7 +127,7 @@ class StableLoadBalancer:
         return [inst for inst in self.instances if inst.is_healthy]
 
     def select_instance(self, method: str, path: str) -> Optional[ChromaInstance]:
-        """Select instance with simple consistency logic"""
+        """Select instance with improved failover logic"""
         healthy_instances = self.get_healthy_instances()
         
         if not healthy_instances:
@@ -136,33 +136,41 @@ class StableLoadBalancer:
         
         collection_id = self.extract_collection_identifier(path)
         
-        # Write operations always go to primary
+        # Write operations always go to primary (if available)
         if method in ['POST', 'PUT', 'DELETE'] or any(op in path for op in ['add', 'update', 'delete', 'upsert']):
             primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
             if primary and collection_id:
                 self.track_write(collection_id)
-            return primary or healthy_instances[0]
+            return primary or healthy_instances[0]  # Fallback to any healthy instance
         
-        # Read operations with simple consistency check
+        # Read operations with improved consistency and failover logic
         if method == 'GET' or any(op in path for op in ['query', 'get']):
-            # Force primary for recent writes
+            # Try to force primary for recent writes, but fallback gracefully
             if collection_id and self.should_force_primary(collection_id):
                 primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
                 if primary:
                     logger.debug(f"🎯 Forcing PRIMARY for consistency: {collection_id}")
                     return primary
+                else:
+                    # PRIMARY IS DOWN - log warning and fallback to replica for availability
+                    logger.warning(f"⚠️ Primary down during consistency window for {collection_id}, falling back to replica")
+                    replica = next((inst for inst in healthy_instances if inst.name == "replica"), None)
+                    if replica:
+                        return replica
+                    # If replica also down, use any healthy instance
+                    return healthy_instances[0] if healthy_instances else None
             
-            # Normal distribution
+            # Normal load distribution for reads
             if random.random() < self.read_replica_ratio:
                 replica = next((inst for inst in healthy_instances if inst.name == "replica"), None)
                 if replica:
                     return replica
             
-            # Fallback to primary
+            # Fallback to primary, then any healthy instance
             primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
             return primary or healthy_instances[0]
         
-        # Default to primary
+        # Default case - prefer primary, fallback to any healthy
         primary = next((inst for inst in healthy_instances if inst.name == "primary"), None)
         return primary or healthy_instances[0]
 
