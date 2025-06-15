@@ -927,13 +927,31 @@ class UnifiedWALLoadBalancer:
                             headers = write_record['headers']
                     
                     # INTELLIGENT COLLECTION ID MAPPING
+                    logger.info(f"🔄 Starting collection mapping for {write_id[:8]}: {original_path}")
                     mapped_path = self.map_collection_id_for_sync(original_path, batch.target_instance)
                     
                     if mapped_path != original_path:
-                        logger.info(f"🔄 Collection ID mapped for sync: {write_id[:8]}")
+                        logger.info(f"✅ Collection ID mapped for sync {write_id[:8]}: {original_path} → {mapped_path}")
+                    else:
+                        logger.info(f"🔄 No mapping needed for {write_id[:8]}: {original_path}")
                     
-                    # Make the sync request with mapped path
-                    response = self.make_direct_request(instance, method, mapped_path, data=data, headers=headers)
+                    # Ensure headers include Content-Type for sync requests
+                    sync_headers = {}
+                    if headers:
+                        if isinstance(headers, str):
+                            import json
+                            sync_headers = json.loads(headers)
+                        else:
+                            sync_headers = headers.copy()
+                    
+                    # Always set Content-Type for POST/PUT/PATCH with data
+                    if method in ['POST', 'PUT', 'PATCH'] and data:
+                        sync_headers['Content-Type'] = 'application/json'
+                    
+                    logger.info(f"🚀 Syncing {write_id[:8]} to {batch.target_instance}: {method} {mapped_path}")
+                    
+                    # Make the sync request with mapped path and proper headers
+                    response = self.make_direct_request(instance, method, mapped_path, data=data, headers=sync_headers)
                     
                     # Mark as synced
                     self.mark_write_synced(write_id)
@@ -1354,14 +1372,27 @@ class UnifiedWALLoadBalancer:
         """Make direct request without WAL logging (used for sync operations)"""
         kwargs['timeout'] = self.request_timeout
         
+        # CRITICAL FIX: Set proper headers for ChromaDB API compatibility
+        if 'headers' not in kwargs:
+            kwargs['headers'] = {}
+        
+        # Set Content-Type for requests with data
+        if method in ['POST', 'PUT', 'PATCH'] and ('data' in kwargs or 'json' in kwargs):
+            kwargs['headers']['Content-Type'] = 'application/json'
+        
+        # Set Accept header for all requests
+        kwargs['headers']['Accept'] = 'application/json'
+        
         try:
             url = f"{instance.url}{path}"
+            logger.debug(f"🔄 Sync request: {method} {url} with headers: {kwargs['headers']}")
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
+            logger.debug(f"✅ Sync successful: {response.status_code}")
             return response
             
         except Exception as e:
-            logger.warning(f"Direct request to {instance.name} failed: {e}")
+            logger.warning(f"❌ Direct request to {instance.name} failed: {e}")
             raise e
 
     def get_primary_instance(self) -> Optional[ChromaInstance]:
