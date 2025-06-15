@@ -353,4 +353,4 @@ class RenderMonitor:
 
 if __name__ == "__main__":
     monitor = RenderMonitor()
-    monitor.run() 
+    monitor.run() # Trigger redeploy to fix cleanup_service import - Sat Jun 14 19:47:46 CDT 2025
