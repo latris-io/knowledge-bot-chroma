@@ -1300,8 +1300,11 @@ if __name__ == '__main__':
         """Proxy all other requests through the load balancer"""
         try:
             if enhanced_wal is None:
+                logger.error("Proxy request failed: WAL system not ready")
                 return jsonify({"error": "WAL system not ready"}), 503
                 
+            logger.info(f"Forwarding {request.method} request to /{path}")
+            
             # Forward request through unified WAL load balancer
             response = enhanced_wal.forward_request(
                 method=request.method,
@@ -1310,14 +1313,18 @@ if __name__ == '__main__':
                 data=request.get_data()
             )
             
+            logger.info(f"Successfully forwarded {request.method} /{path} -> {response.status_code}")
+            
             return Response(
                 response.content,
                 status=response.status_code,
                 headers=dict(response.headers)
             )
         except Exception as e:
-            logger.error(f"Request forwarding failed: {e}")
-            return jsonify({"error": "Service temporarily unavailable"}), 503
+            import traceback
+            logger.error(f"Request forwarding failed for {request.method} /{path}: {e}")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            return jsonify({"error": f"Service temporarily unavailable: {str(e)}"}), 503
     
     # Start Flask web server immediately
     port = int(os.getenv('PORT', 8000))
