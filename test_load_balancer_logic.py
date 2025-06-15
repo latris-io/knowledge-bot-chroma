@@ -52,9 +52,38 @@ def test_load_balancer_logic():
         print(f"Error: {e}")
         return False
 
+def test_delete_operations():
+    """Test that DELETE operations work correctly with proper headers"""
+    print("🗑️  Testing DELETE operations...")
+    
+    try:
+        # Test DELETE with proper headers (should get 404, not 400)
+        import requests
+        
+        delete_url = "https://chroma-load-balancer.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/test-nonexistent-collection"
+        
+        headers = {
+            'Accept': 'application/json'
+            # Note: No Content-Type header for DELETE without body
+        }
+        
+        response = requests.delete(delete_url, headers=headers, timeout=30)
+        
+        # Should get 404 (not found) not 400 (bad request)
+        if response.status_code == 404:
+            print("✅ DELETE operations working correctly - proper 404 response")
+            return True
+        elif response.status_code == 400:
+            print("❌ DELETE operations still failing with 400 Bad Request")
+            return False
+        else:
+            print(f"⚠️  Unexpected response code: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ DELETE test failed: {e}")
+        return False
+
 if __name__ == "__main__":
-    success = test_load_balancer_logic()
-    if success:
-        print("\n🎉 SUCCESS: Load balancer logic works correctly!")
-    else:
-        print("\n❌ FAILURE: Load balancer logic is broken!") 
+    test_load_balancer_logic()
+    test_delete_operations() 

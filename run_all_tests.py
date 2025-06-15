@@ -55,6 +55,36 @@ class ChromaDBTestRunner:
                 'script': 'test_load_balancer_logic.py',
                 'description': 'Load balancer specific functionality',
                 'required': False
+            },
+            {
+                'name': 'Enterprise Features',
+                'script': 'test_enterprise_features.py',
+                'description': 'Health monitoring, failover, sync tracking, PostgreSQL coordination',
+                'required': True
+            },
+            {
+                'name': 'PostgreSQL Coverage Analysis',
+                'script': 'test_postgres_comprehensive.py',
+                'description': 'PostgreSQL table testing coverage analysis',
+                'required': False
+            },
+            {
+                'name': 'Cleanup Systems',
+                'script': 'test_cleanup_systems.py',
+                'description': 'Database retention policies and disk space management',
+                'required': True
+            },
+            {
+                'name': 'Write-Ahead Log',
+                'script': 'test_wal_comprehensive.py',
+                'description': 'Write-Ahead Log functionality, failure scenarios, replay logic',
+                'required': False
+            },
+            {
+                'name': 'Write-Ahead Log',
+                'script': 'test_wal_basic.py',
+                'description': 'Write-Ahead Log functionality, failure scenarios, replay logic',
+                'required': False
             }
         ]
         
@@ -74,16 +104,12 @@ class ChromaDBTestRunner:
             logger.error(f"❌ Missing test files: {missing_files}")
             return False
         
-        # Check environment variables
-        required_env_vars = ['DATABASE_URL']
-        missing_env = []
-        for var in required_env_vars:
-            if not os.getenv(var):
-                missing_env.append(var)
-        
-        if missing_env:
-            logger.warning(f"⚠️ Missing environment variables: {missing_env}")
-            logger.warning("Some tests may be skipped")
+        # Check environment variables (DATABASE_URL is set automatically if missing)
+        logger.info("🔧 Environment variables configured automatically")
+        if os.getenv("DATABASE_URL"):
+            logger.info("✅ PostgreSQL DATABASE_URL available for coordination tests")
+        if os.getenv("LOAD_BALANCER_URL"):
+            logger.info("✅ Load balancer URL configured for testing")
         
         logger.info("✅ Prerequisites check complete")
         return True
@@ -261,6 +287,12 @@ def main():
     
     # Set URL for tests that need it
     os.environ.setdefault("LOAD_BALANCER_URL", args.url)
+    
+    # Ensure DATABASE_URL is set for PostgreSQL coordination tests
+    if not os.getenv("DATABASE_URL"):
+        database_url = "postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha"
+        os.environ["DATABASE_URL"] = database_url
+        logger.info("🗄️ PostgreSQL DATABASE_URL configured for coordination tests")
     
     # Run tests
     runner = ChromaDBTestRunner()

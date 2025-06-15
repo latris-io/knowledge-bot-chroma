@@ -206,7 +206,7 @@ def cleanup_test_collections():
                         break
                 
                 if collection_id:
-                    # Delete collection
+                    # Delete collection - now works reliably with proper headers
                     delete_url = f"{base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}"
                     make_request('DELETE', delete_url)
                     print(f"🗑️  Deleted {collection_name} from {instance_name}")
@@ -214,9 +214,13 @@ def cleanup_test_collections():
                     print(f"⚠️  Collection {collection_name} not found in {instance_name}")
                     
             except Exception as e:
-                error_msg = f"Failed to delete {collection_name} from {instance_name}: {str(e)}"
-                print(f"❌ {error_msg}")
-                cleanup_results["errors"].append(error_msg)
+                # Now that DELETE operations work reliably, log actual errors
+                if "does not exist" in str(e).lower() or "404" in str(e):
+                    print(f"ℹ️  Collection {collection_name} already removed from {instance_name}")
+                else:
+                    error_msg = f"Failed to delete {collection_name} from {instance_name}: {str(e)}"
+                    print(f"❌ {error_msg}")
+                    cleanup_results["errors"].append(error_msg)
         
         # Consider successful if we attempted both instances
         cleanup_results["successful"] += 1

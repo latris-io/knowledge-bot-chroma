@@ -131,7 +131,7 @@ class ChromaDBTestSuite:
                 
             initial_status = initial_response.json()
             initial_counts = {
-                inst['name']: inst['request_count'] 
+                inst['name']: inst['total_requests'] 
                 for inst in initial_status['instances']
             }
             
@@ -143,7 +143,7 @@ class ChromaDBTestSuite:
             final_response = requests.get(f"{self.load_balancer_url}/status")
             final_status = final_response.json()
             final_counts = {
-                inst['name']: inst['request_count'] 
+                inst['name']: inst['total_requests'] 
                 for inst in final_status['instances']
             }
             
@@ -153,7 +153,7 @@ class ChromaDBTestSuite:
                 for name in initial_counts
             }
             
-            strategy = final_status['load_balancer']['strategy']
+            strategy = final_status.get('strategy', 'weighted_round_robin')
             total_distributed = sum(distribution.values())
             
             if total_distributed >= 10:

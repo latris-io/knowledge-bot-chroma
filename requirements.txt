@@ -2,3 +2,4 @@ chromadb>=1.0.0
 requests>=2.31.0
 flask>=2.3.0
 brotli>=1.0.9
+psycopg2-binary>=2.9.0

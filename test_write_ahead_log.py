@@ -22,14 +22,30 @@ def test_write_ahead_log():
     try:
         response = requests.get(f"{load_balancer_url}/status")
         status = response.json()
-        print(f"✅ System Status: {status['service']}")
+        print(f"✅ System Status: {status.get('service', 'ChromaDB Load Balancer')}")
         print(f"   Healthy instances: {status['healthy_instances']}/{status['total_instances']}")
         print(f"   Pending writes: {status['write_ahead_log']['pending_writes']}")
         print(f"   Total replayed: {status['write_ahead_log']['total_replayed']}")
         
+        primary_healthy = False
+        replica_healthy = False
+        
         for instance in status['instances']:
             health_emoji = "✅" if instance['healthy'] else "❌"
             print(f"   {health_emoji} {instance['name']}: {instance['success_rate']} success rate")
+            if instance['name'] == 'primary':
+                primary_healthy = instance['healthy']
+            elif instance['name'] == 'replica':
+                replica_healthy = instance['healthy']
+        
+        # Check if we have the perfect WAL test scenario
+        if not primary_healthy and replica_healthy:
+            print(f"   🎯 PERFECT! Primary is down, replica is up - ideal for Write-Ahead Log demo!")
+        elif primary_healthy and replica_healthy:
+            print(f"   ℹ️  Both instances healthy - normal operation mode")
+        else:
+            print(f"   ⚠️  Unusual state - may affect demo")
+            
     except Exception as e:
         print(f"❌ Failed to get status: {e}")
         return

@@ -173,9 +173,11 @@ class SafeTestCollectionManager:
                 
             except Exception as e:
                 error_str = str(e).lower()
+                # Now that DELETE operations work reliably, be more specific about temporary failures
                 is_temporary = any(temp_error in error_str for temp_error in [
                     'service unavailable', '503', '502', '504', 
-                    'timeout', 'connection', 'proxy error'
+                    'timeout', 'connection', 'proxy error',
+                    'temporarily unavailable'  # Removed generic "delete" errors
                 ])
                 
                 if is_temporary:
