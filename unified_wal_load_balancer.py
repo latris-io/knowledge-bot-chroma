@@ -1015,6 +1015,7 @@ class UnifiedWALLoadBalancer:
             url = f"{instance.url}{path}"
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
+            logger.info(f"Debug: Response status {response.status_code}, content length {len(response.content)}")
             return response
             
         except Exception as e:
@@ -1207,6 +1208,10 @@ class UnifiedWALLoadBalancer:
             # Use session to make request (like old load balancer)
             response = session.request(method, url, **request_params)
             response.raise_for_status()
+            logger.info(f"Debug: Response status {response.status_code}, content length {len(response.content)}")
+            
+            # Debug logging to see response content
+            logger.info(f"Response status: {response.status_code}, Content length: {len(response.content)}, Content preview: {response.content[:100]}")
             
             target_instance.update_stats(True)
             self.stats["successful_requests"] += 1
@@ -1328,23 +1333,16 @@ if __name__ == '__main__':
                 
             logger.info(f"Forwarding {request.method} request to /{path}")
             
-            # Forward request through unified WAL load balancer
-            # Handle request data properly like old load balancer
-            request_kwargs = {}
-            
-            # Handle JSON vs raw data properly
+            # Use simpler approach like old load balancer - get Flask request data and forward directly
+            data = b''
             if request.method in ['POST', 'PUT', 'PATCH'] and request.content_length:
-                if request.is_json:
-                    request_kwargs['json'] = request.get_json()
-                else:
-                    request_kwargs['data'] = request.get_data()
+                data = request.get_data()
             
             response = enhanced_wal.forward_request(
                 method=request.method,
                 path=f"/{path}",
-                headers={},  # Let session handle headers properly  
-                data=request_kwargs.get('data', b''),
-                json=request_kwargs.get('json')
+                headers={},  # Let session handle headers
+                data=data
             )
             
             logger.info(f"Successfully forwarded {request.method} /{path} -> {response.status_code}")
