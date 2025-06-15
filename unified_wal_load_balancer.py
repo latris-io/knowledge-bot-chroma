@@ -1822,11 +1822,18 @@ class UnifiedWALLoadBalancer:
             else:
                 sync_target = TargetInstance.PRIMARY
             
+            # CRITICAL FIX: Properly capture request data for WAL logging
+            wal_data = data
+            if not wal_data and 'json' in kwargs and kwargs['json']:
+                # If we have JSON data but no raw data, serialize JSON for WAL storage
+                wal_data = json.dumps(kwargs['json']).encode('utf-8')
+                logger.debug(f"🔄 Converted JSON to bytes for WAL: {len(wal_data)} bytes")
+            
             # Regular write operations - execute on target and sync to other
             self.add_wal_write(
                 method=method,
                 path=path,
-                data=data,
+                data=wal_data,  # Use properly captured data
                 headers=headers,
                 target_instance=sync_target,
                 executed_on=target_instance.name
