@@ -1376,7 +1376,19 @@ class UnifiedWALLoadBalancer:
         if 'headers' not in kwargs:
             kwargs['headers'] = {}
         
-        # Set Content-Type for requests with data
+        # CRITICAL FIX: Handle raw bytes data by converting to JSON for ChromaDB API
+        if 'data' in kwargs and kwargs['data'] and method in ['POST', 'PUT', 'PATCH']:
+            try:
+                # Convert bytes data back to JSON for proper ChromaDB API request
+                if isinstance(kwargs['data'], bytes):
+                    json_data = json.loads(kwargs['data'].decode('utf-8'))
+                    del kwargs['data']  # Remove raw data
+                    kwargs['json'] = json_data  # Use json parameter instead
+                    logger.debug(f"🔄 Converted WAL bytes data to JSON: {str(json_data)[:100]}...")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to convert WAL data to JSON: {e}")
+        
+        # Set Content-Type for requests with data or json
         if method in ['POST', 'PUT', 'PATCH'] and ('data' in kwargs or 'json' in kwargs):
             kwargs['headers']['Content-Type'] = 'application/json'
         
@@ -1385,14 +1397,16 @@ class UnifiedWALLoadBalancer:
         
         try:
             url = f"{instance.url}{path}"
-            logger.debug(f"🔄 Sync request: {method} {url} with headers: {kwargs['headers']}")
+            logger.info(f"🔄 SYNC REQUEST: {method} {url}")
+            logger.debug(f"🔄 Sync headers: {kwargs['headers']}")
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
-            logger.debug(f"✅ Sync successful: {response.status_code}")
+            logger.info(f"✅ SYNC SUCCESS: {response.status_code}")
             return response
             
         except Exception as e:
-            logger.warning(f"❌ Direct request to {instance.name} failed: {e}")
+            logger.error(f"❌ SYNC FAILED to {instance.name}: {e}")
+            logger.error(f"❌ Failed URL: {url}")
             raise e
 
     def get_primary_instance(self) -> Optional[ChromaInstance]:
