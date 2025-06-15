@@ -1013,7 +1013,7 @@ class UnifiedWALLoadBalancer:
         
         try:
             url = f"{instance.url}{path}"
-            response = requests.request(method, url, **kwargs)
+            return response
             response.raise_for_status()
             return response
             return response.content, response.status_code, {"Content-Type": "application/json"}
