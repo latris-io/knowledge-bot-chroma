@@ -1572,29 +1572,34 @@ class UnifiedWALLoadBalancer:
         try:
             url = f"{target_instance.url}{path}"
             
-            # Create session with proper headers (like old load balancer)
-            session = requests.Session()
-            
-            # Set base headers
-            session_headers = {
-                'Accept-Encoding': '',  # No compression for compatibility
-                'Accept': 'application/json'
-            }
-            
-            # Only set Content-Type for requests that have data
-            if data or kwargs.get('json') or method in ['POST', 'PUT', 'PATCH']:
-                session_headers['Content-Type'] = 'application/json'
-            
-            session.headers.update(session_headers)
-            
-            # Prepare request parameters
+            # CRITICAL FIX: Improved request handling with proper headers like make_direct_request
             request_params = {'timeout': self.request_timeout}
+            
+            # Set proper headers for ChromaDB API compatibility
+            if 'headers' not in request_params:
+                request_params['headers'] = {}
+            
+            # Merge passed headers
+            if headers:
+                request_params['headers'].update(headers)
+            
+            # Set Content-Type and Accept headers for API compatibility
+            if method in ['POST', 'PUT', 'PATCH'] and (data or kwargs.get('json')):
+                request_params['headers']['Content-Type'] = 'application/json'
+            
+            request_params['headers']['Accept'] = 'application/json'
+            
+            # Add data or json to request parameters
             if data:
                 request_params['data'] = data
-            request_params.update(kwargs)  # Add json, params, etc.
             
-            # Use session to make request (like old load balancer)
-            response = session.request(method, url, **request_params)
+            # Add other kwargs (including json parameter)
+            request_params.update(kwargs)
+            
+            logger.debug(f"🔄 Forward request: {method} {url} with headers: {request_params['headers']}")
+            
+            # Make direct request without session (simpler and more reliable)
+            response = requests.request(method, url, **request_params)
             response.raise_for_status()
             logger.info(f"Debug: Response status {response.status_code}, content length {len(response.content)}")
             
@@ -1808,16 +1813,31 @@ if __name__ == '__main__':
                 
             logger.info(f"Forwarding {request.method} request to /{path}")
             
-            # Use simpler approach like old load balancer - get Flask request data and forward directly
+            # CRITICAL FIX: Properly handle JSON data and headers
             data = b''
-            if request.method in ['POST', 'PUT', 'PATCH'] and request.content_length:
+            kwargs = {}
+            
+            # Check if request has JSON data
+            if request.is_json and request.method in ['POST', 'PUT', 'PATCH']:
+                # Use json parameter for JSON requests
+                kwargs['json'] = request.get_json()
+                logger.debug(f"🔄 Using JSON data: {str(kwargs['json'])[:100]}...")
+            elif request.method in ['POST', 'PUT', 'PATCH'] and request.content_length:
+                # Use data parameter for non-JSON requests
                 data = request.get_data()
+                logger.debug(f"🔄 Using raw data: {len(data)} bytes")
+            
+            # Extract relevant headers from Flask request
+            headers = {}
+            if request.content_type:
+                headers['Content-Type'] = request.content_type
             
             response = enhanced_wal.forward_request(
                 method=request.method,
                 path=f"/{path}",
-                headers={},  # Let session handle headers
-                data=data
+                headers=headers,
+                data=data,
+                **kwargs  # Pass json parameter if present
             )
             
             logger.info(f"Successfully forwarded {request.method} /{path} -> {response.status_code}")
