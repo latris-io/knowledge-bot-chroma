@@ -85,9 +85,7 @@ services:
         value: 0.8
       # Unified WAL System Configuration
       - key: DATABASE_URL
-        fromDatabase:
-          name: chroma-metadata
-          property: connectionString
+        value: postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha
       - key: WAL_ENABLED
         value: "true"
       - key: WAL_BATCH_SIZE
@@ -146,14 +144,7 @@ services:
       - key: SLACK_WEBHOOK_URL
         sync: false
       - key: DATABASE_URL
-        fromDatabase:
-          name: chroma-metadata
-          property: connectionString
+        value: postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha
 
-databases:
-  # PostgreSQL for WAL persistence and metrics
-  - name: chroma-metadata
-    databaseName: chroma_ha
-    user: chroma_user
-    region: oregon
-    plan: free  # Free PostgreSQL 
+# Note: Using direct DATABASE_URL connections instead of Render database references
+# This provides more reliable access to the PostgreSQL database
