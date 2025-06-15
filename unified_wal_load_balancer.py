@@ -93,80 +93,77 @@ class ChromaInstance:
 
 class UnifiedWALLoadBalancer:
     def __init__(self):
+        """Initialize the Enhanced Unified WAL Load Balancer"""
         self.instances = [
-            ChromaInstance(
-                name="primary",
-                url=os.getenv("PRIMARY_URL", "https://chroma-primary.onrender.com"),
-                priority=100
-            ),
-            ChromaInstance(
-                name="replica", 
-                url=os.getenv("REPLICA_URL", "https://chroma-replica.onrender.com"),
-                priority=80
-            )
+            ChromaInstance("primary", "https://chroma-primary.onrender.com", priority=1),
+            ChromaInstance("replica", "https://chroma-replica.onrender.com", priority=2)
         ]
         
-        # Configuration
-        self.check_interval = int(os.getenv("CHECK_INTERVAL", "30"))
-        self.request_timeout = int(os.getenv("REQUEST_TIMEOUT", "15"))
-        self.read_replica_ratio = float(os.getenv("READ_REPLICA_RATIO", "0.8"))
-        self.sync_interval = int(os.getenv("WAL_SYNC_INTERVAL", "10"))
+        # High-volume processing configuration
+        self.max_memory_usage_mb = int(os.getenv('WAL_MAX_MEMORY_MB', '400'))
+        self.max_workers = int(os.getenv('WAL_MAX_WORKERS', '3'))
+        self.default_batch_size = int(os.getenv('WAL_DEFAULT_BATCH_SIZE', '50'))
+        self.max_batch_size = int(os.getenv('WAL_MAX_BATCH_SIZE', '200'))
+        self.request_timeout = int(os.getenv('REQUEST_TIMEOUT', '30'))
+        self.sync_interval = int(os.getenv('WAL_SYNC_INTERVAL', '10'))
+        self.check_interval = int(os.getenv('HEALTH_CHECK_INTERVAL', '30'))
+        self.resource_check_interval = int(os.getenv('RESOURCE_CHECK_INTERVAL', '60'))
+        self.read_replica_ratio = float(os.getenv('READ_REPLICA_RATIO', '0.3'))
         
-        # High-volume configuration
-        self.max_memory_usage_mb = int(os.getenv("MAX_MEMORY_MB", "400"))  # 400MB for 512MB container
-        self.max_workers = int(os.getenv("MAX_WORKERS", "3"))  # Parallel sync workers
-        self.default_batch_size = int(os.getenv("DEFAULT_BATCH_SIZE", "50"))  # WAL sync batch size
-        self.max_batch_size = int(os.getenv("MAX_BATCH_SIZE", "200"))
-        self.resource_check_interval = 30  # seconds
+        # Thread-safe database operations
+        self.db_lock = threading.RLock()
         
-        # PostgreSQL connection for unified WAL
-        self.database_url = os.getenv("DATABASE_URL", "postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha")
-        self.db_lock = threading.Lock()
-        
-        # Consistency tracking
-        self.recent_writes = {}  # collection_id -> timestamp
-        self.consistency_window = 30  # 30 seconds
-        
-        # High-volume sync state
-        self.is_syncing = False
-        self.current_memory_usage = 0.0
-        self.sync_executor = None
-        
-        # Initialize unified WAL schema
-        self._initialize_unified_wal_schema()
-        
-        # Enhanced statistics
+        # Performance statistics
         self.stats = {
             "total_requests": 0,
             "successful_requests": 0,
             "failed_requests": 0,
-            "consistency_overrides": 0,
             "total_wal_writes": 0,
             "successful_syncs": 0,
             "failed_syncs": 0,
-            "sync_cycles": 0,
-            "batches_processed": 0,
             "memory_pressure_events": 0,
             "adaptive_batch_reductions": 0,
+            "batches_processed": 0,
             "avg_sync_throughput": 0.0,
             "peak_memory_usage": 0.0,
-            "deletion_conversions": 0
+            "sync_cycles": 0,
+            "consistency_overrides": 0
         }
         
-        # Start monitoring and sync threads
-        self.health_thread = threading.Thread(target=self.health_monitor_loop, daemon=True)
-        self.health_thread.start()
+        # High-volume processing state
+        self.is_syncing = False
+        self.current_memory_usage = 0.0
         
-        self.resource_thread = threading.Thread(target=self.resource_monitor_loop, daemon=True)
-        self.resource_thread.start()
+        # Database configuration
+        self.database_url = os.getenv('DATABASE_URL')
+        if not self.database_url:
+            raise Exception("DATABASE_URL environment variable not set")
         
-        self.wal_sync_thread = threading.Thread(target=self.enhanced_wal_sync_loop, daemon=True)
-        self.wal_sync_thread.start()
-        
-        logger.info(f"🚀 Enhanced Unified WAL Load Balancer initialized")
-        logger.info(f"📊 High-volume config: {self.max_memory_usage_mb}MB RAM, {self.max_workers} workers, batch {self.default_batch_size}-{self.max_batch_size}")
-        logger.info(f"🎯 Read replica ratio: {self.read_replica_ratio * 100}%")
-        logger.info(f"🔄 WAL sync interval: {self.sync_interval}s")
+        # Initialize database schema and health check instances
+        try:
+            self._initialize_unified_wal_schema()
+            logger.info("✅ Unified WAL schema initialized")
+            
+            # Initialize existing collection mappings
+            self.initialize_existing_collection_mappings()
+            logger.info("✅ Collection mappings initialized")
+            
+            # Initial health check
+            for instance in self.instances:
+                try:
+                    response = requests.get(f"{instance.url}/api/v2/version", timeout=5)
+                    instance.is_healthy = response.status_code == 200
+                    if instance.is_healthy:
+                        logger.info(f"✅ {instance.name} instance healthy")
+                    else:
+                        logger.warning(f"❌ {instance.name} instance unhealthy: HTTP {response.status_code}")
+                except Exception as e:
+                    instance.is_healthy = False
+                    logger.warning(f"❌ {instance.name} instance unreachable: {e}")
+            
+        except Exception as e:
+            logger.error(f"❌ Initialization error: {e}")
+            # Continue anyway to allow Flask to start
 
     def get_db_connection(self):
         """Get database connection with improved error handling and retry logic"""
@@ -413,48 +410,194 @@ class UnifiedWALLoadBalancer:
             if len(collection_id) < 30:  # Collection name, not ID
                 return original_path  # No mapping needed for name-based paths
             
-            # Get collection name by querying the source instance
-            source_instance_name = "primary" if target_instance == "replica" else "replica" 
-            source_instance = next((inst for inst in self.instances if inst.name == source_instance_name and inst.is_healthy), None)
+            logger.info(f"🔍 Mapping collection ID {collection_id[:8]}... for target: {target_instance}")
             
-            if not source_instance:
-                logger.warning(f"⚠️ Source instance '{source_instance_name}' not available for collection mapping")
-                return original_path
-            
-            # Query collection details from source
+            # First, try to find existing mapping in database
             try:
-                collection_response = requests.get(
-                    f"{source_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}",
-                    timeout=20
-                )
-                
-                if collection_response.status_code == 200:
-                    collection_data = collection_response.json()
-                    collection_name = collection_data.get('name')
-                    collection_config = collection_data.get('configuration_json', {})
+                with self.get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        # Check if we have a mapping for this collection ID
+                        cur.execute("""
+                            SELECT collection_name, primary_collection_id, replica_collection_id 
+                            FROM collection_id_mapping 
+                            WHERE primary_collection_id = %s OR replica_collection_id = %s
+                        """, (collection_id, collection_id))
+                        
+                        result = cur.fetchone()
+                        if result:
+                            collection_name, primary_id, replica_id = result
+                            target_collection_id = replica_id if target_instance == "replica" else primary_id
+                            
+                            if target_collection_id and target_collection_id != collection_id:
+                                mapped_path = original_path.replace(collection_id, target_collection_id)
+                                logger.info(f"✅ Found mapping: {collection_id[:8]}... → {target_collection_id[:8]}... ({collection_name})")
+                                return mapped_path
+                            else:
+                                logger.info(f"🔄 No mapping needed for {collection_name} - same ID or target not found")
+                                return original_path
+            except Exception as e:
+                logger.debug(f"Database mapping lookup failed: {e}")
+            
+            # If no mapping found, try to create one by querying both instances
+            logger.info(f"🔧 No existing mapping found, attempting to create mapping for {collection_id[:8]}...")
+            
+            # Determine which instance currently has this collection
+            collection_found_on = None
+            collection_name = None
+            collection_config = None
+            
+            # Check primary instance
+            try:
+                primary_instance = self.get_primary_instance()
+                if primary_instance:
+                    primary_response = requests.get(
+                        f"{primary_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}",
+                        timeout=15
+                    )
                     
-                    if collection_name:
-                        # Get or create mapping
-                        mapping = self.get_or_create_collection_mapping(
-                            collection_name, collection_id, source_instance_name, collection_config
+                    if primary_response.status_code == 200:
+                        collection_data = primary_response.json()
+                        collection_name = collection_data.get('name')
+                        collection_config = collection_data.get('configuration_json', {})
+                        collection_found_on = "primary"
+                        logger.info(f"✅ Found collection '{collection_name}' on primary")
+            except Exception as e:
+                logger.debug(f"Primary collection lookup failed: {e}")
+            
+            # Check replica instance if not found on primary
+            if not collection_found_on:
+                try:
+                    replica_instance = self.get_replica_instance()
+                    if replica_instance:
+                        replica_response = requests.get(
+                            f"{replica_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}",
+                            timeout=15
                         )
                         
-                        if mapping:
-                            target_collection_id = mapping.get(f'{target_instance}_collection_id')
-                            if target_collection_id:
-                                # Replace collection ID in path
-                                mapped_path = original_path.replace(collection_id, target_collection_id)
-                                logger.info(f"🔄 Mapped collection path: {collection_id[:8]}... → {target_collection_id[:8]}...")
-                                return mapped_path
-                        
-            except Exception as e:
-                logger.debug(f"Collection mapping query failed: {e}")
+                        if replica_response.status_code == 200:
+                            collection_data = replica_response.json()
+                            collection_name = collection_data.get('name')
+                            collection_config = collection_data.get('configuration_json', {})
+                            collection_found_on = "replica"
+                            logger.info(f"✅ Found collection '{collection_name}' on replica")
+                except Exception as e:
+                    logger.debug(f"Replica collection lookup failed: {e}")
+            
+            # If we found the collection, create mapping
+            if collection_found_on and collection_name:
+                logger.info(f"🔧 Creating collection mapping for '{collection_name}' found on {collection_found_on}")
+                
+                mapping = self.get_or_create_collection_mapping(
+                    collection_name, collection_id, collection_found_on, collection_config
+                )
+                
+                if mapping:
+                    target_collection_id = mapping.get(f'{target_instance}_collection_id')
+                    if target_collection_id and target_collection_id != collection_id:
+                        mapped_path = original_path.replace(collection_id, target_collection_id)
+                        logger.info(f"✅ Created mapping: {collection_id[:8]}... → {target_collection_id[:8]}... ({collection_name})")
+                        return mapped_path
+                    else:
+                        logger.info(f"🔄 No mapping needed - target collection ID same as source")
+                        return original_path
+                else:
+                    logger.warning(f"❌ Failed to create mapping for '{collection_name}'")
+            else:
+                logger.warning(f"❌ Collection {collection_id[:8]}... not found on either instance")
             
             return original_path
             
         except Exception as e:
-            logger.error(f"Error mapping collection ID in path: {e}")
+            logger.error(f"❌ Error mapping collection ID in path: {e}")
             return original_path
+
+    def initialize_existing_collection_mappings(self):
+        """Initialize mappings for existing collections that have different IDs"""
+        try:
+            logger.info("🔧 Initializing existing collection mappings...")
+            
+            primary_instance = self.get_primary_instance()
+            replica_instance = self.get_replica_instance()
+            
+            if not primary_instance or not replica_instance:
+                logger.warning("⚠️ Cannot initialize mappings - instances not available")
+                return
+            
+            # Get collections from both instances
+            primary_response = requests.get(
+                f"{primary_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                timeout=30
+            )
+            
+            replica_response = requests.get(
+                f"{replica_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                timeout=30
+            )
+            
+            if primary_response.status_code != 200 or replica_response.status_code != 200:
+                logger.warning("⚠️ Failed to fetch collections for mapping initialization")
+                return
+            
+            primary_collections = primary_response.json()
+            replica_collections = replica_response.json()
+            
+            # Create name-to-ID mappings
+            primary_by_name = {c['name']: c for c in primary_collections}
+            replica_by_name = {c['name']: c for c in replica_collections}
+            
+            mappings_created = 0
+            
+            # Find collections with same name but different IDs
+            for collection_name in primary_by_name.keys():
+                if collection_name in replica_by_name:
+                    primary_collection = primary_by_name[collection_name]
+                    replica_collection = replica_by_name[collection_name]
+                    
+                    primary_id = primary_collection['id']
+                    replica_id = replica_collection['id']
+                    
+                    if primary_id != replica_id:
+                        logger.info(f"🔧 Creating mapping for '{collection_name}': {primary_id[:8]}... ↔ {replica_id[:8]}...")
+                        
+                        # Store mapping in database
+                        try:
+                            with self.get_db_connection() as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("""
+                                        INSERT INTO collection_id_mapping 
+                                        (collection_name, primary_collection_id, replica_collection_id, collection_config)
+                                        VALUES (%s, %s, %s, %s)
+                                        ON CONFLICT (collection_name) 
+                                        DO UPDATE SET 
+                                            primary_collection_id = EXCLUDED.primary_collection_id,
+                                            replica_collection_id = EXCLUDED.replica_collection_id,
+                                            collection_config = EXCLUDED.collection_config,
+                                            updated_at = NOW()
+                                    """, (
+                                        collection_name, 
+                                        primary_id, 
+                                        replica_id, 
+                                        json.dumps(primary_collection.get('configuration_json', {}))
+                                    ))
+                                    conn.commit()
+                                    mappings_created += 1
+                                    logger.info(f"✅ Mapping created for '{collection_name}'")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to store mapping for '{collection_name}': {e}")
+                    else:
+                        logger.info(f"🔄 Collection '{collection_name}' has same ID on both instances")
+                else:
+                    logger.info(f"⚠️ Collection '{collection_name}' only exists on primary")
+            
+            # Check for collections only on replica
+            for collection_name in replica_by_name.keys():
+                if collection_name not in primary_by_name:
+                    logger.info(f"⚠️ Collection '{collection_name}' only exists on replica")
+            
+            logger.info(f"✅ Collection mapping initialization completed: {mappings_created} mappings created")
+            
+        except Exception as e:
+            logger.error(f"❌ Error initializing collection mappings: {e}")
 
     def collect_resource_metrics(self) -> ResourceMetrics:
         """Collect current resource usage metrics"""
@@ -1453,6 +1596,42 @@ class UnifiedWALLoadBalancer:
             
             raise e
 
+    def clear_failed_wal_entries(self, max_age_hours: int = 24):
+        """Clear old failed WAL entries to reset sync state"""
+        try:
+            logger.info(f"🧹 Clearing failed WAL entries older than {max_age_hours} hours...")
+            
+            with self.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Clear old failed entries
+                    cur.execute("""
+                        DELETE FROM unified_wal_writes 
+                        WHERE status = 'failed' 
+                        AND retry_count >= 3
+                        AND created_at < NOW() - INTERVAL '%s hours'
+                    """, (max_age_hours,))
+                    
+                    deleted_count = cur.rowcount
+                    
+                    # Reset retry count for recent failed entries to give them another chance
+                    cur.execute("""
+                        UPDATE unified_wal_writes 
+                        SET retry_count = 0, error_message = NULL, updated_at = NOW()
+                        WHERE status = 'failed' 
+                        AND retry_count < 3
+                        AND created_at >= NOW() - INTERVAL '1 hour'
+                    """)
+                    
+                    reset_count = cur.rowcount
+                    conn.commit()
+                    
+                    logger.info(f"✅ WAL cleanup completed: {deleted_count} old entries deleted, {reset_count} recent entries reset")
+                    return deleted_count, reset_count
+                    
+        except Exception as e:
+            logger.error(f"❌ Error clearing failed WAL entries: {e}")
+            return 0, 0
+
 # Main execution for web service  
 if __name__ == '__main__':
     logger.info("🚀 Starting Enhanced Unified WAL Load Balancer with High-Volume Support")
@@ -1519,6 +1698,57 @@ if __name__ == '__main__':
             }), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+    
+    @app.route('/wal/cleanup', methods=['POST'])
+    def wal_cleanup():
+        """Clean up old failed WAL entries"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not initialized"}), 503
+            
+            # Get max_age parameter, default to 24 hours
+            max_age = request.json.get('max_age_hours', 24) if request.is_json else 24
+            
+            deleted_count, reset_count = enhanced_wal.clear_failed_wal_entries(max_age)
+            
+            return jsonify({
+                "status": "success", 
+                "deleted_entries": deleted_count,
+                "reset_entries": reset_count,
+                "message": f"Cleared {deleted_count} old failed entries, reset {reset_count} recent entries"
+            }), 200
+        except Exception as e:
+            return jsonify({"error": f"Cleanup failed: {str(e)}"}), 500
+    
+    @app.route('/collection/mappings', methods=['GET'])
+    def collection_mappings():
+        """Get current collection ID mappings"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not initialized"}), 503
+            
+            with enhanced_wal.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT collection_name, primary_collection_id, replica_collection_id, 
+                               created_at, updated_at
+                        FROM collection_id_mapping 
+                        ORDER BY updated_at DESC
+                    """)
+                    
+                    mappings = []
+                    for row in cur.fetchall():
+                        mappings.append({
+                            "collection_name": row[0],
+                            "primary_collection_id": row[1],
+                            "replica_collection_id": row[2],
+                            "created_at": row[3].isoformat() if row[3] else None,
+                            "updated_at": row[4].isoformat() if row[4] else None
+                        })
+                    
+                    return jsonify({"mappings": mappings, "count": len(mappings)}), 200
+        except Exception as e:
+            return jsonify({"error": f"Failed to get mappings: {str(e)}"}), 500
     
     @app.route('/metrics', methods=['GET'])
     def metrics():
