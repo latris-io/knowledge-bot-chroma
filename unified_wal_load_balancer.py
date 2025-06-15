@@ -393,27 +393,41 @@ class UnifiedWALLoadBalancer:
             return None
 
     def map_collection_id_for_sync(self, original_path: str, target_instance: str) -> str:
-        """Map collection ID in path from source instance to target instance"""
+        """Map collection ID in path from source instance to target instance - WITH COMPREHENSIVE DEBUGGING"""
+        logger.error(f"🔍 COLLECTION MAPPING DEBUG - Starting mapping")
+        logger.error(f"   Original path: {original_path}")
+        logger.error(f"   Target instance: {target_instance}")
+        
         try:
             # Extract collection ID from path
             if '/collections/' not in original_path:
+                logger.error(f"   ℹ️ No /collections/ in path - no mapping needed")
                 return original_path
             
             path_parts = original_path.split('/collections/')
             if len(path_parts) < 2:
+                logger.error(f"   ⚠️ Invalid path structure after split - no mapping possible")
                 return original_path
             
             collection_id_and_rest = path_parts[1]
             collection_id = collection_id_and_rest.split('/')[0]
             
+            logger.error(f"   📋 Path analysis:")
+            logger.error(f"      Path parts: {path_parts}")
+            logger.error(f"      Collection ID extracted: {collection_id}")
+            logger.error(f"      Collection ID length: {len(collection_id)}")
+            
             # Check if this looks like a UUID (collection ID vs collection name)
             if len(collection_id) < 30:  # Collection name, not ID
+                logger.error(f"   ℹ️ Collection identifier appears to be name (length < 30) - no mapping needed")
                 return original_path  # No mapping needed for name-based paths
             
-            logger.info(f"🔍 Mapping collection ID {collection_id[:8]}... for target: {target_instance}")
+            logger.error(f"   🔍 Collection ID detected (length >= 30) - attempting mapping")
             
             # First, try to find existing mapping in database
             try:
+                logger.error(f"   🔍 Querying database for existing mapping...")
+                
                 with self.get_db_connection() as conn:
                     with conn.cursor() as cur:
                         # Check if we have a mapping for this collection ID
@@ -424,22 +438,40 @@ class UnifiedWALLoadBalancer:
                         """, (collection_id, collection_id))
                         
                         result = cur.fetchone()
+                        logger.error(f"   📊 Database query result: {result}")
+                        
                         if result:
                             collection_name, primary_id, replica_id = result
+                            logger.error(f"   ✅ Found existing mapping:")
+                            logger.error(f"      Collection name: {collection_name}")
+                            logger.error(f"      Primary ID: {primary_id}")
+                            logger.error(f"      Replica ID: {replica_id}")
+                            
                             target_collection_id = replica_id if target_instance == "replica" else primary_id
+                            logger.error(f"      Target collection ID for {target_instance}: {target_collection_id}")
                             
                             if target_collection_id and target_collection_id != collection_id:
                                 mapped_path = original_path.replace(collection_id, target_collection_id)
-                                logger.info(f"✅ Found mapping: {collection_id[:8]}... → {target_collection_id[:8]}... ({collection_name})")
+                                logger.error(f"   🎯 MAPPING SUCCESS:")
+                                logger.error(f"      Original: {original_path}")
+                                logger.error(f"      Mapped: {mapped_path}")
+                                logger.error(f"      ID change: {collection_id} → {target_collection_id}")
                                 return mapped_path
                             else:
-                                logger.info(f"🔄 No mapping needed for {collection_name} - same ID or target not found")
+                                logger.error(f"   ℹ️ No mapping needed:")
+                                logger.error(f"      Target ID same as source: {target_collection_id == collection_id}")
+                                logger.error(f"      Target ID exists: {target_collection_id is not None}")
                                 return original_path
+                        else:
+                            logger.error(f"   ⚠️ No existing mapping found in database")
+                            
             except Exception as e:
-                logger.debug(f"Database mapping lookup failed: {e}")
+                logger.error(f"   ❌ Database mapping lookup failed:")
+                logger.error(f"      Error type: {type(e).__name__}")
+                logger.error(f"      Error message: {str(e)}")
             
             # If no mapping found, try to create one by querying both instances
-            logger.info(f"🔧 No existing mapping found, attempting to create mapping for {collection_id[:8]}...")
+            logger.error(f"   🔧 No existing mapping - attempting to create new mapping")
             
             # Determine which instance currently has this collection
             collection_found_on = None
@@ -447,68 +479,118 @@ class UnifiedWALLoadBalancer:
             collection_config = None
             
             # Check primary instance
+            logger.error(f"   🔍 Checking primary instance for collection...")
             try:
                 primary_instance = self.get_primary_instance()
+                logger.error(f"   Primary instance available: {primary_instance is not None}")
+                
                 if primary_instance:
-                    primary_response = requests.get(
-                        f"{primary_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}",
-                        timeout=15
-                    )
+                    primary_url = f"{primary_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}"
+                    logger.error(f"   🌐 Querying primary: {primary_url}")
+                    
+                    primary_response = requests.get(primary_url, timeout=15)
+                    logger.error(f"   📥 Primary response: {primary_response.status_code}")
                     
                     if primary_response.status_code == 200:
                         collection_data = primary_response.json()
                         collection_name = collection_data.get('name')
                         collection_config = collection_data.get('configuration_json', {})
                         collection_found_on = "primary"
-                        logger.info(f"✅ Found collection '{collection_name}' on primary")
+                        logger.error(f"   ✅ Found collection on primary:")
+                        logger.error(f"      Name: {collection_name}")
+                        logger.error(f"      Config: {collection_config}")
+                    else:
+                        logger.error(f"   ❌ Collection not found on primary: {primary_response.status_code}")
+                        if primary_response.text:
+                            logger.error(f"      Response body: {primary_response.text[:200]}...")
+                else:
+                    logger.error(f"   ❌ Primary instance not available")
+                    
             except Exception as e:
-                logger.debug(f"Primary collection lookup failed: {e}")
+                logger.error(f"   ❌ Primary collection lookup failed:")
+                logger.error(f"      Error type: {type(e).__name__}")
+                logger.error(f"      Error message: {str(e)}")
             
             # Check replica instance if not found on primary
             if not collection_found_on:
+                logger.error(f"   🔍 Checking replica instance for collection...")
                 try:
                     replica_instance = self.get_replica_instance()
+                    logger.error(f"   Replica instance available: {replica_instance is not None}")
+                    
                     if replica_instance:
-                        replica_response = requests.get(
-                            f"{replica_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}",
-                            timeout=15
-                        )
+                        replica_url = f"{replica_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}"
+                        logger.error(f"   🌐 Querying replica: {replica_url}")
+                        
+                        replica_response = requests.get(replica_url, timeout=15)
+                        logger.error(f"   📥 Replica response: {replica_response.status_code}")
                         
                         if replica_response.status_code == 200:
                             collection_data = replica_response.json()
                             collection_name = collection_data.get('name')
                             collection_config = collection_data.get('configuration_json', {})
                             collection_found_on = "replica"
-                            logger.info(f"✅ Found collection '{collection_name}' on replica")
+                            logger.error(f"   ✅ Found collection on replica:")
+                            logger.error(f"      Name: {collection_name}")
+                            logger.error(f"      Config: {collection_config}")
+                        else:
+                            logger.error(f"   ❌ Collection not found on replica: {replica_response.status_code}")
+                            if replica_response.text:
+                                logger.error(f"      Response body: {replica_response.text[:200]}...")
+                    else:
+                        logger.error(f"   ❌ Replica instance not available")
+                        
                 except Exception as e:
-                    logger.debug(f"Replica collection lookup failed: {e}")
+                    logger.error(f"   ❌ Replica collection lookup failed:")
+                    logger.error(f"      Error type: {type(e).__name__}")
+                    logger.error(f"      Error message: {str(e)}")
             
             # If we found the collection, create mapping
             if collection_found_on and collection_name:
-                logger.info(f"🔧 Creating collection mapping for '{collection_name}' found on {collection_found_on}")
+                logger.error(f"   🔧 Creating collection mapping:")
+                logger.error(f"      Collection name: {collection_name}")
+                logger.error(f"      Found on: {collection_found_on}")
+                logger.error(f"      Source collection ID: {collection_id}")
                 
                 mapping = self.get_or_create_collection_mapping(
                     collection_name, collection_id, collection_found_on, collection_config
                 )
                 
+                logger.error(f"   📊 Mapping creation result: {mapping}")
+                
                 if mapping:
                     target_collection_id = mapping.get(f'{target_instance}_collection_id')
+                    logger.error(f"   🎯 Target collection ID from mapping: {target_collection_id}")
+                    
                     if target_collection_id and target_collection_id != collection_id:
                         mapped_path = original_path.replace(collection_id, target_collection_id)
-                        logger.info(f"✅ Created mapping: {collection_id[:8]}... → {target_collection_id[:8]}... ({collection_name})")
+                        logger.error(f"   ✅ NEW MAPPING SUCCESS:")
+                        logger.error(f"      Original: {original_path}")
+                        logger.error(f"      Mapped: {mapped_path}")
+                        logger.error(f"      ID change: {collection_id} → {target_collection_id}")
                         return mapped_path
                     else:
-                        logger.info(f"🔄 No mapping needed - target collection ID same as source")
+                        logger.error(f"   ℹ️ No mapping needed after creation:")
+                        logger.error(f"      Target ID same as source: {target_collection_id == collection_id}")
+                        logger.error(f"      Target ID exists: {target_collection_id is not None}")
                         return original_path
                 else:
-                    logger.warning(f"❌ Failed to create mapping for '{collection_name}'")
+                    logger.error(f"   ❌ Failed to create mapping - mapping result was None/empty")
             else:
-                logger.warning(f"❌ Collection {collection_id[:8]}... not found on either instance")
+                logger.error(f"   ❌ Collection not found anywhere:")
+                logger.error(f"      Found on instance: {collection_found_on}")
+                logger.error(f"      Collection name: {collection_name}")
+                logger.error(f"      Unable to create mapping")
             
+            logger.error(f"   🔄 Returning original path unchanged: {original_path}")
             return original_path
             
         except Exception as e:
-            logger.error(f"❌ Error mapping collection ID in path: {e}")
+            logger.error(f"   ❌ MAPPING ERROR:")
+            logger.error(f"      Exception type: {type(e).__name__}")
+            logger.error(f"      Exception message: {str(e)}")
+            logger.error(f"      Exception details: {repr(e)}")
+            logger.error(f"      Returning original path: {original_path}")
             return original_path
 
     def initialize_existing_collection_mappings(self):
@@ -892,142 +974,229 @@ class UnifiedWALLoadBalancer:
             return []
 
     def process_sync_batch(self, batch: SyncBatch) -> Tuple[int, int]:
-        """Process a batch of WAL syncs with intelligent collection mapping and auto-creation"""
+        """Process a batch of WAL syncs with intelligent collection mapping and auto-creation - WITH COMPREHENSIVE DEBUGGING"""
+        logger.error(f"🔍 BATCH DEBUG - Starting batch processing")
+        logger.error(f"   Target instance: {batch.target_instance}")
+        logger.error(f"   Batch size: {batch.batch_size}")
+        logger.error(f"   Estimated memory: {batch.estimated_memory_mb:.1f}MB")
+        
         instance = next((inst for inst in self.instances if inst.name == batch.target_instance), None)
         if not instance or not instance.is_healthy:
+            logger.error(f"   ❌ Target instance not available or unhealthy: {batch.target_instance}")
             return 0, len(batch.writes)
+        
+        logger.error(f"   ✅ Target instance available: {instance.name} ({instance.url})")
         
         success_count = 0
         start_memory = psutil.virtual_memory().used / 1024 / 1024
         start_time = time.time()
         
-        logger.info(f"🔄 Processing sync batch: {batch.batch_size} writes to {batch.target_instance} ({batch.estimated_memory_mb:.1f}MB)")
+        logger.error(f"   📊 Starting memory usage: {start_memory:.1f}MB")
+        logger.error(f"   🕐 Starting time: {datetime.now().isoformat()}")
         
         try:
-            for write_record in batch.writes:
+            for write_index, write_record in enumerate(batch.writes):
+                logger.error(f"🔍 WRITE {write_index+1}/{len(batch.writes)} DEBUG - Processing individual write")
+                
                 try:
                     # Check memory pressure during processing
                     current_memory = psutil.virtual_memory().used / 1024 / 1024
                     if current_memory > self.max_memory_usage_mb * 0.9:  # 90% threshold
-                        logger.warning(f"⚠️ Memory pressure during batch processing: {current_memory:.1f}MB")
+                        logger.error(f"   ⚠️ Memory pressure during processing: {current_memory:.1f}MB (limit: {self.max_memory_usage_mb}MB)")
                         gc.collect()  # Force garbage collection
                     
-                    # Prepare sync request data
+                    # 🔍 DEBUGGING: Extract write record details
                     write_id = write_record['write_id']
                     method = write_record['method']
                     original_path = write_record['path']
                     data = write_record['data'] or b''
                     
-                    # Fix headers parsing
+                    logger.error(f"   Write ID: {write_id}")
+                    logger.error(f"   Method: {method}")
+                    logger.error(f"   Original path: {original_path}")
+                    logger.error(f"   Data type: {type(data)}")
+                    logger.error(f"   Data size: {len(str(data)) if data else 0} chars")
+                    if data:
+                        logger.error(f"   Data preview: {str(data)[:100]}...")
+                    
+                    # 🔍 DEBUGGING: Headers processing
                     headers = {}
                     if write_record['headers']:
+                        logger.error(f"   Raw headers from DB: {write_record['headers']}")
+                        logger.error(f"   Headers type: {type(write_record['headers'])}")
+                        
                         if isinstance(write_record['headers'], str):
-                            headers = json.loads(write_record['headers'])
+                            try:
+                                headers = json.loads(write_record['headers'])
+                                logger.error(f"   ✅ Parsed headers from JSON string: {headers}")
+                            except Exception as e:
+                                logger.error(f"   ❌ Failed to parse headers JSON: {e}")
+                                headers = {}
                         else:
                             headers = write_record['headers']
+                            logger.error(f"   ✅ Using headers directly: {headers}")
+                    else:
+                        logger.error(f"   No headers in write record")
                     
                     # INTELLIGENT COLLECTION ID MAPPING
-                    logger.info(f"🔄 Starting collection mapping for {write_id[:8]}: {original_path}")
+                    logger.error(f"   🔄 Starting collection mapping for path: {original_path}")
                     mapped_path = self.map_collection_id_for_sync(original_path, batch.target_instance)
                     
                     if mapped_path != original_path:
-                        logger.info(f"✅ Collection ID mapped for sync {write_id[:8]}: {original_path} → {mapped_path}")
+                        logger.error(f"   ✅ Path mapped: {original_path} → {mapped_path}")
                     else:
-                        logger.info(f"🔄 No mapping needed for {write_id[:8]}: {original_path}")
+                        logger.error(f"   ℹ️ No mapping needed: {original_path}")
                     
-                    # Ensure headers include Content-Type for sync requests
+                    # Prepare headers for sync request
                     sync_headers = {}
                     if headers:
-                        if isinstance(headers, str):
-                            import json
-                            sync_headers = json.loads(headers)
-                        else:
-                            sync_headers = headers.copy()
+                        sync_headers = headers.copy()
                     
                     # Always set Content-Type for POST/PUT/PATCH with data
                     if method in ['POST', 'PUT', 'PATCH'] and data:
                         sync_headers['Content-Type'] = 'application/json'
+                        logger.error(f"   📝 Added Content-Type header for {method} request")
                     
-                    logger.info(f"🚀 Syncing {write_id[:8]} to {batch.target_instance}: {method} {mapped_path}")
+                    logger.error(f"   Final sync headers: {sync_headers}")
                     
-                    # Make the sync request with mapped path and proper headers
+                    # 🔍 DEBUGGING: Make the sync request
+                    logger.error(f"   🚀 Initiating sync request...")
+                    logger.error(f"      Target: {batch.target_instance}")
+                    logger.error(f"      Method: {method}")
+                    logger.error(f"      Mapped path: {mapped_path}")
+                    logger.error(f"      Data size: {len(str(data))}")
+                    logger.error(f"      Headers: {sync_headers}")
+                    
                     response = self.make_direct_request(instance, method, mapped_path, data=data, headers=sync_headers)
+                    
+                    # 🔍 DEBUGGING: Success handling
+                    logger.error(f"   ✅ SYNC SUCCESS for write {write_id}")
+                    logger.error(f"      Response status: {response.status_code}")
+                    logger.error(f"      Response size: {len(response.text) if response.text else 0} chars")
                     
                     # Mark as synced
                     self.mark_write_synced(write_id)
                     success_count += 1
                     self.stats["successful_syncs"] += 1
                     
+                    logger.error(f"   📊 Updated stats: {self.stats['successful_syncs']} successful syncs total")
+                    
                 except requests.exceptions.HTTPError as e:
+                    logger.error(f"   ❌ HTTP ERROR for write {write_id}:")
+                    logger.error(f"      Error type: {type(e).__name__}")
+                    logger.error(f"      Status code: {e.response.status_code if e.response else 'unknown'}")
+                    logger.error(f"      Error message: {str(e)}")
+                    
                     # INTELLIGENT ERROR HANDLING WITH AUTO-COLLECTION CREATION
-                    if e.response.status_code == 404 and '/collections/' in original_path:
-                        logger.info(f"🔧 404 error detected for {write_id[:8]} - attempting auto-collection creation")
+                    if e.response and e.response.status_code == 404 and '/collections/' in original_path:
+                        logger.error(f"   🔧 404 detected - attempting auto-collection creation")
                         
                         try:
                             # Extract collection info from the path
                             collection_id_from_path = self.extract_collection_identifier(original_path)
+                            logger.error(f"      Extracted collection ID: {collection_id_from_path}")
+                            
                             if collection_id_from_path:
                                 # Try to get collection name from source instance
                                 source_instance_name = "primary" if batch.target_instance == "replica" else "replica"
                                 source_instance = next((inst for inst in self.instances if inst.name == source_instance_name and inst.is_healthy), None)
                                 
+                                logger.error(f"      Source instance: {source_instance_name}")
+                                logger.error(f"      Source instance available: {source_instance is not None}")
+                                
                                 if source_instance:
                                     # Get collection details from source
-                                    source_collection_response = requests.get(
-                                        f"{source_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id_from_path}",
-                                        timeout=20
-                                    )
+                                    source_url = f"{source_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id_from_path}"
+                                    logger.error(f"      Fetching collection from source: {source_url}")
+                                    
+                                    source_collection_response = requests.get(source_url, timeout=20)
+                                    logger.error(f"      Source collection response: {source_collection_response.status_code}")
                                     
                                     if source_collection_response.status_code == 200:
                                         source_collection = source_collection_response.json()
                                         collection_name = source_collection.get('name')
                                         collection_config = source_collection.get('configuration_json', {})
                                         
+                                        logger.error(f"      Collection name: {collection_name}")
+                                        logger.error(f"      Collection config: {collection_config}")
+                                        
                                         if collection_name:
-                                            logger.info(f"🔧 Auto-creating collection '{collection_name}' on {batch.target_instance}")
+                                            logger.error(f"      🔧 Creating collection mapping for '{collection_name}'")
                                             
                                             # Create collection mapping (this will auto-create the collection)
                                             mapping = self.get_or_create_collection_mapping(
                                                 collection_name, collection_id_from_path, source_instance_name, collection_config
                                             )
                                             
+                                            logger.error(f"      Mapping result: {mapping}")
+                                            
                                             if mapping:
                                                 # Retry the sync with proper collection ID mapping
+                                                logger.error(f"      🔄 Retrying sync with new mapping...")
                                                 retry_mapped_path = self.map_collection_id_for_sync(original_path, batch.target_instance)
+                                                logger.error(f"      Retry path: {retry_mapped_path}")
+                                                
                                                 retry_response = self.make_direct_request(instance, method, retry_mapped_path, data=data, headers=headers)
+                                                
+                                                logger.error(f"      ✅ RETRY SUCCESS: {retry_response.status_code}")
                                                 
                                                 self.mark_write_synced(write_id)
                                                 success_count += 1
                                                 self.stats["successful_syncs"] += 1
                                                 self.stats["auto_created_collections"] = self.stats.get("auto_created_collections", 0) + 1
-                                                logger.info(f"✅ Auto-creation successful for {write_id[:8]}")
                                                 continue
-                                            
+                                            else:
+                                                logger.error(f"      ❌ Mapping creation failed")
+                                        else:
+                                            logger.error(f"      ❌ No collection name found in source response")
+                                    else:
+                                        logger.error(f"      ❌ Failed to fetch collection from source: {source_collection_response.status_code}")
+                                else:
+                                    logger.error(f"      ❌ Source instance not available")
+                            else:
+                                logger.error(f"      ❌ Could not extract collection ID from path")
+                                
                             # If auto-creation failed, mark as failed
-                            self.mark_write_failed(write_record['write_id'], f"404: Collection not found, auto-creation failed: {str(e)}")
+                            error_msg = f"404: Collection not found, auto-creation failed: {str(e)}"
+                            self.mark_write_failed(write_record['write_id'], error_msg)
                             self.stats["failed_syncs"] += 1
-                            logger.warning(f"❌ Auto-creation failed for {write_record['write_id'][:8]}: {e}")
+                            logger.error(f"      ❌ Auto-creation failed, marked as failed")
                             
                         except Exception as auto_create_error:
-                            self.mark_write_failed(write_record['write_id'], f"404: Collection not found, auto-creation error: {str(auto_create_error)}")
+                            error_msg = f"404: Collection not found, auto-creation error: {str(auto_create_error)}"
+                            self.mark_write_failed(write_record['write_id'], error_msg)
                             self.stats["failed_syncs"] += 1
-                            logger.error(f"❌ Auto-creation error for {write_record['write_id'][:8]}: {auto_create_error}")
+                            logger.error(f"      ❌ Auto-creation exception: {auto_create_error}")
                     else:
                         # Other HTTP errors - mark as failed
-                        self.mark_write_failed(write_record['write_id'], str(e))
+                        error_msg = f"HTTP {e.response.status_code if e.response else 'unknown'}: {str(e)}"
+                        self.mark_write_failed(write_record['write_id'], error_msg)
                         self.stats["failed_syncs"] += 1
-                        logger.debug(f"❌ HTTP error syncing {write_record['write_id'][:8]}: {e}")
+                        logger.error(f"      ❌ Marked as failed: {error_msg}")
                         
                 except Exception as e:
-                    # General sync errors - mark as failed with retry increment
-                    self.mark_write_failed(write_record['write_id'], str(e))
+                    # General sync errors - mark as failed
+                    error_msg = f"Sync error: {type(e).__name__}: {str(e)}"
+                    self.mark_write_failed(write_record['write_id'], error_msg)
                     self.stats["failed_syncs"] += 1
-                    logger.debug(f"❌ Failed to sync write {write_record['write_id'][:8]}: {e}")
+                    logger.error(f"   ❌ GENERAL ERROR for write {write_id}:")
+                    logger.error(f"      Error type: {type(e).__name__}")
+                    logger.error(f"      Error message: {str(e)}")
+                    logger.error(f"      Error details: {repr(e)}")
             
+            # 🔍 DEBUGGING: Batch completion analysis
             end_memory = psutil.virtual_memory().used / 1024 / 1024
             memory_delta = end_memory - start_memory
             processing_time = time.time() - start_time
             throughput = batch.batch_size / processing_time if processing_time > 0 else 0
+            
+            logger.error(f"🔍 BATCH COMPLETION DEBUG:")
+            logger.error(f"   Successful writes: {success_count}/{batch.batch_size}")
+            logger.error(f"   Failed writes: {len(batch.writes) - success_count}")
+            logger.error(f"   Processing time: {processing_time:.2f}s")
+            logger.error(f"   Throughput: {throughput:.1f} writes/sec")
+            logger.error(f"   Memory delta: {memory_delta:+.1f}MB")
+            logger.error(f"   End memory: {end_memory:.1f}MB")
             
             # Update throughput stats
             if throughput > 0:
@@ -1036,12 +1205,14 @@ class UnifiedWALLoadBalancer:
                 else:
                     self.stats["avg_sync_throughput"] = (self.stats["avg_sync_throughput"] + throughput) / 2
             
-            logger.info(f"✅ Batch completed: {success_count}/{batch.batch_size} successful, {throughput:.1f} writes/sec, memory delta: {memory_delta:+.1f}MB")
-            
             return success_count, len(batch.writes) - success_count
             
         except Exception as e:
-            logger.error(f"Error processing sync batch: {e}")
+            logger.error(f"🔍 BATCH ERROR DEBUG:")
+            logger.error(f"   Exception type: {type(e).__name__}")
+            logger.error(f"   Exception message: {str(e)}")
+            logger.error(f"   Exception details: {repr(e)}")
+            logger.error(f"   Successful writes before error: {success_count}")
             return success_count, len(batch.writes) - success_count
 
     def perform_high_volume_sync(self):
@@ -1369,44 +1540,123 @@ class UnifiedWALLoadBalancer:
             return None
 
     def make_direct_request(self, instance: ChromaInstance, method: str, path: str, **kwargs) -> requests.Response:
-        """Make direct request without WAL logging (used for sync operations)"""
+        """Make direct request without WAL logging (used for sync operations) - WITH COMPREHENSIVE DEBUGGING"""
         kwargs['timeout'] = self.request_timeout
+        
+        # 🔍 DEBUGGING: Log all request details
+        logger.error(f"🔍 SYNC REQUEST DEBUG - Starting request")
+        logger.error(f"   Target instance: {instance.name} ({instance.url})")
+        logger.error(f"   Method: {method}")
+        logger.error(f"   Path: {path}")
+        logger.error(f"   Raw kwargs keys: {list(kwargs.keys())}")
         
         # CRITICAL FIX: Set proper headers for ChromaDB API compatibility
         if 'headers' not in kwargs:
             kwargs['headers'] = {}
+        
+        logger.error(f"   Original headers: {kwargs.get('headers', {})}")
+        
+        # 🔍 DEBUGGING: Data handling analysis
+        original_data = kwargs.get('data')
+        logger.error(f"   Original data type: {type(original_data)}")
+        logger.error(f"   Original data size: {len(str(original_data)) if original_data else 0} chars")
+        if original_data:
+            logger.error(f"   Original data preview: {str(original_data)[:200]}...")
         
         # CRITICAL FIX: Handle raw bytes data by converting to JSON for ChromaDB API
         if 'data' in kwargs and kwargs['data'] and method in ['POST', 'PUT', 'PATCH']:
             try:
                 # Convert bytes data back to JSON for proper ChromaDB API request
                 if isinstance(kwargs['data'], bytes):
+                    logger.error(f"   🔄 Converting bytes data to JSON...")
                     json_data = json.loads(kwargs['data'].decode('utf-8'))
                     del kwargs['data']  # Remove raw data
                     kwargs['json'] = json_data  # Use json parameter instead
-                    logger.debug(f"🔄 Converted WAL bytes data to JSON: {str(json_data)[:100]}...")
+                    logger.error(f"   ✅ Converted to JSON: {str(json_data)[:200]}...")
+                elif isinstance(kwargs['data'], (str, dict)):
+                    logger.error(f"   🔄 Converting string/dict data to JSON...")
+                    if isinstance(kwargs['data'], str):
+                        json_data = json.loads(kwargs['data'])
+                    else:
+                        json_data = kwargs['data']
+                    del kwargs['data']
+                    kwargs['json'] = json_data
+                    logger.error(f"   ✅ Converted to JSON: {str(json_data)[:200]}...")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to convert WAL data to JSON: {e}")
+                logger.error(f"   ❌ CRITICAL: Data conversion failed: {type(e).__name__}: {e}")
+                logger.error(f"   📄 Raw data that failed: {repr(kwargs.get('data', 'None'))[:300]}...")
+                # Continue with original data but log the issue
         
-        # Set Content-Type for requests with data or json
-        if method in ['POST', 'PUT', 'PATCH'] and ('data' in kwargs or 'json' in kwargs):
-            kwargs['headers']['Content-Type'] = 'application/json'
+        # 🔍 DEBUGGING: Final request parameters
+        final_headers = kwargs.get('headers', {})
+        final_json = kwargs.get('json')
+        final_data = kwargs.get('data')
         
-        # Set Accept header for all requests
-        kwargs['headers']['Accept'] = 'application/json'
+        logger.error(f"   Final headers: {final_headers}")
+        logger.error(f"   Final json: {str(final_json)[:200] if final_json else 'None'}...")
+        logger.error(f"   Final data: {str(final_data)[:200] if final_data else 'None'}...")
+        
+        # Construct final URL
+        url = f"{instance.url.rstrip('/')}/{path.lstrip('/')}"
+        logger.error(f"   🎯 Final URL: {url}")
         
         try:
-            url = f"{instance.url}{path}"
-            logger.info(f"🔄 SYNC REQUEST: {method} {url}")
-            logger.debug(f"🔄 Sync headers: {kwargs['headers']}")
+            # 🔍 DEBUGGING: Making the request
+            logger.error(f"   🚀 Executing request...")
+            
             response = requests.request(method, url, **kwargs)
+            
+            # 🔍 DEBUGGING: Response analysis
+            logger.error(f"   📥 Response received:")
+            logger.error(f"      Status: {response.status_code}")
+            logger.error(f"      Headers: {dict(response.headers)}")
+            logger.error(f"      Content-Type: {response.headers.get('Content-Type', 'unknown')}")
+            logger.error(f"      Content-Length: {response.headers.get('Content-Length', 'unknown')}")
+            
+            if response.text:
+                response_preview = response.text[:500] + "..." if len(response.text) > 500 else response.text
+                logger.error(f"      Response body: {response_preview}")
+            else:
+                logger.error(f"      Response body: (empty)")
+            
+            # Check for success
+            if response.status_code < 400:
+                logger.error(f"   ✅ SUCCESS: Request completed successfully")
+            else:
+                logger.error(f"   ⚠️ HTTP ERROR: Status {response.status_code}")
+                
             response.raise_for_status()
-            logger.info(f"✅ SYNC SUCCESS: {response.status_code}")
             return response
             
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"   ❌ HTTP ERROR DETAILS:")
+            logger.error(f"      Exception type: {type(e).__name__}")
+            logger.error(f"      Exception message: {str(e)}")
+            if hasattr(e, 'response') and e.response:
+                logger.error(f"      Response status: {e.response.status_code}")
+                logger.error(f"      Response headers: {dict(e.response.headers)}")
+                logger.error(f"      Response body: {e.response.text[:500]}...")
+            raise e
+            
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"   ❌ CONNECTION ERROR:")
+            logger.error(f"      Exception type: {type(e).__name__}")
+            logger.error(f"      Exception message: {str(e)}")
+            logger.error(f"      URL attempted: {url}")
+            raise e
+            
+        except requests.exceptions.Timeout as e:
+            logger.error(f"   ❌ TIMEOUT ERROR:")
+            logger.error(f"      Exception type: {type(e).__name__}")
+            logger.error(f"      Exception message: {str(e)}")
+            logger.error(f"      Timeout value: {kwargs.get('timeout', 'unknown')}")
+            raise e
+            
         except Exception as e:
-            logger.error(f"❌ SYNC FAILED to {instance.name}: {e}")
-            logger.error(f"❌ Failed URL: {url}")
+            logger.error(f"   ❌ UNEXPECTED ERROR:")
+            logger.error(f"      Exception type: {type(e).__name__}")
+            logger.error(f"      Exception message: {str(e)}")
+            logger.error(f"      Exception details: {repr(e)}")
             raise e
 
     def get_primary_instance(self) -> Optional[ChromaInstance]:
