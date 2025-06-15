@@ -1228,18 +1228,8 @@ class UnifiedWALLoadBalancer:
             if content_length > 0:
                 logger.info(f"Response preview: {response.content[:100]}")
             
-            # Create Flask response with proper content handling
-            flask_response = Response(
-                response.content,
-                status=response.status_code,
-                headers=[(key, value) for key, value in response.headers.items() if key.lower() not in ['content-encoding', 'transfer-encoding']]
-            )
-            
-            # Ensure content-type is set
-            if 'application/json' not in flask_response.headers.get('Content-Type', ''):
-                flask_response.headers['Content-Type'] = 'application/json'
-                
-            return flask_response
+            # Return the raw requests.Response for proxy_request to handle
+            return response
             
         except Exception as e:
             target_instance.update_stats(False)
@@ -1372,7 +1362,7 @@ if __name__ == '__main__':
             if content_length > 0:
                 logger.info(f"Response preview: {response.content[:100]}")
             
-            # Create Flask response with proper content handling
+            # Return the raw requests.Response for proxy_request to handle
             flask_response = Response(
                 response.content,
                 status=response.status_code,
@@ -1383,7 +1373,7 @@ if __name__ == '__main__':
             if 'application/json' not in flask_response.headers.get('Content-Type', ''):
                 flask_response.headers['Content-Type'] = 'application/json'
                 
-            return flask_response
+            return response
         except Exception as e:
             import traceback
             logger.error(f"Request forwarding failed for {request.method} /{path}: {e}")
