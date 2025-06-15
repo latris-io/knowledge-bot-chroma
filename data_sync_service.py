@@ -468,93 +468,150 @@ class ProductionSyncService:
             return self.default_batch_size  # Normal batches
     
     def sync_collection_production(self, primary_collection: Dict, replica_collections: List[Dict]) -> SyncMetrics:
-        """Production-grade collection sync with full monitoring"""
+        """Production-grade collection sync with full monitoring and proper ID handling"""
         collection_name = primary_collection['name']
         collection_id = primary_collection['id']
         start_time = time.time()
         start_memory = psutil.virtual_memory().used / 1024 / 1024
         
         try:
-            logger.info(f"🔄 Syncing collection '{collection_name}'")
+            logger.info(f"🔄 Syncing collection '{collection_name}' (Primary ID: {collection_id})")
             
             # Find or create replica collection
             replica_collection_id = None
+            replica_collection_metadata = {}
             for replica_col in replica_collections:
                 if replica_col['name'] == collection_name:
                     replica_collection_id = replica_col['id']
+                    replica_collection_metadata = replica_col.get('metadata', {})
+                    logger.info(f"📍 Found existing replica collection (Replica ID: {replica_collection_id})")
                     break
             
             if not replica_collection_id:
-                # Create replica collection
+                # Create replica collection with enhanced metadata including primary ID mapping
                 create_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections"
                 create_data = {
                     "name": collection_name,
-                    "metadata": {"synced_from": "primary", "sync_version": "2.0"}
+                    "metadata": {
+                        "synced_from": "primary", 
+                        "sync_version": "2.0",
+                        "primary_collection_id": collection_id,  # Track the primary ID
+                        "sync_created_at": time.time()
+                    }
                 }
                 response = self._make_request('POST', create_url, json=create_data)
                 replica_collection_id = response.json().get('id')
-                logger.info(f"✅ Created replica collection '{collection_name}'")
+                logger.info(f"✅ Created replica collection '{collection_name}' (Replica ID: {replica_collection_id}, Primary ID: {collection_id})")
+            else:
+                # Update existing replica metadata to include primary ID mapping if missing
+                if replica_collection_metadata.get('primary_collection_id') != collection_id:
+                    logger.info(f"🔄 Updating replica metadata to track primary ID mapping")
+                    update_metadata = dict(replica_collection_metadata)
+                    update_metadata.update({
+                        "synced_from": "primary",
+                        "sync_version": "2.0", 
+                        "primary_collection_id": collection_id,
+                        "last_sync_update": time.time()
+                    })
+                    
+                    # Update replica collection metadata
+                    modify_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_collection_id}"
+                    modify_data = {"metadata": update_metadata}
+                    self._make_request('PATCH', modify_url, json=modify_data)
+                    logger.info(f"✅ Updated replica metadata with primary ID mapping")
             
-            # Stream sync with adaptive batching
-            batch_size = self.calculate_optimal_batch_size(collection_id, 1000)
-            offset = 0
-            total_synced = 0
-            batch_count = 0
-            peak_memory = start_memory
+            # Check if we need to sync (basic change detection)
+            skip_sync = False
+            if replica_collection_metadata.get('primary_collection_id') == collection_id:
+                # Could add more sophisticated change detection here (e.g., document counts, checksums)
+                logger.debug(f"Collection '{collection_name}' metadata indicates previous successful sync")
             
-            while True:
-                # Monitor memory before each batch
-                current_memory = psutil.virtual_memory().used / 1024 / 1024
-                peak_memory = max(peak_memory, current_memory)
+            # Stream sync with adaptive batching (only if needed)
+            if not skip_sync:
+                batch_size = self.calculate_optimal_batch_size(collection_id, 1000)
+                offset = 0
+                total_synced = 0
+                batch_count = 0
+                peak_memory = start_memory
                 
-                # Adaptive batch size based on memory pressure
-                if current_memory > self.max_memory_usage_mb * 0.9:
-                    batch_size = max(100, batch_size // 2)  # Reduce batch size
-                    logger.warning(f"⚠️ High memory usage, reducing batch size to {batch_size}")
+                # Clear existing documents in replica collection first (for clean sync)
+                logger.info(f"🧹 Clearing existing documents from replica collection for clean sync")
+                try:
+                    # Get all document IDs from replica
+                    get_replica_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_collection_id}/get"
+                    get_replica_data = {"include": ["documents"], "limit": 10000}  # Get all docs
+                    replica_response = self._make_request('POST', get_replica_url, json=get_replica_data)
+                    replica_docs = replica_response.json()
+                    
+                    if replica_docs.get('ids'):
+                        # Delete existing documents
+                        delete_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_collection_id}/delete"
+                        delete_data = {"ids": replica_docs['ids']}
+                        self._make_request('POST', delete_url, json=delete_data)
+                        logger.info(f"🗑️ Cleared {len(replica_docs['ids'])} existing documents from replica")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not clear existing documents: {e} - proceeding with sync")
                 
-                # Get batch from primary
-                get_url = f"{self.primary_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}/get"
-                get_data = {
-                    "include": ["documents", "metadatas", "embeddings"],
-                    "offset": offset,
-                    "limit": batch_size
-                }
-                response = self._make_request('POST', get_url, json=get_data)
-                batch = response.json()
+                while True:
+                    # Monitor memory before each batch
+                    current_memory = psutil.virtual_memory().used / 1024 / 1024
+                    peak_memory = max(peak_memory, current_memory)
+                    
+                    # Adaptive batch size based on memory pressure
+                    if current_memory > self.max_memory_usage_mb * 0.9:
+                        batch_size = max(100, batch_size // 2)  # Reduce batch size
+                        logger.warning(f"⚠️ High memory usage, reducing batch size to {batch_size}")
+                    
+                    # Get batch from primary
+                    get_url = f"{self.primary_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}/get"
+                    get_data = {
+                        "include": ["documents", "metadatas", "embeddings"],
+                        "offset": offset,
+                        "limit": batch_size
+                    }
+                    response = self._make_request('POST', get_url, json=get_data)
+                    batch = response.json()
+                    
+                    if not batch.get('ids'):
+                        break
+                    
+                    # Add batch to replica
+                    add_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_collection_id}/add"
+                    add_data = {k: v for k, v in batch.items() if v is not None and k != 'include'}
+                    self._make_request('POST', add_url, json=add_data)
+                    
+                    total_synced += len(batch['ids'])
+                    batch_count += 1
+                    offset += batch_size
+                    
+                    # Clear batch from memory and force cleanup
+                    del batch, add_data
+                    gc.collect()
+                    
+                    logger.debug(f"📦 Batch {batch_count}: synced {total_synced} docs")
+                    
+                    # Prevent overwhelming the system
+                    time.sleep(0.05)
                 
-                if not batch.get('ids'):
-                    break
-                
-                # Add batch to replica
-                add_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_collection_id}/add"
-                add_data = {k: v for k, v in batch.items() if v is not None and k != 'include'}
-                self._make_request('POST', add_url, json=add_data)
-                
-                total_synced += len(batch['ids'])
-                batch_count += 1
-                offset += batch_size
-                
-                # Clear batch from memory and force cleanup
-                del batch, add_data
-                gc.collect()
-                
-                logger.debug(f"📦 Batch {batch_count}: synced {total_synced} docs")
-                
-                # Prevent overwhelming the system
-                time.sleep(0.05)
+                logger.info(f"✅ Synced {total_synced} documents in {batch_count} batches")
+            else:
+                total_synced = 0
+                batch_count = 0
+                logger.info(f"⏭️ Skipped sync - collection appears up to date")
             
             duration = time.time() - start_time
             
-            # Update database state
+            # Update database state (use primary collection ID for tracking)
             self.update_collection_state(
                 collection_id, collection_name, total_synced, total_synced,
                 SyncStatus.SUCCESS, duration, batch_count, peak_memory - start_memory
             )
             
-            logger.info(f"✅ Synced '{collection_name}': {total_synced} docs in {duration:.2f}s ({batch_count} batches)")
+            logger.info(f"✅ Sync complete '{collection_name}': {total_synced} docs in {duration:.2f}s")
+            logger.info(f"📊 ID Mapping: Primary({collection_id}) → Replica({replica_collection_id})")
             
             return SyncMetrics(
-                collection_id=collection_id,
+                collection_id=collection_id,  # Always use primary ID for consistency
                 collection_name=collection_name,
                 documents_processed=total_synced,
                 sync_duration_seconds=duration,
@@ -643,10 +700,8 @@ class ProductionSyncService:
             # Create set of primary collection names for fast lookup
             primary_names = {col['name'] for col in primary_collections}
             
-            deleted_count = 0
-            deletion_errors = []
-            
             # Find collections on replica that don't exist on primary
+            collections_to_delete = []
             for replica_col in replica_collections:
                 collection_name = replica_col['name']
                 
@@ -659,23 +714,39 @@ class ProductionSyncService:
                     logger.warning(f"⚠️ Found orphaned non-test collection on replica: {collection_name} (manual review needed)")
                     continue
                 
-                try:
-                    logger.info(f"🗑️ Deleting orphaned collection from replica: {collection_name}")
-                    
-                    # Delete from replica
-                    delete_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
-                    self._make_request('DELETE', delete_url)
-                    
-                    deleted_count += 1
-                    logger.info(f"✅ Deleted orphaned collection: {collection_name}")
-                    
-                    # Small delay to avoid overwhelming the server
-                    time.sleep(0.2)
-                    
-                except Exception as e:
-                    error_msg = f"Failed to delete {collection_name}: {str(e)}"
-                    logger.error(f"❌ {error_msg}")
-                    deletion_errors.append(error_msg)
+                collections_to_delete.append(collection_name)
+            
+            if not collections_to_delete:
+                logger.info("✅ No orphaned collections found - replica in sync")
+                return {'deleted': 0, 'errors': []}
+            
+            logger.info(f"🗑️ Found {len(collections_to_delete)} orphaned collections to delete")
+            
+            # HIGH-VOLUME STRATEGY: Use parallel processing for deletions
+            deleted_count = 0
+            deletion_errors = []
+            
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # Submit deletion tasks in parallel
+                future_to_collection = {
+                    executor.submit(self._delete_collection_from_replica, collection_name): collection_name
+                    for collection_name in collections_to_delete
+                }
+                
+                # Process results as they complete
+                for future in as_completed(future_to_collection):
+                    collection_name = future_to_collection[future]
+                    try:
+                        success = future.result()
+                        if success:
+                            deleted_count += 1
+                            logger.info(f"✅ Deleted orphaned collection: {collection_name}")
+                        else:
+                            deletion_errors.append(f"Failed to delete {collection_name}: Unknown error")
+                    except Exception as e:
+                        error_msg = f"Failed to delete {collection_name}: {str(e)}"
+                        logger.error(f"❌ {error_msg}")
+                        deletion_errors.append(error_msg)
             
             # Log summary
             if deleted_count > 0:
@@ -692,14 +763,29 @@ class ProductionSyncService:
                             requests.post(webhook_url, json=payload, timeout=10)
                         except:
                             pass  # Don't fail sync for notification issues
-            else:
-                logger.info("✅ No orphaned collections found - replica in sync")
             
             return {'deleted': deleted_count, 'errors': deletion_errors}
             
         except Exception as e:
             logger.error(f"❌ Deletion sync failed: {e}")
             return {'deleted': 0, 'errors': [str(e)]}
+
+    def _delete_collection_from_replica(self, collection_name: str) -> bool:
+        """Delete a single collection from replica using collection name (correct ChromaDB API format)"""
+        try:
+            # Use collection NAME in URL path - this is the correct ChromaDB API format!
+            delete_url = f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+            self._make_request('DELETE', delete_url)
+            logger.info(f"✅ Deleted collection '{collection_name}' from replica")
+            return True
+            
+        except Exception as e:
+            if "404" in str(e):
+                logger.info(f"📝 Collection '{collection_name}' not found on replica (already deleted)")
+                return True  # Consider it successfully deleted if it doesn't exist
+            else:
+                logger.error(f"❌ Failed to delete '{collection_name}' from replica: {e}")
+                return False
 
     def perform_production_sync(self):
         """Perform full production sync with monitoring and reporting"""
