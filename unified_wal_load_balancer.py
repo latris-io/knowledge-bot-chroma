@@ -1133,8 +1133,8 @@ class UnifiedWALLoadBalancer:
         return self.get_primary_instance()
 
     def forward_request(self, method: str, path: str, headers: Dict[str, str], 
-                       data: bytes, target_instance: Optional[ChromaInstance] = None, 
-                       retry_count: int = 0, max_retries: int = 1) -> requests.Response:
+                       data: bytes = b'', target_instance: Optional[ChromaInstance] = None, 
+                       retry_count: int = 0, max_retries: int = 1, **kwargs) -> requests.Response:
         """Forward request to appropriate instance with WAL logging for deletions"""
         
         # Prevent infinite retry loops
@@ -1179,10 +1179,33 @@ class UnifiedWALLoadBalancer:
                     executed_on=target_instance.name
                 )
         
-        # Execute the request
+        # Execute the request using proven working pattern from old load balancer
         try:
             url = f"{target_instance.url}{path}"
-            response = requests.request(method, url, data=data, headers=headers, timeout=self.request_timeout)
+            
+            # Create session with proper headers (like old load balancer)
+            session = requests.Session()
+            
+            # Set base headers
+            session_headers = {
+                'Accept-Encoding': '',  # No compression for compatibility
+                'Accept': 'application/json'
+            }
+            
+            # Only set Content-Type for requests that have data
+            if data or kwargs.get('json') or method in ['POST', 'PUT', 'PATCH']:
+                session_headers['Content-Type'] = 'application/json'
+            
+            session.headers.update(session_headers)
+            
+            # Prepare request parameters
+            request_params = {'timeout': self.request_timeout}
+            if data:
+                request_params['data'] = data
+            request_params.update(kwargs)  # Add json, params, etc.
+            
+            # Use session to make request (like old load balancer)
+            response = session.request(method, url, **request_params)
             response.raise_for_status()
             
             target_instance.update_stats(True)
@@ -1306,11 +1329,22 @@ if __name__ == '__main__':
             logger.info(f"Forwarding {request.method} request to /{path}")
             
             # Forward request through unified WAL load balancer
+            # Handle request data properly like old load balancer
+            request_kwargs = {}
+            
+            # Handle JSON vs raw data properly
+            if request.method in ['POST', 'PUT', 'PATCH'] and request.content_length:
+                if request.is_json:
+                    request_kwargs['json'] = request.get_json()
+                else:
+                    request_kwargs['data'] = request.get_data()
+            
             response = enhanced_wal.forward_request(
                 method=request.method,
                 path=f"/{path}",
-                headers=dict(request.headers),
-                data=request.get_data()
+                headers={},  # Let session handle headers properly  
+                data=request_kwargs.get('data', b''),
+                json=request_kwargs.get('json')
             )
             
             logger.info(f"Successfully forwarded {request.method} /{path} -> {response.status_code}")
