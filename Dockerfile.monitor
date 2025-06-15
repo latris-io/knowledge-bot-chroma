@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.monitor.txt
 # Copy monitoring application
 COPY render_monitor.py ./
 COPY render_failover.py ./
+COPY cleanup_service.py ./
 
 # Start the background monitor
 CMD ["python", "render_monitor.py"] 
