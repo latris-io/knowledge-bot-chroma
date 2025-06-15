@@ -1133,8 +1133,13 @@ class UnifiedWALLoadBalancer:
         return self.get_primary_instance()
 
     def forward_request(self, method: str, path: str, headers: Dict[str, str], 
-                       data: bytes, target_instance: Optional[ChromaInstance] = None) -> requests.Response:
+                       data: bytes, target_instance: Optional[ChromaInstance] = None, 
+                       retry_count: int = 0, max_retries: int = 1) -> requests.Response:
         """Forward request to appropriate instance with WAL logging for deletions"""
+        
+        # Prevent infinite retry loops
+        if retry_count >= max_retries:
+            raise Exception(f"All instances failed after {max_retries} retries")
         
         # Choose target instance if not specified
         if not target_instance:
@@ -1197,12 +1202,12 @@ class UnifiedWALLoadBalancer:
             if method == "DELETE":
                 logger.warning(f"❌ DELETE failed on {target_instance.name}: {e}")
             
-            # For critical failures, try other instances
-            if target_instance.consecutive_failures > 2:
+            # For critical failures, try other instances (with retry limit)
+            if target_instance.consecutive_failures > 2 and retry_count < max_retries:
                 other_instances = [inst for inst in self.get_healthy_instances() if inst != target_instance]
                 if other_instances:
-                    logger.warning(f"Retrying request on {other_instances[0].name} due to {target_instance.name} failures")
-                    return self.forward_request(method, path, headers, data, other_instances[0])
+                    logger.warning(f"Retrying request on {other_instances[0].name} due to {target_instance.name} failures (attempt {retry_count + 1}/{max_retries})")
+                    return self.forward_request(method, path, headers, data, other_instances[0], retry_count + 1, max_retries)
             
             raise e
 
