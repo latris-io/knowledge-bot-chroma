@@ -169,8 +169,25 @@ class UnifiedWALLoadBalancer:
         logger.info(f"🔄 WAL sync interval: {self.sync_interval}s")
 
     def get_db_connection(self):
-        """Get PostgreSQL database connection"""
-        return psycopg2.connect(self.database_url)
+        """Get database connection with improved error handling and retry logic"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return psycopg2.connect(
+                    self.database_url,
+                    connect_timeout=10,
+                    application_name='unified-wal-lb'
+                )
+            except psycopg2.OperationalError as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Database connection attempt {attempt + 1} failed, retrying: {e}")
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    logger.error(f"Database connection failed after {max_retries} attempts: {e}")
+                    raise e
+            except Exception as e:
+                logger.error(f"Unexpected database error: {e}")
+                raise e
 
     def _initialize_unified_wal_schema(self):
         """Initialize unified WAL schema with high-volume optimizations"""
@@ -763,7 +780,7 @@ class UnifiedWALLoadBalancer:
             logger.debug(f"Failed to store performance metrics: {e}")
 
     def mark_write_synced(self, write_id: str):
-        """Mark a write as fully synced"""
+        """Mark a write as fully synced with graceful error handling"""
         try:
             with self.db_lock:
                 with self.get_db_connection() as conn:
@@ -774,11 +791,14 @@ class UnifiedWALLoadBalancer:
                             WHERE write_id = %s
                         """, (WALWriteStatus.SYNCED.value, write_id))
                         conn.commit()
+        except psycopg2.OperationalError as e:
+            logger.warning(f"Database unavailable, skipping sync status update for {write_id[:8]}: {e}")
+            # Continue operation - sync succeeded even if we can't update status
         except Exception as e:
-            logger.error(f"Error marking write {write_id} as synced: {e}")
+            logger.error(f"Error marking write {write_id[:8]} as synced: {e}")
 
     def mark_write_failed(self, write_id: str, error_message: str):
-        """Mark a write as failed with retry increment"""
+        """Mark a write as failed with graceful error handling"""
         try:
             with self.db_lock:
                 with self.get_db_connection() as conn:
@@ -787,10 +807,13 @@ class UnifiedWALLoadBalancer:
                             UPDATE unified_wal_writes 
                             SET status = %s, error_message = %s, retry_count = retry_count + 1, updated_at = NOW()
                             WHERE write_id = %s
-                        """, (WALWriteStatus.FAILED.value, error_message, write_id))
+                        """, (WALWriteStatus.FAILED.value, error_message[:500], write_id))  # Limit error message length
                         conn.commit()
+        except psycopg2.OperationalError as e:
+            logger.warning(f"Database unavailable, skipping failure status update for {write_id[:8]}: {e}")
+            # Continue operation - failure is already logged
         except Exception as e:
-            logger.error(f"Error marking write {write_id} as failed: {e}")
+            logger.error(f"Error marking write {write_id[:8]} as failed: {e}")
 
     def resource_monitor_loop(self):
         """Enhanced resource monitoring with adaptive behavior and upgrade recommendations"""
