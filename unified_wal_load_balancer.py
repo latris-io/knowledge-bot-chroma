@@ -1016,7 +1016,7 @@ class UnifiedWALLoadBalancer:
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
             logger.info(f"Debug: Response status {response.status_code if hasattr(response, "status_code") else 200}, content length {len(response.content if hasattr(response, "content") else response.data)}")
-            return response
+            import json; json_data = json.loads(response.content.decode("utf-8")); return json_data, response.status_code
             
         except Exception as e:
             logger.warning(f"Direct request to {instance.name} failed: {e}")
@@ -1229,7 +1229,7 @@ class UnifiedWALLoadBalancer:
                 logger.info(f"Response preview: {response.content if hasattr(response, "content") else response.data[:100]}")
             
             # Return the raw requests.Response for proxy_request to handle
-            return response
+            import json; json_data = json.loads(response.content.decode("utf-8")); return json_data, response.status_code
             
         except Exception as e:
             target_instance.update_stats(False)
@@ -1373,7 +1373,7 @@ if __name__ == '__main__':
             if 'application/json' not in flask_response.headers if hasattr(response, "headers") else {}.get('Content-Type', ''):
                 flask_response.headers if hasattr(response, "headers") else {}['Content-Type'] = 'application/json'
                 
-            return response
+            import json; json_data = json.loads(response.content.decode("utf-8")); return json_data, response.status_code
         except Exception as e:
             import traceback
             logger.error(f"Request forwarding failed for {request.method} /{path}: {e}")
