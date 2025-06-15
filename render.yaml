@@ -51,7 +51,7 @@ services:
       - key: INSTANCE_PRIORITY
         value: 80
 
-  # Optimized Load Balancer - enhanced performance
+  # Unified WAL Load Balancer - Enhanced sync + load balancing
   - type: web
     name: chroma-load-balancer
     env: docker
@@ -83,8 +83,38 @@ services:
         value: 30
       - key: READ_REPLICA_RATIO
         value: 0.8
+      # Unified WAL System Configuration
+      - key: DATABASE_URL
+        fromDatabase:
+          name: chroma-metadata
+          property: connectionString
+      - key: WAL_ENABLED
+        value: "true"
+      - key: WAL_BATCH_SIZE
+        value: 100
+      - key: WAL_SYNC_INTERVAL
+        value: 10
+      - key: WAL_HIGH_VOLUME_BATCH_SIZE
+        value: 200
+      - key: WAL_MEMORY_THRESHOLD
+        value: 80
+      - key: WAL_CPU_THRESHOLD
+        value: 80
+      - key: WAL_DELETION_CONVERSION
+        value: "true"
+      - key: WAL_RETRY_ATTEMPTS
+        value: 3
+      - key: WAL_RETRY_DELAY
+        value: 5
+      - key: WAL_PERSISTENCE_SCHEMA
+        value: "true"
+      # Slack Integration
       - key: SLACK_WEBHOOK_URL
         sync: false
+      - key: SLACK_ALERTS_ENABLED
+        value: "true"
+      - key: SLACK_UPGRADE_ALERTS
+        value: "true"
 
   # Monitor worker - workers don't support free tier
   - type: worker
@@ -120,50 +150,8 @@ services:
           name: chroma-metadata
           property: connectionString
 
-  # Optimized Sync worker - enhanced performance
-  - type: worker
-    name: chroma-sync
-    env: docker
-    dockerfilePath: ./Dockerfile.sync
-    region: oregon
-    plan: standard  # $7/month - workers don't have free tier
-    envVars:
-      - key: PRIMARY_URL
-        value: https://chroma-primary.onrender.com
-      - key: REPLICA_URL
-        value: https://chroma-replica.onrender.com
-      - key: DATABASE_URL
-        fromDatabase:
-          name: chroma-metadata
-          property: connectionString
-      - key: SYNC_INTERVAL
-        value: 300
-      # Optimized resource management
-      - key: MAX_MEMORY_MB
-        value: "400"
-      - key: MAX_WORKERS
-        value: "2"
-      - key: DEFAULT_BATCH_SIZE
-        value: "500"
-      # Distributed sync configuration
-      - key: SYNC_DISTRIBUTED
-        value: "false"
-      - key: SYNC_COORDINATOR
-        value: "false"
-      - key: SYNC_CHUNK_SIZE
-        value: "1000"
-      # Performance monitoring
-      - key: RESOURCE_CHECK_INTERVAL
-        value: 30
-      - key: MEMORY_WARNING_THRESHOLD
-        value: 80
-      - key: MEMORY_CRITICAL_THRESHOLD
-        value: 95
-      - key: SLACK_WEBHOOK_URL
-        sync: false
-
 databases:
-  # Optional: PostgreSQL for storing failover state and metrics
+  # PostgreSQL for WAL persistence and metrics
   - name: chroma-metadata
     databaseName: chroma_ha
     user: chroma_user
