@@ -536,7 +536,7 @@ class UnifiedWALLoadBalancer:
                 with conn.cursor() as cur:
                     cur.execute("""
                         SELECT COUNT(*) FROM unified_wal_writes 
-                        WHERE status = 'executed' AND retry_count < 3
+                        WHERE (status = 'executed' OR status = 'pending') AND retry_count < 3
                     """)
                     return cur.fetchone()[0]
         except Exception as e:
@@ -549,18 +549,27 @@ class UnifiedWALLoadBalancer:
             with self.get_db_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     # Get writes that need to be synced to this instance
+                    # Include both PENDING (DELETEs) and EXECUTED (other operations) statuses
                     cur.execute("""
                         SELECT write_id, method, path, data, headers, collection_id, 
-                               timestamp, retry_count, data_size_bytes, priority
+                               timestamp, retry_count, data_size_bytes, priority, executed_on
                         FROM unified_wal_writes 
-                        WHERE status = 'executed' 
-                        AND (target_instance = 'both' OR 
-                             (target_instance = %s AND executed_on != %s) OR
-                             (target_instance != %s AND executed_on != %s))
+                        WHERE (status = 'pending' OR status = 'executed')
+                        AND (
+                            -- For PENDING operations (DELETEs), sync to target_instance if it's BOTH or matches
+                            (status = 'pending' AND (target_instance = 'both' OR target_instance = %s))
+                            OR
+                            -- For EXECUTED operations, use original logic
+                            (status = 'executed' AND (
+                                target_instance = 'both' OR 
+                                (target_instance = %s AND executed_on != %s) OR
+                                (target_instance != %s AND executed_on != %s)
+                            ))
+                        )
                         AND retry_count < 3
                         ORDER BY priority DESC, timestamp ASC
                         LIMIT %s
-                    """, (target_instance, target_instance, target_instance, target_instance, batch_size * 3))
+                    """, (target_instance, target_instance, target_instance, target_instance, target_instance, batch_size * 3))
                     
                     all_writes = cur.fetchall()
                     
@@ -1148,38 +1157,53 @@ class UnifiedWALLoadBalancer:
         if not target_instance:
             raise Exception("No healthy instances available")
         
-        # For write operations (including DELETE), log to WAL first
-        if method in ['POST', 'PUT', 'PATCH', 'DELETE']:
+        # CRITICAL FIX: Special handling for DELETE operations to prevent double-deletion corruption
+        if method == "DELETE":
+            logger.info(f"🗑️ DELETE request received: {path}")
+            
+            # ONLY log to WAL - do NOT execute immediately to prevent corruption
+            self.add_wal_write(
+                method=method,
+                path=path,
+                data=data,
+                headers=headers,
+                target_instance=TargetInstance.BOTH,  # Delete from both instances via WAL
+                executed_on=None  # Mark as not yet executed
+            )
+            
+            # Return immediate success response without executing deletion
+            # The WAL system will handle the actual deletion safely
+            logger.info(f"✅ DELETE logged to WAL for both instances: {path}")
+            
+            # Create a mock successful response
+            from requests import Response as RequestsResponse
+            mock_response = RequestsResponse()
+            mock_response.status_code = 200
+            mock_response._content = b'{"success": true, "message": "Deletion queued for WAL processing"}'
+            mock_response.headers['Content-Type'] = 'application/json'
+            
+            self.stats["successful_requests"] += 1
+            return mock_response
+        
+        # For non-DELETE write operations, log to WAL and execute normally
+        if method in ['POST', 'PUT', 'PATCH']:
             # Determine sync target
             if target_instance.name == "primary":
                 sync_target = TargetInstance.REPLICA
             else:
                 sync_target = TargetInstance.PRIMARY
             
-            # Special handling for DELETE operations from ingestion service
-            if method == "DELETE":
-                # Log deletion to WAL for bidirectional sync
-                logger.info(f"🗑️ DELETE request received: {path}")
-                self.add_wal_write(
-                    method=method,
-                    path=path,
-                    data=data,
-                    headers=headers,
-                    target_instance=TargetInstance.BOTH,  # Delete from both instances
-                    executed_on=target_instance.name
-                )
-            else:
-                # Regular write operations
-                self.add_wal_write(
-                    method=method,
-                    path=path,
-                    data=data,
-                    headers=headers,
-                    target_instance=sync_target,
-                    executed_on=target_instance.name
-                )
+            # Regular write operations - execute on target and sync to other
+            self.add_wal_write(
+                method=method,
+                path=path,
+                data=data,
+                headers=headers,
+                target_instance=sync_target,
+                executed_on=target_instance.name
+            )
         
-        # Execute the request using proven working pattern from old load balancer
+        # Execute the request normally for all non-DELETE operations
         try:
             url = f"{target_instance.url}{path}"
             
@@ -1215,10 +1239,6 @@ class UnifiedWALLoadBalancer:
             target_instance.update_stats(True)
             self.stats["successful_requests"] += 1
             
-            # Log successful deletion
-            if method == "DELETE":
-                logger.info(f"✅ DELETE executed successfully on {target_instance.name}: {path}")
-            
             logger.info(f"Successfully forwarded {method} /{path} -> {response.status_code}")
             
             # Debug the response content before returning
@@ -1228,15 +1248,10 @@ class UnifiedWALLoadBalancer:
                 logger.info(f"Response preview: {response.content[:100]}")
             
             return response
-            return response.content, response.status_code, {"Content-Type": "application/json"}
             
         except Exception as e:
             target_instance.update_stats(False)
             self.stats["failed_requests"] += 1
-            
-            # Log failed deletion
-            if method == "DELETE":
-                logger.warning(f"❌ DELETE failed on {target_instance.name}: {e}")
             
             # For critical failures, try other instances (with retry limit)
             if target_instance.consecutive_failures > 2 and retry_count < max_retries:
