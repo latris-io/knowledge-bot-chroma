@@ -190,144 +190,271 @@ class UnifiedWALLoadBalancer:
                 raise e
 
     def _initialize_unified_wal_schema(self):
-        """Initialize unified WAL schema with high-volume optimizations"""
+        """Initialize WAL database schema with collection mapping support"""
         try:
             with self.get_db_connection() as conn:
                 with conn.cursor() as cur:
-                    # Unified WAL table for all writes
+                    # Create main WAL table
                     cur.execute("""
                         CREATE TABLE IF NOT EXISTS unified_wal_writes (
-                            id SERIAL PRIMARY KEY,
-                            write_id VARCHAR(100) UNIQUE NOT NULL,
+                            write_id VARCHAR(36) PRIMARY KEY,
                             method VARCHAR(10) NOT NULL,
                             path TEXT NOT NULL,
                             data BYTEA,
                             headers JSONB,
                             target_instance VARCHAR(20) NOT NULL,
-                            status VARCHAR(20) DEFAULT 'pending',
-                            collection_id VARCHAR(255),
                             executed_on VARCHAR(20),
-                            retry_count INTEGER DEFAULT 0,
+                            status VARCHAR(20) DEFAULT 'pending' NOT NULL,
                             error_message TEXT,
+                            retry_count INTEGER DEFAULT 0,
+                            collection_id VARCHAR(100),
                             timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                            executed_at TIMESTAMP WITH TIME ZONE,
                             synced_at TIMESTAMP WITH TIME ZONE,
                             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                            original_data BYTEA,
-                            conversion_type VARCHAR(50)
-                        );
+                            data_size_bytes BIGINT,
+                            priority INTEGER DEFAULT 0
+                        )
                     """)
                     
-                    # Add high-volume columns if they don't exist (compatible approach)
-                    try:
-                        # Check and add data_size_bytes column
-                        cur.execute("""
-                            SELECT column_name FROM information_schema.columns 
-                            WHERE table_name = 'unified_wal_writes' AND column_name = 'data_size_bytes';
-                        """)
-                        if not cur.fetchone():
-                            cur.execute("ALTER TABLE unified_wal_writes ADD COLUMN data_size_bytes INTEGER DEFAULT 0;")
-                            logger.info("Added data_size_bytes column")
-                        
-                        # Check and add priority column
-                        cur.execute("""
-                            SELECT column_name FROM information_schema.columns 
-                            WHERE table_name = 'unified_wal_writes' AND column_name = 'priority';
-                        """)
-                        if not cur.fetchone():
-                            cur.execute("ALTER TABLE unified_wal_writes ADD COLUMN priority INTEGER DEFAULT 0;")
-                            logger.info("Added priority column")
-                            
-                    except Exception as e:
-                        logger.info(f"Column handling: {e}")
-                    
-                    # Safe index creation
+                    # Create collection ID mapping table for cross-instance sync
                     cur.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_unified_wal_status ON unified_wal_writes(status, timestamp ASC);
-                        CREATE INDEX IF NOT EXISTS idx_unified_wal_target_status ON unified_wal_writes(target_instance, status);
-                        CREATE INDEX IF NOT EXISTS idx_unified_wal_collection ON unified_wal_writes(collection_id, status);
+                        CREATE TABLE IF NOT EXISTS collection_id_mapping (
+                            mapping_id SERIAL PRIMARY KEY,
+                            collection_name VARCHAR(255) NOT NULL,
+                            primary_collection_id VARCHAR(100),
+                            replica_collection_id VARCHAR(100),
+                            collection_config JSONB,
+                            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                            UNIQUE(collection_name)
+                        )
                     """)
                     
-                    # Add priority index only if column exists
-                    try:
-                        cur.execute("""
-                            SELECT column_name FROM information_schema.columns 
-                            WHERE table_name = 'unified_wal_writes' AND column_name = 'priority';
-                        """)
-                        if cur.fetchone():
-                            cur.execute("CREATE INDEX IF NOT EXISTS idx_unified_wal_priority ON unified_wal_writes(priority DESC, timestamp ASC);")
-                    except Exception as e:
-                        logger.info(f"Priority index creation: {e}")
-                    
-                    # Upgrade recommendations table (for complete scalability)
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS upgrade_recommendations (
-                            id SERIAL PRIMARY KEY,
-                            recommendation_type VARCHAR(50),
-                            current_usage REAL,
-                            recommended_tier VARCHAR(100),
-                            reason TEXT,
-                            urgency VARCHAR(20),
-                            service_component VARCHAR(50) DEFAULT 'unified-wal',
-                            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                        );
-                        
-                        CREATE INDEX IF NOT EXISTS idx_recommendations_urgency ON upgrade_recommendations(urgency, created_at);
-                        CREATE INDEX IF NOT EXISTS idx_recommendations_type ON upgrade_recommendations(recommendation_type, created_at);
-                    """)
-                    
-                    # Performance metrics table for high-volume monitoring
+                    # Create performance metrics table
                     cur.execute("""
                         CREATE TABLE IF NOT EXISTS wal_performance_metrics (
                             id SERIAL PRIMARY KEY,
                             timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                            memory_usage_mb REAL,
-                            memory_percent REAL,
-                            cpu_percent REAL,
+                            memory_usage_mb FLOAT,
+                            memory_percent FLOAT,
+                            cpu_percent FLOAT,
                             pending_writes INTEGER,
                             batches_processed INTEGER,
-                            sync_throughput_per_sec REAL,
+                            sync_throughput_per_sec FLOAT,
                             avg_batch_size INTEGER,
                             memory_pressure_events INTEGER
-                        );
-                        
-                        CREATE INDEX IF NOT EXISTS idx_wal_perf_timestamp ON wal_performance_metrics(timestamp);
+                        )
                     """)
                     
-                    # Cleanup old recommendations (keep for 30 days)
-                    cur.execute("""
-                        DELETE FROM upgrade_recommendations WHERE created_at < NOW() - INTERVAL '30 days';
-                    """)
-                    
-                    # Upgrade recommendations table (for complete scalability)
+                    # Create upgrade recommendations table
                     cur.execute("""
                         CREATE TABLE IF NOT EXISTS upgrade_recommendations (
                             id SERIAL PRIMARY KEY,
+                            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                             recommendation_type VARCHAR(50),
-                            current_usage REAL,
+                            current_usage FLOAT,
                             recommended_tier VARCHAR(100),
                             reason TEXT,
                             urgency VARCHAR(20),
-                            service_component VARCHAR(50) DEFAULT 'unified-wal',
-                            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                        );
-                        
-                        CREATE INDEX IF NOT EXISTS idx_recommendations_urgency ON upgrade_recommendations(urgency, created_at);
-                        CREATE INDEX IF NOT EXISTS idx_recommendations_type ON upgrade_recommendations(recommendation_type, created_at);
+                            service_component VARCHAR(50)
+                        )
                     """)
                     
-                    # Cleanup old recommendations (keep for 30 days)
-                    cur.execute("""
-                        DELETE FROM upgrade_recommendations WHERE created_at < NOW() - INTERVAL '30 days';
-                    """)
+                    # Create indexes for better performance
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_wal_status_retry ON unified_wal_writes(status, retry_count)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_wal_timestamp ON unified_wal_writes(timestamp)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_wal_target_instance ON unified_wal_writes(target_instance)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_collection_mapping_name ON collection_id_mapping(collection_name)")
                     
                     conn.commit()
-                    logger.info("✅ Enhanced Unified WAL PostgreSQL schema initialized (with upgrade notifications)")
+                    logger.info("✅ Unified WAL schema with collection mapping initialized")
                     
         except Exception as e:
-            logger.error(f"❌ Failed to initialize enhanced WAL schema: {e}")
-            raise
+            logger.error(f"Error initializing WAL schema: {e}")
+
+    def get_or_create_collection_mapping(self, collection_name: str, source_collection_id: str, 
+                                       source_instance: str, collection_config: Optional[Dict] = None) -> Dict[str, str]:
+        """Get or create collection ID mapping between primary and replica instances"""
+        try:
+            with self.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Check if mapping already exists
+                    cur.execute("""
+                        SELECT primary_collection_id, replica_collection_id, collection_config
+                        FROM collection_id_mapping 
+                        WHERE collection_name = %s
+                    """, (collection_name,))
+                    
+                    result = cur.fetchone()
+                    if result:
+                        primary_id, replica_id, stored_config = result
+                        logger.info(f"📋 Found existing collection mapping for '{collection_name}': primary={primary_id[:8]}..., replica={replica_id[:8]}...")
+                        return {
+                            'primary_collection_id': primary_id,
+                            'replica_collection_id': replica_id,
+                            'collection_config': stored_config or {}
+                        }
+                    
+                    # Create new mapping - we know the source, need to create/find the target
+                    if source_instance == "primary":
+                        primary_id = source_collection_id
+                        replica_id = self.ensure_collection_exists_on_instance("replica", collection_name, collection_config)
+                    else:
+                        replica_id = source_collection_id  
+                        primary_id = self.ensure_collection_exists_on_instance("primary", collection_name, collection_config)
+                    
+                    if primary_id and replica_id:
+                        # Store the mapping
+                        cur.execute("""
+                            INSERT INTO collection_id_mapping 
+                            (collection_name, primary_collection_id, replica_collection_id, collection_config)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (collection_name) 
+                            DO UPDATE SET 
+                                primary_collection_id = EXCLUDED.primary_collection_id,
+                                replica_collection_id = EXCLUDED.replica_collection_id,
+                                collection_config = EXCLUDED.collection_config,
+                                updated_at = NOW()
+                        """, (collection_name, primary_id, replica_id, json.dumps(collection_config or {})))
+                        conn.commit()
+                        
+                        logger.info(f"✅ Created collection mapping for '{collection_name}': primary={primary_id[:8]}..., replica={replica_id[:8]}...")
+                        return {
+                            'primary_collection_id': primary_id,
+                            'replica_collection_id': replica_id,
+                            'collection_config': collection_config or {}
+                        }
+                    else:
+                        logger.error(f"❌ Failed to create collection mapping for '{collection_name}'")
+                        return {}
+                        
+        except Exception as e:
+            logger.error(f"Error managing collection mapping for '{collection_name}': {e}")
+            return {}
+
+    def ensure_collection_exists_on_instance(self, instance_name: str, collection_name: str, 
+                                           collection_config: Optional[Dict] = None) -> Optional[str]:
+        """Ensure collection exists on target instance, create if missing"""
+        try:
+            instance = next((inst for inst in self.instances if inst.name == instance_name and inst.is_healthy), None)
+            if not instance:
+                logger.warning(f"⚠️ Instance '{instance_name}' not available for collection creation")
+                return None
+            
+            # First, try to find existing collection by name
+            collections_response = requests.get(
+                f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                timeout=30
+            )
+            
+            if collections_response.status_code == 200:
+                collections = collections_response.json()
+                for collection in collections:
+                    if collection.get('name') == collection_name:
+                        collection_id = collection.get('id')
+                        logger.info(f"📋 Found existing collection '{collection_name}' on {instance_name}: {collection_id[:8]}...")
+                        return collection_id
+            
+            # Collection doesn't exist, create it
+            logger.info(f"🔧 Creating collection '{collection_name}' on {instance_name}...")
+            
+            # Use provided config or default config
+            create_payload = {
+                "name": collection_name,
+                "configuration": collection_config or {
+                    "hnsw": {
+                        "space": "l2",
+                        "ef_construction": 100,
+                        "ef_search": 100,
+                        "max_neighbors": 16,
+                        "resize_factor": 1.2,
+                        "sync_threshold": 1000
+                    }
+                }
+            }
+            
+            create_response = requests.post(
+                f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                headers={"Content-Type": "application/json"},
+                json=create_payload,
+                timeout=30
+            )
+            
+            if create_response.status_code in [200, 201]:
+                created_collection = create_response.json()
+                collection_id = created_collection.get('id')
+                logger.info(f"✅ Created collection '{collection_name}' on {instance_name}: {collection_id[:8]}...")
+                return collection_id
+            else:
+                logger.error(f"❌ Failed to create collection '{collection_name}' on {instance_name}: {create_response.status_code}")
+                logger.error(f"Response: {create_response.text[:200]}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error ensuring collection '{collection_name}' exists on {instance_name}: {e}")
+            return None
+
+    def map_collection_id_for_sync(self, original_path: str, target_instance: str) -> str:
+        """Map collection ID in path from source instance to target instance"""
+        try:
+            # Extract collection ID from path
+            if '/collections/' not in original_path:
+                return original_path
+            
+            path_parts = original_path.split('/collections/')
+            if len(path_parts) < 2:
+                return original_path
+            
+            collection_id_and_rest = path_parts[1]
+            collection_id = collection_id_and_rest.split('/')[0]
+            
+            # Check if this looks like a UUID (collection ID vs collection name)
+            if len(collection_id) < 30:  # Collection name, not ID
+                return original_path  # No mapping needed for name-based paths
+            
+            # Get collection name by querying the source instance
+            source_instance_name = "primary" if target_instance == "replica" else "replica" 
+            source_instance = next((inst for inst in self.instances if inst.name == source_instance_name and inst.is_healthy), None)
+            
+            if not source_instance:
+                logger.warning(f"⚠️ Source instance '{source_instance_name}' not available for collection mapping")
+                return original_path
+            
+            # Query collection details from source
+            try:
+                collection_response = requests.get(
+                    f"{source_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}",
+                    timeout=20
+                )
+                
+                if collection_response.status_code == 200:
+                    collection_data = collection_response.json()
+                    collection_name = collection_data.get('name')
+                    collection_config = collection_data.get('configuration_json', {})
+                    
+                    if collection_name:
+                        # Get or create mapping
+                        mapping = self.get_or_create_collection_mapping(
+                            collection_name, collection_id, source_instance_name, collection_config
+                        )
+                        
+                        if mapping:
+                            target_collection_id = mapping.get(f'{target_instance}_collection_id')
+                            if target_collection_id:
+                                # Replace collection ID in path
+                                mapped_path = original_path.replace(collection_id, target_collection_id)
+                                logger.info(f"🔄 Mapped collection path: {collection_id[:8]}... → {target_collection_id[:8]}...")
+                                return mapped_path
+                        
+            except Exception as e:
+                logger.debug(f"Collection mapping query failed: {e}")
+            
+            return original_path
+            
+        except Exception as e:
+            logger.error(f"Error mapping collection ID in path: {e}")
+            return original_path
 
     def collect_resource_metrics(self) -> ResourceMetrics:
         """Collect current resource usage metrics"""
@@ -417,8 +544,8 @@ class UnifiedWALLoadBalancer:
                             INSERT INTO unified_wal_writes 
                             (write_id, method, path, data, headers, target_instance, 
                              collection_id, timestamp, executed_on, status, 
-                             data_size_bytes, priority, original_data, conversion_type)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s)
+                             data_size_bytes, priority)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s)
                         """, (
                             write_id,
                             method,
@@ -430,9 +557,7 @@ class UnifiedWALLoadBalancer:
                             executed_on,
                             WALWriteStatus.EXECUTED.value if executed_on else WALWriteStatus.PENDING.value,
                             data_size,
-                            1 if (method == "DELETE" or path.endswith('/delete')) else 0,  # DELETE operations and POST /delete get higher priority
-                            original_data,  # Store original for reference
-                            conversion_type  # Track conversion type
+                            1 if (method == "DELETE" or path.endswith('/delete')) else 0  # DELETE operations and POST /delete get higher priority
                         ))
                         conn.commit()
             
@@ -624,7 +749,7 @@ class UnifiedWALLoadBalancer:
             return []
 
     def process_sync_batch(self, batch: SyncBatch) -> Tuple[int, int]:
-        """Process a batch of WAL syncs with optimized error handling"""
+        """Process a batch of WAL syncs with intelligent collection mapping and auto-creation"""
         instance = next((inst for inst in self.instances if inst.name == batch.target_instance), None)
         if not instance or not instance.is_healthy:
             return 0, len(batch.writes)
@@ -644,10 +769,10 @@ class UnifiedWALLoadBalancer:
                         logger.warning(f"⚠️ Memory pressure during batch processing: {current_memory:.1f}MB")
                         gc.collect()  # Force garbage collection
                     
-                    # Execute the write on target instance
+                    # Prepare sync request data
                     write_id = write_record['write_id']
                     method = write_record['method']
-                    path = write_record['path']
+                    original_path = write_record['path']
                     data = write_record['data'] or b''
                     
                     # Fix headers parsing
@@ -658,16 +783,82 @@ class UnifiedWALLoadBalancer:
                         else:
                             headers = write_record['headers']
                     
-                    # Make the sync request
-                    response = self.make_direct_request(instance, method, path, data=data, headers=headers)
+                    # INTELLIGENT COLLECTION ID MAPPING
+                    mapped_path = self.map_collection_id_for_sync(original_path, batch.target_instance)
+                    
+                    if mapped_path != original_path:
+                        logger.info(f"🔄 Collection ID mapped for sync: {write_id[:8]}")
+                    
+                    # Make the sync request with mapped path
+                    response = self.make_direct_request(instance, method, mapped_path, data=data, headers=headers)
                     
                     # Mark as synced
                     self.mark_write_synced(write_id)
                     success_count += 1
                     self.stats["successful_syncs"] += 1
                     
+                except requests.exceptions.HTTPError as e:
+                    # INTELLIGENT ERROR HANDLING WITH AUTO-COLLECTION CREATION
+                    if e.response.status_code == 404 and '/collections/' in original_path:
+                        logger.info(f"🔧 404 error detected for {write_id[:8]} - attempting auto-collection creation")
+                        
+                        try:
+                            # Extract collection info from the path
+                            collection_id_from_path = self.extract_collection_identifier(original_path)
+                            if collection_id_from_path:
+                                # Try to get collection name from source instance
+                                source_instance_name = "primary" if batch.target_instance == "replica" else "replica"
+                                source_instance = next((inst for inst in self.instances if inst.name == source_instance_name and inst.is_healthy), None)
+                                
+                                if source_instance:
+                                    # Get collection details from source
+                                    source_collection_response = requests.get(
+                                        f"{source_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id_from_path}",
+                                        timeout=20
+                                    )
+                                    
+                                    if source_collection_response.status_code == 200:
+                                        source_collection = source_collection_response.json()
+                                        collection_name = source_collection.get('name')
+                                        collection_config = source_collection.get('configuration_json', {})
+                                        
+                                        if collection_name:
+                                            logger.info(f"🔧 Auto-creating collection '{collection_name}' on {batch.target_instance}")
+                                            
+                                            # Create collection mapping (this will auto-create the collection)
+                                            mapping = self.get_or_create_collection_mapping(
+                                                collection_name, collection_id_from_path, source_instance_name, collection_config
+                                            )
+                                            
+                                            if mapping:
+                                                # Retry the sync with proper collection ID mapping
+                                                retry_mapped_path = self.map_collection_id_for_sync(original_path, batch.target_instance)
+                                                retry_response = self.make_direct_request(instance, method, retry_mapped_path, data=data, headers=headers)
+                                                
+                                                self.mark_write_synced(write_id)
+                                                success_count += 1
+                                                self.stats["successful_syncs"] += 1
+                                                self.stats["auto_created_collections"] = self.stats.get("auto_created_collections", 0) + 1
+                                                logger.info(f"✅ Auto-creation successful for {write_id[:8]}")
+                                                continue
+                                            
+                            # If auto-creation failed, mark as failed
+                            self.mark_write_failed(write_record['write_id'], f"404: Collection not found, auto-creation failed: {str(e)}")
+                            self.stats["failed_syncs"] += 1
+                            logger.warning(f"❌ Auto-creation failed for {write_record['write_id'][:8]}: {e}")
+                            
+                        except Exception as auto_create_error:
+                            self.mark_write_failed(write_record['write_id'], f"404: Collection not found, auto-creation error: {str(auto_create_error)}")
+                            self.stats["failed_syncs"] += 1
+                            logger.error(f"❌ Auto-creation error for {write_record['write_id'][:8]}: {auto_create_error}")
+                    else:
+                        # Other HTTP errors - mark as failed
+                        self.mark_write_failed(write_record['write_id'], str(e))
+                        self.stats["failed_syncs"] += 1
+                        logger.debug(f"❌ HTTP error syncing {write_record['write_id'][:8]}: {e}")
+                        
                 except Exception as e:
-                    # Mark as failed with retry increment
+                    # General sync errors - mark as failed with retry increment
                     self.mark_write_failed(write_record['write_id'], str(e))
                     self.stats["failed_syncs"] += 1
                     logger.debug(f"❌ Failed to sync write {write_record['write_id'][:8]}: {e}")
