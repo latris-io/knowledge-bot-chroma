@@ -1220,7 +1220,26 @@ class UnifiedWALLoadBalancer:
             if method == "DELETE":
                 logger.info(f"✅ DELETE executed successfully on {target_instance.name}: {path}")
             
-            return response
+            logger.info(f"Successfully forwarded {method} /{path} -> {response.status_code}")
+            
+            # Debug the response content before returning
+            content_length = len(response.content)
+            logger.info(f"Response content length: {content_length}")
+            if content_length > 0:
+                logger.info(f"Response preview: {response.content[:100]}")
+            
+            # Create Flask response with proper content handling
+            flask_response = Response(
+                response.content,
+                status=response.status_code,
+                headers=[(key, value) for key, value in response.headers.items() if key.lower() not in ['content-encoding', 'transfer-encoding']]
+            )
+            
+            # Ensure content-type is set
+            if 'application/json' not in flask_response.headers.get('Content-Type', ''):
+                flask_response.headers['Content-Type'] = 'application/json'
+                
+            return flask_response
             
         except Exception as e:
             target_instance.update_stats(False)
@@ -1347,11 +1366,24 @@ if __name__ == '__main__':
             
             logger.info(f"Successfully forwarded {request.method} /{path} -> {response.status_code}")
             
-            return Response(
+            # Debug the response content before returning
+            content_length = len(response.content)
+            logger.info(f"Response content length: {content_length}")
+            if content_length > 0:
+                logger.info(f"Response preview: {response.content[:100]}")
+            
+            # Create Flask response with proper content handling
+            flask_response = Response(
                 response.content,
                 status=response.status_code,
-                headers=dict(response.headers)
+                headers=[(key, value) for key, value in response.headers.items() if key.lower() not in ['content-encoding', 'transfer-encoding']]
             )
+            
+            # Ensure content-type is set
+            if 'application/json' not in flask_response.headers.get('Content-Type', ''):
+                flask_response.headers['Content-Type'] = 'application/json'
+                
+            return flask_response
         except Exception as e:
             import traceback
             logger.error(f"Request forwarding failed for {request.method} /{path}: {e}")
