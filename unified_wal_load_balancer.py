@@ -1015,7 +1015,7 @@ class UnifiedWALLoadBalancer:
             url = f"{instance.url}{path}"
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
-            logger.info(f"Debug: Response status {response.status_code}, content length {len(response.content)}")
+            return response
             return flask_response
             
         except Exception as e:
@@ -1228,7 +1228,7 @@ class UnifiedWALLoadBalancer:
             if content_length > 0:
                 logger.info(f"Response preview: {response.content[:100]}")
             
-            # Return the raw requests.Response for proxy_request to handle
+            return response
             return flask_response
             
         except Exception as e:
