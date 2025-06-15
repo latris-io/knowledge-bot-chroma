@@ -958,10 +958,10 @@ class UnifiedWALLoadBalancer:
             
             response = requests.post(webhook_url, json=payload, timeout=10)
             
-            if response.status_code if hasattr(response, 'status_code') else 200 == 200:
+            if response.status_code == 200:
                 logger.info(f"📱 Slack upgrade alert sent: {recommendation['type']} {urgency}")
             else:
-                logger.warning(f"❌ Slack alert failed: HTTP {response.status_code if hasattr(response, 'status_code') else 200}")
+                logger.warning(f"❌ Slack alert failed: HTTP {response.status_code}")
                 
         except Exception as e:
             logger.debug(f"Failed to send Slack notification: {e}")
@@ -1015,7 +1015,7 @@ class UnifiedWALLoadBalancer:
             url = f"{instance.url}{path}"
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
-            logger.info(f"Debug: Response status {response.status_code if hasattr(response, 'status_code') else 200}, content length {len(response.content if hasattr(response, 'content') else response.data)}")
+            logger.info(f"Debug: Response status {response.status_code}, content length {len(response.content)}")
             import json; json_data = json.loads(response.content.decode("utf-8")); return json_data, response.status_code
             
         except Exception as e:
@@ -1042,7 +1042,7 @@ class UnifiedWALLoadBalancer:
                     try:
                         response = requests.get(f"{instance.url}/api/v2/version", timeout=5)
                         was_healthy = instance.is_healthy
-                        instance.is_healthy = response.status_code if hasattr(response, 'status_code') else 200 == 200
+                        instance.is_healthy = response.status_code == 200
                         instance.last_health_check = datetime.now()
                         instance.update_stats(instance.is_healthy)
                         
@@ -1208,10 +1208,10 @@ class UnifiedWALLoadBalancer:
             # Use session to make request (like old load balancer)
             response = session.request(method, url, **request_params)
             response.raise_for_status()
-            logger.info(f"Debug: Response status {response.status_code if hasattr(response, 'status_code') else 200}, content length {len(response.content if hasattr(response, 'content') else response.data)}")
+            logger.info(f"Debug: Response status {response.status_code}, content length {len(response.content)}")
             
             # Debug logging to see response content
-            logger.info(f"Response status: {response.status_code if hasattr(response, 'status_code') else 200}, Content length: {len(response.content if hasattr(response, 'content') else response.data)}, Content preview: {response.content if hasattr(response, 'content') else response.data[:100]}")
+            logger.info(f"Response status: {response.status_code}, Content length: {len(response.content)}, Content preview: {response.content[:100]}")
             
             target_instance.update_stats(True)
             self.stats["successful_requests"] += 1
@@ -1220,13 +1220,13 @@ class UnifiedWALLoadBalancer:
             if method == "DELETE":
                 logger.info(f"✅ DELETE executed successfully on {target_instance.name}: {path}")
             
-            logger.info(f"Successfully forwarded {method} /{path} -> {response.status_code if hasattr(response, 'status_code') else 200}")
+            logger.info(f"Successfully forwarded {method} /{path} -> {response.status_code}")
             
             # Debug the response content before returning
-            content_length = len(response.content if hasattr(response, 'content') else response.data)
+            content_length = len(response.content)
             logger.info(f"Response content length: {content_length}")
             if content_length > 0:
-                logger.info(f"Response preview: {response.content if hasattr(response, 'content') else response.data[:100]}")
+                logger.info(f"Response preview: {response.content[:100]}")
             
             # Return the raw requests.Response for proxy_request to handle
             import json; json_data = json.loads(response.content.decode("utf-8")); return json_data, response.status_code
@@ -1354,18 +1354,18 @@ if __name__ == '__main__':
                 data=data
             )
             
-            logger.info(f"Successfully forwarded {request.method} /{path} -> {response.status_code if hasattr(response, 'status_code') else 200}")
+            logger.info(f"Successfully forwarded {request.method} /{path} -> {response.status_code}")
             
             # Debug the response content before returning
-            content_length = len(response.content if hasattr(response, 'content') else response.data)
+            content_length = len(response.content)
             logger.info(f"Response content length: {content_length}")
             if content_length > 0:
-                logger.info(f"Response preview: {response.content if hasattr(response, 'content') else response.data[:100]}")
+                logger.info(f"Response preview: {response.content[:100]}")
             
             # Return the raw requests.Response for proxy_request to handle
             flask_response = Response(
-                response.content if hasattr(response, 'content') else response.data,
-                status=response.status_code if hasattr(response, 'status_code') else 200,
+                response.content,
+                status=response.status_code,
                 headers=dict(response.headers) if hasattr(response, 'headers') else {}
             )
             
