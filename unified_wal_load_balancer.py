@@ -1366,12 +1366,12 @@ if __name__ == '__main__':
             flask_response = Response(
                 response.content if hasattr(response, 'content') else response.data,
                 status=response.status_code if hasattr(response, 'status_code') else 200,
-                headers=[(key, value) for key, value in response.headers if hasattr(response, 'headers') else {}.items() if key.lower() not in ['content-encoding', 'transfer-encoding']]
+                headers=dict(response.headers) if hasattr(response, 'headers') else {}
             )
             
             # Ensure content-type is set
-            if 'application/json' not in flask_response.headers if hasattr(response, 'headers') else {}.get('Content-Type', ''):
-                flask_response.headers if hasattr(response, 'headers') else {}['Content-Type'] = 'application/json'
+            if 'application/json' not in (response.headers.get('Content-Type', '') if hasattr(response, 'headers') else ''):
+                flask_response.headers['Content-Type'] = 'application/json'
                 
             import json; json_data = json.loads(response.content.decode("utf-8")); return json_data, response.status_code
         except Exception as e:
