@@ -1013,10 +1013,9 @@ class UnifiedWALLoadBalancer:
         
         try:
             url = f"{instance.url}{path}"
-            return response
+            response = requests.request(method, url, **kwargs)
             response.raise_for_status()
             return response
-            return response.content, response.status_code, {"Content-Type": "application/json"}
             
         except Exception as e:
             logger.warning(f"Direct request to {instance.name} failed: {e}")
