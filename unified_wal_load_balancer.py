@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Enhanced Unified WAL-First ChromaDB Load Balancer with High-Volume Support
-Combines WAL-first persistence with high-volume processing capabilities
+Enhanced Unified WAL-First Load Balancer with High-Volume Processing
+Combines load balancing and bidirectional sync in a single service with PostgreSQL persistence.
 
 Features:
 - WAL-first approach with PostgreSQL persistence
@@ -29,6 +29,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
+
+# Flask imports for web service
+from flask import Flask, request, Response, jsonify
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -1180,22 +1183,120 @@ class UnifiedWALLoadBalancer:
             
             raise e
 
-# Main execution for testing
+# Main execution for web service  
 if __name__ == '__main__':
     logger.info("🚀 Starting Enhanced Unified WAL Load Balancer with High-Volume Support")
     
+    # Initialize Flask app first
+    app = Flask(__name__)
+    enhanced_wal = None
+    
     try:
         enhanced_wal = UnifiedWALLoadBalancer()
-        status = enhanced_wal.get_status()
-        
         logger.info("✅ Enhanced WAL system initialized successfully")
-        logger.info(f"📊 High-volume config: {status['high_volume_config']}")
-        logger.info(f"🎯 Architecture: {status['architecture']}")
         
-        # Keep running for demonstration
-        time.sleep(5)
-        logger.info(f"📈 Current status: {status['unified_wal']['pending_writes']} pending writes")
+        # Start background threads
+        threading.Thread(target=enhanced_wal.enhanced_wal_sync_loop, daemon=True).start()
+        threading.Thread(target=enhanced_wal.health_monitor_loop, daemon=True).start()
+        threading.Thread(target=enhanced_wal.resource_monitor_loop, daemon=True).start()
         
     except Exception as e:
-        logger.error(f"❌ Failed to start enhanced WAL system: {e}")
-        raise 
+        logger.error(f"❌ WAL system initialization failed: {e}")
+        # Continue with Flask app even if WAL fails initially
+    
+    @app.route('/health', methods=['GET'])
+    def health_check():
+        """Health check endpoint"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"status": "initializing", "message": "WAL system starting up"}), 503
+                
+            status = enhanced_wal.get_status()
+            healthy_instances = status['healthy_instances']
+            total_instances = status['total_instances']
+            
+            return jsonify({
+                "status": "healthy" if healthy_instances > 0 else "degraded",
+                "healthy_instances": f"{healthy_instances}/{total_instances}",
+                "service": "Enhanced Unified WAL Load Balancer",
+                "architecture": status.get('architecture', 'WAL-First'),
+                "pending_writes": status.get('unified_wal', {}).get('pending_writes', 0)
+            }), 200 if healthy_instances > 0 else 503
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/status', methods=['GET'])
+    def get_status():
+        """Detailed status endpoint"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"status": "initializing"}), 503
+            return jsonify(enhanced_wal.get_status()), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route('/wal/status', methods=['GET'])
+    def wal_status():
+        """WAL-specific status endpoint"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"status": "initializing"}), 503
+            status = enhanced_wal.get_status()
+            return jsonify({
+                "wal_system": status.get('unified_wal', {}),
+                "performance_stats": status.get('performance_stats', {}),
+                "high_volume_config": status.get('high_volume_config', {})
+            }), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route('/metrics', methods=['GET'])
+    def metrics():
+        """Resource metrics endpoint"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"status": "initializing"}), 503
+            metrics = enhanced_wal.collect_resource_metrics()
+            return jsonify({
+                "memory_usage_mb": metrics.memory_usage_mb,
+                "memory_percent": metrics.memory_percent,
+                "cpu_percent": metrics.cpu_percent,
+                "timestamp": metrics.timestamp.isoformat(),
+                "peak_memory_usage": enhanced_wal.stats.get("peak_memory_usage", 0)
+            }), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+    def proxy_request(path):
+        """Proxy all other requests through the load balancer"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not ready"}), 503
+                
+            # Forward request through unified WAL load balancer
+            response = enhanced_wal.forward_request(
+                method=request.method,
+                path=f"/{path}",
+                headers=dict(request.headers),
+                data=request.get_data()
+            )
+            
+            return Response(
+                response.content,
+                status=response.status_code,
+                headers=dict(response.headers)
+            )
+        except Exception as e:
+            logger.error(f"Request forwarding failed: {e}")
+            return jsonify({"error": "Service temporarily unavailable"}), 503
+    
+    # Start Flask web server immediately
+    port = int(os.getenv('PORT', 8000))
+    logger.info(f"🌐 Starting Flask web server on port {port}")
+    
+    try:
+        app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    except Exception as e:
+        logger.error(f"❌ Flask server failed to start: {e}")
+        sys.exit(1) 
