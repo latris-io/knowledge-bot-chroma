@@ -418,11 +418,11 @@ class UnifiedWALLoadBalancer:
             logger.error(f"      Collection ID length: {len(collection_id)}")
             
             # Check if this looks like a UUID (collection ID vs collection name)
-            if len(collection_id) < 30:  # Collection name, not ID
-                logger.error(f"   ℹ️ Collection identifier appears to be name (length < 30) - no mapping needed")
-                return original_path  # No mapping needed for name-based paths
+            if len(collection_id) >= 30:  # Collection UUID, not name
+                logger.error(f"   ℹ️ Collection identifier appears to be UUID (length >= 30) - no mapping needed")
+                return original_path  # No mapping needed for UUID-based paths
             
-            logger.error(f"   🔍 Collection ID detected (length >= 30) - attempting mapping")
+            logger.error(f"   🔍 Collection NAME detected (length < 30) - attempting name→UUID mapping")
             
             # First, try to find existing mapping in database
             try:
@@ -430,12 +430,12 @@ class UnifiedWALLoadBalancer:
                 
                 with self.get_db_connection() as conn:
                     with conn.cursor() as cur:
-                        # Check if we have a mapping for this collection ID
+                        # Check if we have a mapping for this collection name
                         cur.execute("""
                             SELECT collection_name, primary_collection_id, replica_collection_id 
                             FROM collection_id_mapping 
-                            WHERE primary_collection_id = %s OR replica_collection_id = %s
-                        """, (collection_id, collection_id))
+                            WHERE collection_name = %s
+                        """, (collection_id,))
                         
                         result = cur.fetchone()
                         logger.error(f"   📊 Database query result: {result}")
@@ -1930,13 +1930,18 @@ class UnifiedWALLoadBalancer:
         if not target_instance:
             raise Exception("No healthy instances available")
 
-        # Apply collection ID mapping for real-time requests
+        # 🔧 CRITICAL FIX: Apply collection ID mapping for real-time requests
         original_request_path = path
         if "/collections/" in path:
+            logger.error(f"🔄 REAL-TIME MAPPING DEBUG: Original path: {path}")
+            logger.error(f"🔄 REAL-TIME MAPPING DEBUG: Target instance: {target_instance.name}")
             mapped_path = self.map_collection_id_for_sync(path, target_instance.name)
+            logger.error(f"🔄 REAL-TIME MAPPING DEBUG: Mapped path: {mapped_path}")
             if mapped_path != path:
-                logger.error(f"Real-time mapping: {path} -> {mapped_path}")
+                logger.error(f"✅ Real-time mapping SUCCESS: {path} → {mapped_path}")
                 path = mapped_path
+            else:
+                logger.error(f"ℹ️ Real-time mapping: No change needed for {path}")
         
         # CRITICAL FIX: Special handling for DELETE operations to prevent double-deletion corruption
         if method == "DELETE":
