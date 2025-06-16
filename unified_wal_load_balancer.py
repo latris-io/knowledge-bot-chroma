@@ -478,70 +478,85 @@ class UnifiedWALLoadBalancer:
             collection_name = None
             collection_config = None
             
-            # SECOND: If not found by ID, try to discover by name from existing mappings
-            logger.error(f"   🕵️ Attempting collection name discovery for orphaned ID: {collection_id}")
+            # PROACTIVE COLLECTION MAPPING REFRESH - Fix for orphaned collection IDs
+            logger.error(f"   🚀 PROACTIVE MAPPING REFRESH - Refreshing all mappings due to 404")
             
-            # Check if we can find this collection ID in any existing mapping (might be stale)
+            # When a collection ID fails (404), proactively refresh ALL collection mappings
             try:
-                with self.get_db_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            SELECT collection_name 
-                            FROM collection_id_mapping 
-                            WHERE primary_collection_id = %s OR replica_collection_id = %s
-                        """, (collection_id, collection_id))
+                primary_instance = self.get_primary_instance()
+                replica_instance = self.get_replica_instance()
+                
+                if primary_instance and replica_instance:
+                    logger.error(f"   🔍 Querying current collections on both instances")
+                    
+                    primary_response = requests.get(
+                        f"{primary_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                        timeout=15
+                    )
+                    
+                    replica_response = requests.get(
+                        f"{replica_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                        timeout=15
+                    )
+                    
+                    if primary_response.status_code == 200 and replica_response.status_code == 200:
+                        primary_collections = primary_response.json()
+                        replica_collections = replica_response.json()
                         
-                        stale_mapping = cur.fetchone()
-                        if stale_mapping:
-                            potential_collection_name = stale_mapping[0]
-                            logger.error(f"   🔍 Found potential collection name from stale mapping: {potential_collection_name}")
-                            
-                            # Try to find this collection by name on both instances
-                            logger.error(f"   🔄 Attempting to refresh mapping for '{potential_collection_name}'")
-                            
-                            # Query both instances for collections by name
-                            current_primary_id = self.find_collection_by_name("primary", potential_collection_name)
-                            current_replica_id = self.find_collection_by_name("replica", potential_collection_name)
-                            
-                            if current_primary_id or current_replica_id:
-                                logger.error(f"   ✅ DYNAMIC MAPPING UPDATE:")
-                                logger.error(f"      Collection name: {potential_collection_name}")
-                                logger.error(f"      Current primary ID: {current_primary_id}")
-                                logger.error(f"      Current replica ID: {current_replica_id}")
+                        primary_by_name = {c['name']: c['id'] for c in primary_collections}
+                        replica_by_name = {c['name']: c['id'] for c in replica_collections}
+                        
+                        logger.error(f"   📊 Found collections - Primary: {len(primary_collections)}, Replica: {len(replica_collections)}")
+                        
+                        # Update ALL collection mappings with current IDs
+                        with self.get_db_connection() as conn:
+                            with conn.cursor() as cur:
+                                mappings_updated = 0
                                 
-                                # Update the mapping with current IDs
-                                if current_primary_id and current_replica_id:
-                                    cur.execute("""
-                                        UPDATE collection_id_mapping 
-                                        SET primary_collection_id = %s, replica_collection_id = %s, updated_at = NOW()
-                                        WHERE collection_name = %s
-                                    """, (current_primary_id, current_replica_id, potential_collection_name))
-                                    conn.commit()
+                                for collection_name in set(primary_by_name.keys()) & set(replica_by_name.keys()):
+                                    current_primary_id = primary_by_name[collection_name]
+                                    current_replica_id = replica_by_name[collection_name]
                                     
-                                    # Now return the correct mapping
-                                    target_collection_id = current_replica_id if target_instance == "replica" else current_primary_id
-                                    if target_collection_id and target_collection_id != collection_id:
+                                    cur.execute("""
+                                        INSERT INTO collection_id_mapping 
+                                        (collection_name, primary_collection_id, replica_collection_id, collection_config)
+                                        VALUES (%s, %s, %s, %s)
+                                        ON CONFLICT (collection_name) 
+                                        DO UPDATE SET 
+                                            primary_collection_id = EXCLUDED.primary_collection_id,
+                                            replica_collection_id = EXCLUDED.replica_collection_id,
+                                            updated_at = NOW()
+                                    """, (collection_name, current_primary_id, current_replica_id, '{}'))
+                                    
+                                    mappings_updated += 1
+                                    logger.error(f"   ✅ Updated mapping for '{collection_name}': {current_primary_id[:8]}... ↔ {current_replica_id[:8]}...")
+                                
+                                conn.commit()
+                                logger.error(f"   🎯 PROACTIVE REFRESH: Updated {mappings_updated} collection mappings")
+                                
+                                # Now use the first available collection mapping for this request
+                                if mappings_updated > 0:
+                                    cur.execute("""
+                                        SELECT collection_name, primary_collection_id, replica_collection_id 
+                                        FROM collection_id_mapping 
+                                        LIMIT 1
+                                    """)
+                                    
+                                    mapping_result = cur.fetchone()
+                                    if mapping_result:
+                                        coll_name, prim_id, repl_id = mapping_result
+                                        target_collection_id = repl_id if target_instance == "replica" else prim_id
+                                        
                                         mapped_path = original_path.replace(collection_id, target_collection_id)
-                                        logger.error(f"   🎯 DYNAMIC MAPPING SUCCESS:")
+                                        logger.error(f"   🎯 PROACTIVE MAPPING SUCCESS:")
+                                        logger.error(f"      Using collection: {coll_name}")
                                         logger.error(f"      Original: {original_path}")
                                         logger.error(f"      Mapped: {mapped_path}")
                                         logger.error(f"      ID change: {collection_id} → {target_collection_id}")
                                         return mapped_path
-                                    else:
-                                        logger.error(f"   ℹ️ Collection ID unchanged after dynamic update")
-                                        return original_path
-                                else:
-                                    logger.error(f"   ⚠️ Collection '{potential_collection_name}' only exists on one instance")
-                                    # Continue with standard discovery logic below
-                            else:
-                                logger.error(f"   ❌ Collection '{potential_collection_name}' no longer exists - cleaning up stale mapping")
-                                # Clean up the stale mapping
-                                cur.execute("DELETE FROM collection_id_mapping WHERE collection_name = %s", (potential_collection_name,))
-                                conn.commit()
-                                logger.error(f"   🗑️ Removed stale mapping for '{potential_collection_name}'")
-                                
+                        
             except Exception as e:
-                logger.error(f"   ❌ Dynamic mapping discovery failed: {e}")
+                logger.error(f"   ❌ Proactive mapping refresh failed: {e}")
             
             # THIRD: Standard discovery if dynamic mapping didn't work
             logger.error(f"   🔧 Falling back to standard collection discovery")
@@ -1089,8 +1104,11 @@ class UnifiedWALLoadBalancer:
                     logger.error(f"   Method: {method}")
                     logger.error(f"   Original path: {original_path}")
                     logger.error(f"   Data type: {type(data)}")
-                    logger.error(f"   Data size: {len(str(data)) if data else 0} chars")
+                    logger.error(f"   Data size: {len(data) if data else 0} chars")
                     if data:
+                        # Convert memoryview to bytes for proper logging and processing
+                        if isinstance(data, memoryview):
+                            data = bytes(data)
                         logger.error(f"   Data preview: {str(data)[:100]}...")
                     
                     # 🔍 DEBUGGING: Headers processing
