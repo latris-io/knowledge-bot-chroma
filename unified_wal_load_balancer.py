@@ -698,21 +698,27 @@ class UnifiedWALLoadBalancer:
         current_memory = psutil.virtual_memory()
         available_memory_mb = (self.max_memory_usage_mb - (current_memory.used / 1024 / 1024))
         
-        # Adaptive batch sizing based on memory pressure
+        # CRITICAL FIX: Much more aggressive memory pressure handling
         if available_memory_mb < 50:  # Less than 50MB available
             self.stats["memory_pressure_events"] += 1
-            batch_size = min(10, self.default_batch_size // 8)  # Very small batches
-            logger.warning(f"⚠️ Critical memory pressure, reducing WAL batch size to {batch_size}")
+            batch_size = 1  # Ultra-small batches for critical memory pressure
+            logger.error(f"🚨 CRITICAL memory pressure, reducing WAL batch size to {batch_size}")
             return batch_size
         elif available_memory_mb < 100:  # Less than 100MB available
             self.stats["adaptive_batch_reductions"] += 1
-            batch_size = min(25, self.default_batch_size // 2)  # Small batches
-            logger.info(f"📊 Memory pressure detected, reducing batch size to {batch_size}")
+            batch_size = 2  # Very small batches
+            logger.warning(f"⚠️ High memory pressure, reducing batch size to {batch_size}")
             return batch_size
         elif available_memory_mb < 200:  # Less than 200MB available
-            return min(self.default_batch_size, estimated_total_writes // 5)
+            batch_size = min(5, self.default_batch_size // 4)  # Small batches
+            logger.info(f"📊 Memory pressure detected, reducing batch size to {batch_size}")
+            return batch_size
+        elif current_memory.percent > 85:  # High memory percentage
+            batch_size = min(10, self.default_batch_size // 2)  # Moderate reduction
+            logger.info(f"📊 High memory percentage ({current_memory.percent:.1f}%), batch size: {batch_size}")
+            return batch_size
         else:
-            # Plenty of memory, use larger batches for efficiency
+            # Normal memory conditions
             return min(self.max_batch_size, max(self.default_batch_size, estimated_total_writes // 3))
 
     def add_wal_write(self, method: str, path: str, data: bytes, headers: Dict[str, str], 
@@ -1040,12 +1046,21 @@ class UnifiedWALLoadBalancer:
                     
                     # INTELLIGENT COLLECTION ID MAPPING
                     logger.error(f"   🔄 Starting collection mapping for path: {original_path}")
-                    mapped_path = self.map_collection_id_for_sync(original_path, batch.target_instance)
                     
-                    if mapped_path != original_path:
-                        logger.error(f"   ✅ Path mapped: {original_path} → {mapped_path}")
+                    # CRITICAL FIX: Normalize V1 paths to V2 format first
+                    normalized_path = self.normalize_api_path_to_v2(original_path)
+                    if normalized_path != original_path:
+                        logger.error(f"   🔧 Path normalized: {original_path} → {normalized_path}")
+                    
+                    mapped_path = self.map_collection_id_for_sync(normalized_path, batch.target_instance)
+                    
+                    if mapped_path != normalized_path:
+                        logger.error(f"   ✅ Path mapped: {normalized_path} → {mapped_path}")
                     else:
-                        logger.error(f"   ℹ️ No mapping needed: {original_path}")
+                        logger.error(f"   ℹ️ No mapping needed: {normalized_path}")
+                    
+                    # Use the final normalized and mapped path
+                    final_sync_path = mapped_path
                     
                     # Prepare headers for sync request
                     sync_headers = {}
@@ -1063,11 +1078,11 @@ class UnifiedWALLoadBalancer:
                     logger.error(f"   🚀 Initiating sync request...")
                     logger.error(f"      Target: {batch.target_instance}")
                     logger.error(f"      Method: {method}")
-                    logger.error(f"      Mapped path: {mapped_path}")
+                    logger.error(f"      Mapped path: {final_sync_path}")
                     logger.error(f"      Data size: {len(str(data))}")
                     logger.error(f"      Headers: {sync_headers}")
                     
-                    response = self.make_direct_request(instance, method, mapped_path, data=data, headers=sync_headers)
+                    response = self.make_direct_request(instance, method, final_sync_path, data=data, headers=sync_headers)
                     
                     # 🔍 DEBUGGING: Success handling
                     logger.error(f"   ✅ SYNC SUCCESS for write {write_id}")
@@ -1088,85 +1103,92 @@ class UnifiedWALLoadBalancer:
                     logger.error(f"      Error message: {str(e)}")
                     
                     # INTELLIGENT ERROR HANDLING WITH AUTO-COLLECTION CREATION
-                    if e.response and e.response.status_code == 404 and '/collections/' in original_path:
-                        logger.error(f"   🔧 404 detected - attempting auto-collection creation")
-                        
-                        try:
-                            # Extract collection info from the path
-                            collection_id_from_path = self.extract_collection_identifier(original_path)
-                            logger.error(f"      Extracted collection ID: {collection_id_from_path}")
+                    if e.response and e.response.status_code == 404:
+                        # Handle 404 errors intelligently based on operation type
+                        if method == "DELETE":
+                            # 404 on DELETE is often expected (collection doesn't exist)
+                            logger.error(f"   ℹ️ DELETE 404 - Collection likely doesn't exist, marking as successful")
+                            self.mark_write_synced(write_id)
+                            success_count += 1
+                            self.stats["successful_syncs"] += 1
+                            continue
+                        elif '/collections/' in original_path:
+                            logger.error(f"   🔧 404 detected - attempting auto-collection creation")
                             
-                            if collection_id_from_path:
-                                # Try to get collection name from source instance
-                                source_instance_name = "primary" if batch.target_instance == "replica" else "replica"
-                                source_instance = next((inst for inst in self.instances if inst.name == source_instance_name and inst.is_healthy), None)
+                            try:
+                                # Extract collection info from the path
+                                collection_id_from_path = self.extract_collection_identifier(original_path)
+                                logger.error(f"      Extracted collection ID: {collection_id_from_path}")
                                 
-                                logger.error(f"      Source instance: {source_instance_name}")
-                                logger.error(f"      Source instance available: {source_instance is not None}")
-                                
-                                if source_instance:
-                                    # Get collection details from source
-                                    source_url = f"{source_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id_from_path}"
-                                    logger.error(f"      Fetching collection from source: {source_url}")
+                                if collection_id_from_path:
+                                    # Try to get collection name from source instance
+                                    source_instance_name = "primary" if batch.target_instance == "replica" else "replica"
+                                    source_instance = next((inst for inst in self.instances if inst.name == source_instance_name and inst.is_healthy), None)
                                     
-                                    source_collection_response = requests.get(source_url, timeout=20)
-                                    logger.error(f"      Source collection response: {source_collection_response.status_code}")
+                                    logger.error(f"      Source instance: {source_instance_name}")
+                                    logger.error(f"      Source instance available: {source_instance is not None}")
                                     
-                                    if source_collection_response.status_code == 200:
-                                        source_collection = source_collection_response.json()
-                                        collection_name = source_collection.get('name')
-                                        collection_config = source_collection.get('configuration_json', {})
+                                    if source_instance:
+                                        # Get collection details from source
+                                        source_url = f"{source_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id_from_path}"
+                                        logger.error(f"      Fetching collection from source: {source_url}")
                                         
-                                        logger.error(f"      Collection name: {collection_name}")
-                                        logger.error(f"      Collection config: {collection_config}")
+                                        source_collection_response = requests.get(source_url, timeout=20)
+                                        logger.error(f"      Source collection response: {source_collection_response.status_code}")
                                         
-                                        if collection_name:
-                                            logger.error(f"      🔧 Creating collection mapping for '{collection_name}'")
+                                        if source_collection_response.status_code == 200:
+                                            source_collection = source_collection_response.json()
+                                            collection_name = source_collection.get('name')
+                                            collection_config = source_collection.get('configuration_json', {})
                                             
-                                            # Create collection mapping (this will auto-create the collection)
-                                            mapping = self.get_or_create_collection_mapping(
-                                                collection_name, collection_id_from_path, source_instance_name, collection_config
-                                            )
+                                            logger.error(f"      Collection name: {collection_name}")
+                                            logger.error(f"      Collection config: {collection_config}")
                                             
-                                            logger.error(f"      Mapping result: {mapping}")
-                                            
-                                            if mapping:
-                                                # Retry the sync with proper collection ID mapping
-                                                logger.error(f"      🔄 Retrying sync with new mapping...")
-                                                retry_mapped_path = self.map_collection_id_for_sync(original_path, batch.target_instance)
-                                                logger.error(f"      Retry path: {retry_mapped_path}")
+                                            if collection_name:
+                                                logger.error(f"      🔧 Creating collection mapping for '{collection_name}'")
                                                 
-                                                retry_response = self.make_direct_request(instance, method, retry_mapped_path, data=data, headers=headers)
+                                                # Create collection mapping (this will auto-create the collection)
+                                                mapping = self.get_or_create_collection_mapping(
+                                                    collection_name, collection_id_from_path, source_instance_name, collection_config
+                                                )
                                                 
-                                                logger.error(f"      ✅ RETRY SUCCESS: {retry_response.status_code}")
+                                                logger.error(f"      Mapping result: {mapping}")
                                                 
-                                                self.mark_write_synced(write_id)
-                                                success_count += 1
-                                                self.stats["successful_syncs"] += 1
-                                                self.stats["auto_created_collections"] = self.stats.get("auto_created_collections", 0) + 1
-                                                continue
+                                                if mapping:
+                                                    # Retry the sync with proper collection ID mapping
+                                                    logger.error(f"      🔄 Retrying sync with new mapping...")
+                                                    retry_mapped_path = self.map_collection_id_for_sync(original_path, batch.target_instance)
+                                                    logger.error(f"      Retry path: {retry_mapped_path}")
+                                                    
+                                                    retry_response = self.make_direct_request(instance, method, retry_mapped_path, data=data, headers=headers)
+                                                    
+                                                    logger.error(f"      ✅ RETRY SUCCESS: {retry_response.status_code}")
+                                                    
+                                                    self.mark_write_synced(write_id)
+                                                    success_count += 1
+                                                    self.stats["successful_syncs"] += 1
+                                                    self.stats["auto_created_collections"] = self.stats.get("auto_created_collections", 0) + 1
+                                                    continue
+                                                else:
+                                                    logger.error(f"      ❌ Mapping creation failed")
                                             else:
-                                                logger.error(f"      ❌ Mapping creation failed")
+                                                logger.error(f"      ❌ No collection name found in source response")
                                         else:
-                                            logger.error(f"      ❌ No collection name found in source response")
+                                            logger.error(f"      ❌ Failed to fetch collection from source: {source_collection_response.status_code}")
                                     else:
-                                        logger.error(f"      ❌ Failed to fetch collection from source: {source_collection_response.status_code}")
+                                        logger.error(f"      ❌ Source instance not available")
                                 else:
-                                    logger.error(f"      ❌ Source instance not available")
-                            else:
-                                logger.error(f"      ❌ Could not extract collection ID from path")
-                                
-                            # If auto-creation failed, mark as failed
-                            error_msg = f"404: Collection not found, auto-creation failed: {str(e)}"
-                            self.mark_write_failed(write_record['write_id'], error_msg)
-                            self.stats["failed_syncs"] += 1
-                            logger.error(f"      ❌ Auto-creation failed, marked as failed")
-                            
-                        except Exception as auto_create_error:
-                            error_msg = f"404: Collection not found, auto-creation error: {str(auto_create_error)}"
-                            self.mark_write_failed(write_record['write_id'], error_msg)
-                            self.stats["failed_syncs"] += 1
-                            logger.error(f"      ❌ Auto-creation exception: {auto_create_error}")
+                                    logger.error(f"      ❌ Could not extract collection ID from path")
+                                    
+                            except Exception as auto_create_error:
+                                logger.error(f"      ❌ Auto-creation exception: {auto_create_error}")
+                        
+                        # For other 404 errors or failed auto-creation
+                        error_msg = f"404: Resource not found: {str(e)}"
+                        self.mark_write_failed(write_record['write_id'], error_msg)
+                        self.stats["failed_syncs"] += 1
+                        logger.error(f"      ❌ Marked as failed: {error_msg}")
+                        
                     else:
                         # Other HTTP errors - mark as failed
                         error_msg = f"HTTP {e.response.status_code if e.response else 'unknown'}: {str(e)}"
@@ -1499,8 +1521,9 @@ class UnifiedWALLoadBalancer:
             logger.debug(f"Failed to send Slack notification: {e}")
 
     def enhanced_wal_sync_loop(self):
-        """Enhanced high-volume WAL sync loop with adaptive timing"""
+        """Enhanced high-volume WAL sync loop with adaptive timing and automatic cleanup"""
         base_interval = self.sync_interval
+        cleanup_counter = 0
         
         while True:
             try:
@@ -1513,6 +1536,18 @@ class UnifiedWALLoadBalancer:
                     sync_interval = base_interval
                 else:
                     sync_interval = min(30, base_interval * 2)  # Slower sync for low volume
+                
+                # AUTOMATIC CLEANUP: Clean up old failed entries every 10 sync cycles
+                cleanup_counter += 1
+                if cleanup_counter >= 10:
+                    try:
+                        logger.info("🧹 Performing automatic WAL cleanup...")
+                        deleted_count, reset_count = self.clear_failed_wal_entries(max_age_hours=1)
+                        if deleted_count > 0 or reset_count > 0:
+                            logger.info(f"✅ Auto-cleanup: {deleted_count} deleted, {reset_count} reset")
+                        cleanup_counter = 0
+                    except Exception as e:
+                        logger.error(f"❌ Auto-cleanup failed: {e}")
                 
                 time.sleep(sync_interval)
                 
@@ -1566,13 +1601,29 @@ class UnifiedWALLoadBalancer:
         # CRITICAL FIX: Handle raw bytes data by converting to JSON for ChromaDB API
         if 'data' in kwargs and kwargs['data'] and method in ['POST', 'PUT', 'PATCH']:
             try:
-                # Convert bytes data back to JSON for proper ChromaDB API request
+                # Convert various data types to proper format for ChromaDB API
                 if isinstance(kwargs['data'], bytes):
                     logger.error(f"   🔄 Converting bytes data to JSON...")
                     json_data = json.loads(kwargs['data'].decode('utf-8'))
                     del kwargs['data']  # Remove raw data
                     kwargs['json'] = json_data  # Use json parameter instead
                     logger.error(f"   ✅ Converted to JSON: {str(json_data)[:200]}...")
+                elif isinstance(kwargs['data'], memoryview):
+                    logger.error(f"   🔄 Converting memoryview data to JSON...")
+                    # Convert memoryview to bytes first, then to JSON
+                    bytes_data = bytes(kwargs['data'])
+                    json_data = json.loads(bytes_data.decode('utf-8'))
+                    del kwargs['data']  # Remove raw data
+                    kwargs['json'] = json_data  # Use json parameter instead
+                    logger.error(f"   ✅ Converted memoryview to JSON: {str(json_data)[:200]}...")
+                elif isinstance(kwargs['data'], memoryview):
+                    logger.error(f"   🔄 Converting memoryview data to JSON...")
+                    # Convert memoryview to bytes first, then to JSON
+                    bytes_data = bytes(kwargs['data'])
+                    json_data = json.loads(bytes_data.decode('utf-8'))
+                    del kwargs['data']  # Remove raw data
+                    kwargs['json'] = json_data  # Use json parameter instead
+                    logger.error(f"   ✅ Converted memoryview to JSON: {str(json_data)[:200]}...")
                 elif isinstance(kwargs['data'], (str, dict)):
                     logger.error(f"   🔄 Converting string/dict data to JSON...")
                     if isinstance(kwargs['data'], str):
@@ -1938,6 +1989,36 @@ class UnifiedWALLoadBalancer:
         except Exception as e:
             logger.error(f"❌ Error clearing failed WAL entries: {e}")
             return 0, 0
+
+    def normalize_api_path_to_v2(self, path: str) -> str:
+        """Convert V1-style API paths to proper V2 format for ChromaDB compatibility"""
+        
+        # V1 to V2 path conversions
+        v1_to_v2_mappings = {
+            # Collections endpoints
+            "/api/v2/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
+            "/api/v1/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
+            
+            # Collection-specific endpoints (with dynamic collection ID/name)
+            "/api/v2/collections/": "/api/v2/tenants/default_tenant/databases/default_database/collections/",
+            "/api/v1/collections/": "/api/v2/tenants/default_tenant/databases/default_database/collections/",
+        }
+        
+        # Direct mapping for exact matches
+        if path in v1_to_v2_mappings:
+            logger.error(f"🔧 V1→V2 PATH CONVERSION: {path} → {v1_to_v2_mappings[path]}")
+            return v1_to_v2_mappings[path]
+        
+        # Pattern-based conversion for paths with collection IDs/names
+        for v1_pattern, v2_pattern in v1_to_v2_mappings.items():
+            if path.startswith(v1_pattern) and v1_pattern.endswith("/"):
+                # Replace the V1 prefix with V2 prefix, keeping the rest of the path
+                converted_path = path.replace(v1_pattern, v2_pattern, 1)
+                logger.error(f"🔧 V1→V2 PATH CONVERSION: {path} → {converted_path}")
+                return converted_path
+        
+        # If already V2 format or unknown format, return as-is
+        return path
 
 # Main execution for web service  
 if __name__ == '__main__':
