@@ -85,23 +85,59 @@ class UniversalResourceMonitor:
     def collect_metrics(self) -> ServiceResourceMetrics:
         """Collect current resource usage metrics"""
         try:
-            # Memory metrics
-            memory = psutil.virtual_memory()
+            # FIXED: Use process-specific memory instead of system-wide memory
+            process = psutil.Process()
+            process_memory_info = process.memory_info()
             
-            # CPU metrics (1 second sample)
-            cpu_percent = psutil.cpu_percent(interval=1.0)
+            # Get container memory limit (default 512MB if not specified)
+            container_memory_limit_mb = int(os.getenv("MEMORY_LIMIT_MB", "512"))
             
-            # Disk metrics for root filesystem
+            # Calculate process-specific memory percentage
+            process_memory_mb = process_memory_info.rss / (1024 * 1024)
+            process_memory_percent = (process_memory_mb / container_memory_limit_mb) * 100
+            
+            # Validate memory percentage is reasonable (0-200% allowing for some burst)
+            if process_memory_percent < 0 or process_memory_percent > 200:
+                logger.warning(f"⚠️ Invalid process memory reading: {process_memory_percent}%, using system fallback")
+                # Fallback to system memory if process monitoring fails
+                system_memory = psutil.virtual_memory()
+                process_memory_mb = system_memory.used / (1024 * 1024)
+                process_memory_percent = system_memory.percent
+            
+            # FIXED: Use process-specific CPU instead of system-wide CPU
+            try:
+                process_cpu_percent = process.cpu_percent(interval=1.0)
+                
+                # Validate CPU percentage is reasonable (0-100%)
+                if process_cpu_percent < 0 or process_cpu_percent > 100:
+                    logger.warning(f"⚠️ Invalid process CPU reading: {process_cpu_percent}%, using system fallback")
+                    process_cpu_percent = psutil.cpu_percent(interval=1.0)
+            except Exception as e:
+                logger.error(f"❌ Process CPU monitoring error: {e}, using system fallback")
+                process_cpu_percent = psutil.cpu_percent(interval=1.0)
+            
+            # Disk metrics for root filesystem (container disk usage)
             disk = psutil.disk_usage('/')
             disk_total_gb = disk.total / (1024**3)
             disk_free_gb = disk.free / (1024**3)
             disk_usage_percent = (disk.used / disk.total) * 100
             
+            # DEBUGGING: Log both system vs process metrics for comparison
+            try:
+                system_memory = psutil.virtual_memory()
+                logger.info(f"🔍 MONITORING COMPARISON ({self.service_name}):")
+                logger.info(f"   System Memory: {system_memory.percent:.1f}% (what we used to measure)")
+                logger.info(f"   Process Memory: {process_memory_percent:.1f}% (what Render measures)")
+                logger.info(f"   Process CPU: {process_cpu_percent:.1f}%")
+                logger.info(f"   Container Limit: {container_memory_limit_mb}MB")
+            except:
+                pass  # Don't fail if logging fails
+            
             return ServiceResourceMetrics(
                 service_name=self.service_name,
-                memory_usage_mb=memory.used / (1024**2),
-                memory_percent=memory.percent,
-                cpu_percent=cpu_percent,
+                memory_usage_mb=process_memory_mb,
+                memory_percent=process_memory_percent,
+                cpu_percent=process_cpu_percent,
                 disk_usage_percent=disk_usage_percent,
                 disk_free_gb=disk_free_gb,
                 disk_total_gb=disk_total_gb,

@@ -225,21 +225,73 @@ class HighVolumeUnifiedWAL:
             raise
 
     def collect_resource_metrics(self) -> ResourceMetrics:
-        """Collect current resource usage metrics"""
-        memory = psutil.virtual_memory()
-        cpu_percent = psutil.cpu_percent(interval=1)
-        
-        return ResourceMetrics(
-            memory_usage_mb=memory.used / 1024 / 1024,
-            memory_percent=memory.percent,
-            cpu_percent=cpu_percent,
-            timestamp=datetime.now()
-        )
+        """Collect current resource usage metrics with container-aware monitoring"""
+        try:
+            # FIXED: Use process-specific memory instead of system-wide memory
+            process = psutil.Process()
+            process_memory_info = process.memory_info()
+            
+            # Get container memory limit (default 512MB if not specified)
+            container_memory_limit_mb = int(os.getenv("MEMORY_LIMIT_MB", "512"))
+            
+            # Calculate process-specific memory usage
+            process_memory_mb = process_memory_info.rss / (1024 * 1024)
+            process_memory_percent = (process_memory_mb / container_memory_limit_mb) * 100
+            
+            # Validate memory percentage is reasonable (0-200% allowing for some burst)
+            if process_memory_percent < 0 or process_memory_percent > 200:
+                logger.warning(f"⚠️ Invalid process memory reading: {process_memory_percent}%, using system fallback")
+                # Fallback to system memory if process monitoring fails
+                system_memory = psutil.virtual_memory()
+                process_memory_mb = system_memory.used / (1024 * 1024)
+                process_memory_percent = system_memory.percent
+            
+            # FIXED: Use process-specific CPU instead of system-wide CPU  
+            try:
+                process_cpu_percent = process.cpu_percent(interval=1.0)
+                
+                # Validate CPU percentage is reasonable (0-100%)
+                if process_cpu_percent < 0 or process_cpu_percent > 100:
+                    logger.warning(f"⚠️ Invalid process CPU reading: {process_cpu_percent}%, using system fallback")
+                    process_cpu_percent = psutil.cpu_percent(interval=1.0)
+            except Exception as e:
+                logger.error(f"❌ Process CPU monitoring error: {e}, using system fallback")
+                process_cpu_percent = psutil.cpu_percent(interval=1.0)
+            
+            # DEBUGGING: Log both system vs process metrics for comparison
+            try:
+                system_memory = psutil.virtual_memory()
+                logger.info(f"🔍 HIGH VOLUME WAL MONITORING COMPARISON:")
+                logger.info(f"   System Memory: {system_memory.percent:.1f}% (what we used to measure)")
+                logger.info(f"   Process Memory: {process_memory_percent:.1f}% (what Render measures)")
+                logger.info(f"   Process CPU: {process_cpu_percent:.1f}%")
+                logger.info(f"   Container Limit: {container_memory_limit_mb}MB")
+            except:
+                pass  # Don't fail if logging fails
+                
+            return ResourceMetrics(
+                memory_usage_mb=process_memory_mb,
+                memory_percent=process_memory_percent,
+                cpu_percent=process_cpu_percent,
+                timestamp=datetime.now()
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to collect resource metrics: {e}")
+            return ResourceMetrics(
+                memory_usage_mb=0.0,
+                memory_percent=0.0, 
+                cpu_percent=0.0,
+                timestamp=datetime.now()
+            )
 
     def calculate_optimal_batch_size(self, estimated_total_writes: int = 100) -> int:
         """Calculate optimal WAL sync batch size based on current memory usage"""
-        current_memory = psutil.virtual_memory()
-        available_memory_mb = (self.max_memory_usage_mb - (current_memory.used / 1024 / 1024))
+        # FIXED: Use process-specific memory for container-aware batch sizing
+        process = psutil.Process()
+        process_memory_mb = process.memory_info().rss / (1024 * 1024)
+        container_memory_limit_mb = int(os.getenv("MEMORY_LIMIT_MB", "512"))
+        available_memory_mb = (container_memory_limit_mb - process_memory_mb)
         
         if available_memory_mb < 50:  # Less than 50MB available
             self.stats["memory_pressure_events"] += 1
@@ -361,16 +413,19 @@ class HighVolumeUnifiedWAL:
             return 0, len(batch.writes)
         
         success_count = 0
-        start_memory = psutil.virtual_memory().used / 1024 / 1024
+        # FIXED: Use process-specific memory monitoring
+        process = psutil.Process()
+        start_memory = process.memory_info().rss / (1024 * 1024)
         
         logger.info(f"🔄 Processing WAL batch: {batch.batch_size} writes to {batch.target_instance} ({batch.estimated_memory_mb:.1f}MB)")
         
         try:
             for write_record in batch.writes:
                 try:
-                    # Check memory pressure during processing
-                    current_memory = psutil.virtual_memory().used / 1024 / 1024
-                    if current_memory > self.max_memory_usage_mb * 0.9:  # 90% threshold
+                    # FIXED: Check memory pressure during processing using process-specific memory
+                    current_memory = process.memory_info().rss / (1024 * 1024)
+                    container_memory_limit_mb = int(os.getenv("MEMORY_LIMIT_MB", "512"))
+                    if current_memory > container_memory_limit_mb * 0.9:  # 90% threshold
                         logger.warning(f"⚠️ Memory pressure during batch processing: {current_memory:.1f}MB")
                         gc.collect()  # Force garbage collection
                     
@@ -395,7 +450,8 @@ class HighVolumeUnifiedWAL:
                     self.stats["failed_syncs"] += 1
                     logger.debug(f"❌ Failed to sync write {write_record['write_id'][:8]}: {e}")
             
-            end_memory = psutil.virtual_memory().used / 1024 / 1024
+            # FIXED: Use process-specific memory for end measurement
+            end_memory = process.memory_info().rss / (1024 * 1024)
             memory_delta = end_memory - start_memory
             
             logger.info(f"✅ Batch processed: {success_count}/{batch.batch_size} successful, memory delta: {memory_delta:+.1f}MB")
