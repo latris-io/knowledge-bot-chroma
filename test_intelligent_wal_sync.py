@@ -4,6 +4,58 @@ import requests
 import json
 import time
 import random
+import uuid
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Production safety
+TEST_PREFIX = "AUTOTEST_"
+test_collections_created = []
+
+def create_safe_test_collection_name() -> str:
+    """Create a production-safe test collection name"""
+    timestamp = int(time.time())
+    random_suffix = str(uuid.uuid4())[:8]
+    collection_name = f"{TEST_PREFIX}intelligent_sync_{timestamp}_{random_suffix}"
+    test_collections_created.append(collection_name)
+    return collection_name
+
+def cleanup_test_collections(base_url: str):
+    """Clean up all test collections from the system"""
+    logger.info("🧹 Cleaning up intelligent WAL sync test collections...")
+    
+    cleanup_results = {"attempted": 0, "successful": 0, "failed": 0}
+    
+    for collection_name in test_collections_created:
+        cleanup_results["attempted"] += 1
+        
+        # Safety check
+        if not collection_name.startswith(TEST_PREFIX):
+            logger.error(f"❌ SAFETY: Refused to delete {collection_name}")
+            cleanup_results["failed"] += 1
+            continue
+        
+        try:
+            # Delete collection
+            response = requests.delete(
+                f"{base_url}/api/v2/collections/{collection_name}",
+                timeout=30
+            )
+            if response.status_code in [200, 404]:  # 404 means already deleted
+                logger.info(f"✅ Deleted: {collection_name}")
+                cleanup_results["successful"] += 1
+            else:
+                logger.warning(f"⚠️ Failed to delete {collection_name}: {response.status_code}")
+                cleanup_results["failed"] += 1
+        except Exception as e:
+            logger.warning(f"⚠️ Error deleting {collection_name}: {e}")
+            cleanup_results["failed"] += 1
+    
+    logger.info(f"🧹 Cleanup complete: {cleanup_results['successful']}/{cleanup_results['attempted']} collections")
+    test_collections_created.clear()
+    return cleanup_results
 
 def test_intelligent_wal_sync():
     """Test the intelligent WAL sync system with collection mapping and auto-creation"""
@@ -28,11 +80,12 @@ def test_intelligent_wal_sync():
             return
         
         # Step 2: Create test collection through load balancer
-        collection_name = f"test_intelligent_sync_{int(time.time())}"
+        collection_name = create_safe_test_collection_name()
         print(f"\n2. Creating test collection '{collection_name}' through load balancer...")
         
         create_payload = {
             "name": collection_name,
+            "metadata": {"test_type": "intelligent_wal_sync", "safe_to_delete": True},
             "configuration": {
                 "hnsw": {
                     "space": "l2",
@@ -245,14 +298,18 @@ def test_intelligent_wal_sync():
         print(f"\n{'='*60}")
         print(f"🎯 Intelligent WAL Sync Test Completed!")
         print(f"   Collection: {collection_name}")
-        print(f"   Primary ID: {primary_id[:8]}...")
-        print(f"   Replica ID: {replica_id[:8]}...")
+        print(f"   Primary ID: {primary_id[:8]}..." if 'primary_id' in locals() else "")
+        print(f"   Replica ID: {replica_id[:8]}..." if 'replica_id' in locals() else "")
         print(f"{'='*60}")
         
     except Exception as e:
         print(f"\n❌ Test failed with error: {e}")
         import traceback
         print(f"Full traceback: {traceback.format_exc()}")
+    
+    finally:
+        # Always cleanup test collections
+        cleanup_test_collections(base_url)
 
 if __name__ == "__main__":
     test_intelligent_wal_sync() 

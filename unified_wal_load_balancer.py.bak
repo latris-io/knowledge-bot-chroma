@@ -534,35 +534,26 @@ class UnifiedWALLoadBalancer:
                                 conn.commit()
                                 logger.error(f"   🎯 PROACTIVE REFRESH: Updated {mappings_updated} collection mappings")
                                 
-                                # Now find the specific collection mapping for this request
+                                # Now use the first available collection mapping for this request
                                 if mappings_updated > 0:
-                                    # Extract collection name from the original path instead of using random mapping
-                                    collection_identifier = self.extract_collection_identifier(original_path)
-                                    if collection_identifier:
-                                        # Try to find collection name that matches this identifier
-                                        cur.execute("""
-                                            SELECT collection_name, primary_collection_id, replica_collection_id 
-                                            FROM collection_id_mapping 
-                                            WHERE collection_name = %s OR primary_collection_id = %s OR replica_collection_id = %s
-                                            LIMIT 1
-                                        """, (collection_identifier, collection_identifier, collection_identifier))
+                                    cur.execute("""
+                                        SELECT collection_name, primary_collection_id, replica_collection_id 
+                                        FROM collection_id_mapping 
+                                        LIMIT 1
+                                    """)
+                                    
+                                    mapping_result = cur.fetchone()
+                                    if mapping_result:
+                                        coll_name, prim_id, repl_id = mapping_result
+                                        target_collection_id = repl_id if target_instance == "replica" else prim_id
                                         
-                                        mapping_result = cur.fetchone()
-                                        if mapping_result:
-                                            coll_name, prim_id, repl_id = mapping_result
-                                            target_collection_id = repl_id if target_instance == "replica" else prim_id
-                                            
-                                            mapped_path = original_path.replace(collection_id, target_collection_id)
-                                            logger.error(f"   🎯 PROACTIVE MAPPING SUCCESS:")
-                                            logger.error(f"      Using collection: {coll_name}")
-                                            logger.error(f"      Original: {original_path}")
-                                            logger.error(f"      Mapped: {mapped_path}")
-                                            logger.error(f"      ID change: {collection_id} → {target_collection_id}")
-                                            return mapped_path
-                                        else:
-                                            logger.error(f"   ⚠️ No specific mapping found for collection: {collection_identifier}")
-                                    else:
-                                        logger.error(f"   ⚠️ Could not extract collection identifier from path: {original_path}")
+                                        mapped_path = original_path.replace(collection_id, target_collection_id)
+                                        logger.error(f"   🎯 PROACTIVE MAPPING SUCCESS:")
+                                        logger.error(f"      Using collection: {coll_name}")
+                                        logger.error(f"      Original: {original_path}")
+                                        logger.error(f"      Mapped: {mapped_path}")
+                                        logger.error(f"      ID change: {collection_id} → {target_collection_id}")
+                                        return mapped_path
                         
             except Exception as e:
                 logger.error(f"   ❌ Proactive mapping refresh failed: {e}")
@@ -1174,7 +1165,7 @@ class UnifiedWALLoadBalancer:
                     logger.error(f"      Target: {batch.target_instance}")
                     logger.error(f"      Method: {method}")
                     logger.error(f"      Mapped path: {final_sync_path}")
-                    logger.error(f"      Data size: {len(data)}")
+                    logger.error(f"      Data size: {len(str(data))}")
                     logger.error(f"      Headers: {sync_headers}")
                     
                     response = self.make_direct_request(instance, method, final_sync_path, data=data, headers=sync_headers)
@@ -1689,7 +1680,7 @@ class UnifiedWALLoadBalancer:
         # 🔍 DEBUGGING: Data handling analysis
         original_data = kwargs.get('data')
         logger.error(f"   Original data type: {type(original_data)}")
-        logger.error(f"   Original data size: {len(original_data) if original_data else 0} chars")
+        logger.error(f"   Original data size: {len(str(original_data)) if original_data else 0} chars")
         if original_data:
             logger.error(f"   Original data preview: {str(original_data)[:200]}...")
         
@@ -1939,51 +1930,33 @@ class UnifiedWALLoadBalancer:
         if not target_instance:
             raise Exception("No healthy instances available")
         
-        # CRITICAL FIX: Proper DELETE operation handling with immediate execution and sync
+        # CRITICAL FIX: Special handling for DELETE operations to prevent double-deletion corruption
         if method == "DELETE":
             logger.info(f"🗑️ DELETE request received: {path}")
             
-            # Execute DELETE immediately on chosen instance to get real response
-            try:
-                url = f"{target_instance.url}{path}"
-                
-                # Set proper headers for DELETE request
-                request_params = {'timeout': self.request_timeout, 'headers': {}}
-                if headers:
-                    request_params['headers'].update(headers)
-                request_params['headers']['Accept'] = 'application/json'
-                
-                # Execute the DELETE
-                logger.info(f"🗑️ Executing DELETE on {target_instance.name}: {url}")
-                response = requests.delete(url, **request_params)
-                response.raise_for_status()
-                
-                logger.info(f"✅ DELETE executed successfully on {target_instance.name}: {response.status_code}")
-                
-                # Now log to WAL for sync to other instance
-                other_instance = TargetInstance.REPLICA if target_instance.name == "primary" else TargetInstance.PRIMARY
-                
-                self.add_wal_write(
-                    method=method,
-                    path=path,
-                    data=data,
-                    headers=headers,
-                    target_instance=other_instance,  # Sync to the other instance only
-                    executed_on=target_instance.name  # Mark as executed on current instance
-                )
-                
-                logger.info(f"📝 DELETE logged to WAL for sync to {other_instance.value}")
-                
-                target_instance.update_stats(True)
-                self.stats["successful_requests"] += 1
-                
-                return response
-                
-            except Exception as e:
-                logger.error(f"❌ DELETE execution failed on {target_instance.name}: {e}")
-                target_instance.update_stats(False)
-                self.stats["failed_requests"] += 1
-                raise e
+            # ONLY log to WAL - do NOT execute immediately to prevent corruption
+            self.add_wal_write(
+                method=method,
+                path=path,
+                data=data,
+                headers=headers,
+                target_instance=TargetInstance.BOTH,  # Delete from both instances via WAL
+                executed_on=None  # Mark as not yet executed
+            )
+            
+            # Return immediate success response without executing deletion
+            # The WAL system will handle the actual deletion safely
+            logger.info(f"✅ DELETE logged to WAL for both instances: {path}")
+            
+            # Create a mock successful response
+            from requests import Response as RequestsResponse
+            mock_response = RequestsResponse()
+            mock_response.status_code = 200
+            mock_response._content = b'{"success": true, "message": "Deletion queued for WAL processing"}'
+            mock_response.headers['Content-Type'] = 'application/json'
+            
+            self.stats["successful_requests"] += 1
+            return mock_response
         
         # For non-DELETE write operations, log to WAL and execute normally
         if method in ['POST', 'PUT', 'PATCH']:
