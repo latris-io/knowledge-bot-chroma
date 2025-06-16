@@ -1826,6 +1826,13 @@ class UnifiedWALLoadBalancer:
                        retry_count: int = 0, max_retries: int = 1, **kwargs) -> requests.Response:
         """Forward request to appropriate instance with WAL logging for deletions"""
         
+        # 🔧 CRITICAL: Apply V1→V2 path normalization for ALL requests
+        original_path = path
+        normalized_path = self.normalize_api_path_to_v2(path)
+        if normalized_path != original_path:
+            logger.error(f"🔧 LIVE REQUEST V1→V2 CONVERSION: {original_path} → {normalized_path}")
+            path = normalized_path
+        
         # Prevent infinite retry loops
         if retry_count >= max_retries:
             raise Exception(f"All instances failed after {max_retries} retries")
