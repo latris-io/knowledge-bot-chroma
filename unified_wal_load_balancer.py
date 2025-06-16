@@ -765,13 +765,24 @@ class UnifiedWALLoadBalancer:
             logger.error(f"❌ Error initializing collection mappings: {e}")
 
     def collect_resource_metrics(self) -> ResourceMetrics:
-        """Collect current resource usage metrics"""
-        memory = psutil.virtual_memory()
-        cpu_percent = psutil.cpu_percent(interval=0.1)  # Non-blocking
+        """Collect current resource usage metrics - PROCESS-SPECIFIC to prevent false alerts"""
+        # CRITICAL FIX: Use process-specific metrics instead of system-wide
+        process = psutil.Process()
+        
+        # Process-specific memory usage
+        memory_info = process.memory_info()
+        memory_usage_mb = memory_info.rss / 1024 / 1024
+        
+        # Process-specific CPU usage
+        cpu_percent = process.cpu_percent(interval=0.1)
+        
+        # Calculate memory percentage based on container/service limits
+        memory_limit_mb = 1024  # Render.com limit for primary/replica services
+        memory_percent = (memory_usage_mb / memory_limit_mb) * 100
         
         return ResourceMetrics(
-            memory_usage_mb=memory.used / 1024 / 1024,
-            memory_percent=memory.percent,
+            memory_usage_mb=memory_usage_mb,
+            memory_percent=memory_percent,
             cpu_percent=cpu_percent,
             timestamp=datetime.now()
         )
