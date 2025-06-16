@@ -1165,7 +1165,7 @@ class UnifiedWALLoadBalancer:
                     logger.error(f"      Target: {batch.target_instance}")
                     logger.error(f"      Method: {method}")
                     logger.error(f"      Mapped path: {final_sync_path}")
-                    logger.error(f"      Data size: {len(str(data))}")
+                    logger.error(f"      Data size: {len(data)}")
                     logger.error(f"      Headers: {sync_headers}")
                     
                     response = self.make_direct_request(instance, method, final_sync_path, data=data, headers=sync_headers)
@@ -1680,7 +1680,7 @@ class UnifiedWALLoadBalancer:
         # 🔍 DEBUGGING: Data handling analysis
         original_data = kwargs.get('data')
         logger.error(f"   Original data type: {type(original_data)}")
-        logger.error(f"   Original data size: {len(str(original_data)) if original_data else 0} chars")
+        logger.error(f"   Original data size: {len(original_data) if original_data else 0} chars")
         if original_data:
             logger.error(f"   Original data preview: {str(original_data)[:200]}...")
         
