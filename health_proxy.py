@@ -35,6 +35,22 @@ class HealthProxyHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.proxy_to_chroma(path)
     
+    def do_POST(self):
+        """Handle POST requests and proxy to ChromaDB"""
+        self.proxy_to_chroma(self.path, method='POST')
+    
+    def do_DELETE(self):
+        """Handle DELETE requests and proxy to ChromaDB"""
+        self.proxy_to_chroma(self.path, method='DELETE')
+    
+    def do_PUT(self):
+        """Handle PUT requests and proxy to ChromaDB"""
+        self.proxy_to_chroma(self.path, method='PUT')
+    
+    def do_PATCH(self):
+        """Handle PATCH requests and proxy to ChromaDB"""
+        self.proxy_to_chroma(self.path, method='PATCH')
+    
     def handle_v1_heartbeat(self):
         """Handle deprecated v1 heartbeat - check if ChromaDB is responsive via v2"""
         try:
@@ -81,20 +97,50 @@ class HealthProxyHandler(http.server.BaseHTTPRequestHandler):
             response = {"status": "unhealthy", "service": "ChromaDB Proxy"}
             self.send_json_response(503, response)
     
-    def proxy_to_chroma(self, path):
+    def proxy_to_chroma(self, path, method='GET'):
         """Proxy requests directly to ChromaDB"""
         try:
             chroma_url = f"http://localhost:8000{path}"
-            req = urllib.request.Request(chroma_url)
-            with urllib.request.urlopen(req, timeout=10) as response:
+            
+            # Get request body for write operations
+            request_data = None
+            if method in ['POST', 'PUT', 'PATCH']:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 0:
+                    request_data = self.rfile.read(content_length)
+            
+            # Prepare request
+            req = urllib.request.Request(chroma_url, data=request_data, method=method)
+            
+            # Copy relevant headers
+            content_type = self.headers.get('Content-Type')
+            if content_type:
+                req.add_header('Content-Type', content_type)
+            
+            authorization = self.headers.get('Authorization')
+            if authorization:
+                req.add_header('Authorization', authorization)
+            
+            # Make request to ChromaDB
+            with urllib.request.urlopen(req, timeout=30) as response:
                 self.send_response(response.status)
                 # Copy headers
                 for header, value in response.headers.items():
                     self.send_header(header, value)
                 self.end_headers()
                 self.wfile.write(response.read())
+                
         except urllib.error.HTTPError as e:
-            self.send_error_response(e.code, f"ChromaDB error: {e.reason}")
+            # Read error response body
+            error_body = e.read() if hasattr(e, 'read') else b''
+            self.send_response(e.code)
+            # Copy error headers
+            if hasattr(e, 'headers'):
+                for header, value in e.headers.items():
+                    self.send_header(header, value)
+            self.end_headers()
+            self.wfile.write(error_body)
+            
         except Exception as e:
             self.send_error_response(503, f"Connection failed: {str(e)}")
     
@@ -157,7 +203,7 @@ def start_proxy_server():
     # Start proxy server
     with socketserver.TCPServer(("", port), HealthProxyHandler) as httpd:
         print(f"🌐 Health proxy server running on port {port}")
-        print(f"📋 Proxying v1 API requests to ChromaDB v2 API")
+        print(f"📋 Proxying ALL HTTP methods (GET/POST/DELETE/PUT/PATCH) to ChromaDB v2 API")
         httpd.serve_forever()
 
 if __name__ == "__main__":
