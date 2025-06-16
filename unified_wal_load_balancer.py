@@ -1258,8 +1258,35 @@ class UnifiedWALLoadBalancer:
                     logger.error(f"      Status code: {e.response.status_code if e.response else 'unknown'}")
                     logger.error(f"      Error message: {str(e)}")
                     
-                    # INTELLIGENT ERROR HANDLING WITH AUTO-COLLECTION CREATION
+                    # 🔥 ENHANCED 404 DETECTION DEBUG - Check both status code and error message 🔥
+                    logger.error(f"   🔍 DEBUG 404 DETECTION:")
+                    logger.error(f"      e.response exists: {e.response is not None}")
+                    if e.response:
+                        logger.error(f"      e.response.status_code: {e.response.status_code}")
+                    logger.error(f"      Error string: '{str(e)}'")
+                    logger.error(f"      Contains '404 Client Error': {'404 Client Error' in str(e)}")
+                    logger.error(f"      Contains 'Not Found': {'Not Found' in str(e)}")
+                    
+                    is_404_error = False
                     if e.response and e.response.status_code == 404:
+                        is_404_error = True
+                        logger.error(f"      ✅ 404 detected via status code")
+                    elif "404 Client Error" in str(e) or "Not Found" in str(e):
+                        is_404_error = True
+                        logger.error(f"      ✅ 404 detected via error message")
+                    else:
+                        logger.error(f"      ❌ 404 NOT detected")
+                    
+                    logger.error(f"   🎯 404 DETECTION RESULT: is_404_error = {is_404_error}")
+                    logger.error(f"   📋 OPERATION DETAILS:")
+                    logger.error(f"      Method: {method}")
+                    logger.error(f"      final_sync_path: {final_sync_path}")
+                    logger.error(f"      Contains '/get': {'/get' in final_sync_path}")
+                    logger.error(f"      Contains '/query': {'/query' in final_sync_path}")
+                    
+                    # INTELLIGENT ERROR HANDLING WITH AUTO-COLLECTION CREATION
+                    if is_404_error:
+                        logger.error(f"   🔄 ENTERING 404 HANDLING LOGIC")
                         # Handle 404 errors intelligently based on operation type
                         if method == "DELETE":
                             # 404 on DELETE is often expected (collection doesn't exist)
@@ -1270,9 +1297,10 @@ class UnifiedWALLoadBalancer:
                             continue
                         elif method in ["GET", "POST"] and ("/get" in final_sync_path or "/query" in final_sync_path):
                             # 404 on document operations when collection doesn't exist - graceful skip
-                            logger.error(f"   ℹ️ DOCUMENT OPERATION 404 - Collection no longer exists, marking as successful")
+                            logger.error(f"   ✅ DOCUMENT OPERATION 404 - Collection no longer exists, marking as successful")
                             logger.error(f"      Operation: {method} {final_sync_path}")
                             logger.error(f"      Reason: Collection was likely deleted by test cleanup")
+                            logger.error(f"      🎯 GRACEFUL SKIP TRIGGERED!")
                             self.mark_write_synced(write_id)
                             success_count += 1
                             self.stats["successful_syncs"] += 1
