@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
+import re
 
 # Flask imports for web service
 from flask import Flask, request, Response, jsonify
@@ -392,6 +393,11 @@ class UnifiedWALLoadBalancer:
             logger.error(f"Error ensuring collection '{collection_name}' exists on {instance_name}: {e}")
             return None
 
+    def is_valid_uuid(self, identifier: str) -> bool:
+        """Check if identifier is a valid UUID format"""
+        uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        return bool(re.match(uuid_pattern, identifier, re.IGNORECASE))
+
     def map_collection_id_for_sync(self, original_path: str, target_instance: str) -> str:
         """Map collection ID in path from source instance to target instance - WITH COMPREHENSIVE DEBUGGING"""
         logger.error(f"🔍 COLLECTION MAPPING DEBUG - Starting mapping")
@@ -417,12 +423,15 @@ class UnifiedWALLoadBalancer:
             logger.error(f"      Collection ID extracted: {collection_id}")
             logger.error(f"      Collection ID length: {len(collection_id)}")
             
-            # Check if this looks like a UUID (collection ID vs collection name)
-            if len(collection_id) < 30:  # Collection name, not ID
-                logger.error(f"   ℹ️ Collection identifier appears to be name (length < 30) - no mapping needed")
+            # FIXED: Use UUID validation instead of length checking
+            if not self.is_valid_uuid(collection_id):
+                logger.error(f"   ℹ️ Collection identifier is name (not UUID format) - no mapping needed")
+                logger.error(f"      Identifier: {collection_id}")
+                logger.error(f"      UUID validation: {self.is_valid_uuid(collection_id)}")
                 return original_path  # No mapping needed for name-based paths
             
-            logger.error(f"   🔍 Collection ID detected (length >= 30) - attempting mapping")
+            logger.error(f"   🔍 Valid UUID detected - attempting mapping")
+            logger.error(f"      UUID: {collection_id}")
             
             # First, try to find existing mapping in database
             try:

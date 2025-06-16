@@ -168,17 +168,17 @@ class UnifiedWALTestSuite:
         return all_passed
     
     def test_document_operations(self):
-        """Test document CRUD operations using isolated test collection"""
+        """Test document CRUD operations using isolated test collection with v2 API format"""
         logger.info("\n📄 Testing Document Operations")
         
         all_passed = True
         
-        # Test 1: Add documents to isolated test collection
+        # Test 1: Add documents to isolated test collection with explicit embeddings
         start_time = time.time()
         try:
-            # Create unique document IDs for this test session
+            # Create unique document IDs for this test session with explicit embeddings
             test_docs = {
-                "embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+                "embeddings": [[0.1, 0.2, 0.3, 0.4, 0.5], [0.6, 0.7, 0.8, 0.9, 1.0]],  # 5-dimensional embeddings
                 "documents": [f"Test document 1 - Session {self.test_session_id}", f"Test document 2 - Session {self.test_session_id}"],
                 "metadatas": [{"source": "test_suite", "session": self.test_session_id}, {"source": "test_suite", "session": self.test_session_id}],
                 "ids": [f"test_doc_{self.test_session_id}_{uuid.uuid4().hex[:8]}", f"test_doc_{self.test_session_id}_{uuid.uuid4().hex[:8]}"]
@@ -189,7 +189,7 @@ class UnifiedWALTestSuite:
             self.test_doc_ids = test_docs["ids"]
             
             response = requests.post(
-                f"{self.base_url}/api/v2/collections/{self.test_collection_name}/add",
+                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{self.test_collection_name}/add",
                 headers={"Content-Type": "application/json"},
                 json=test_docs,
                 timeout=30
@@ -217,9 +217,9 @@ class UnifiedWALTestSuite:
         if self.test_doc_ids:
             start_time = time.time()
             try:
-                get_payload = {"ids": self.test_doc_ids}
+                get_payload = {"ids": self.test_doc_ids, "include": ["documents", "metadatas"]}
                 response = requests.post(
-                    f"{self.base_url}/api/v2/collections/{self.test_collection_name}/get",
+                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{self.test_collection_name}/get",
                     headers={"Content-Type": "application/json"},
                     json=get_payload,
                     timeout=30
@@ -245,15 +245,16 @@ class UnifiedWALTestSuite:
                 self.log_test_result("Documents: Get Test Documents", False, f"Error: {str(e)}", duration)
                 all_passed = False
         
-        # Test 3: Query documents from isolated test collection
+        # Test 3: Query documents from isolated test collection with v2 API format
         start_time = time.time()
         try:
             query_payload = {
-                "query_embeddings": [[0.1, 0.2, 0.3]],
-                "n_results": 2
+                "query_embeddings": [[0.1, 0.2, 0.3, 0.4, 0.5]],  # Use correct v2 API format
+                "n_results": 2,
+                "include": ["documents", "metadatas", "distances"]
             }
             response = requests.post(
-                f"{self.base_url}/api/v2/collections/{self.test_collection_name}/query",
+                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{self.test_collection_name}/query",
                 headers={"Content-Type": "application/json"},
                 json=query_payload,
                 timeout=30
@@ -265,7 +266,7 @@ class UnifiedWALTestSuite:
                 found_results = len(result.get('ids', [[]])[0]) if result.get('ids') else 0
                 if not self.log_test_result(
                     "Documents: Query Test Documents",
-                    True,
+                    found_results > 0,
                     f"Query returned {found_results} results from test collection",
                     duration
                 ):
