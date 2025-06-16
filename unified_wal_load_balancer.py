@@ -2204,15 +2204,31 @@ class UnifiedWALLoadBalancer:
     def normalize_api_path_to_v2(self, path: str) -> str:
         """Convert V1-style API paths to proper V2 format for ChromaDB compatibility"""
         
-        # V1 to V2 path conversions
+        # EXPANDED V1 to V2 path conversions for comprehensive compatibility
         v1_to_v2_mappings = {
-            # Collections endpoints
-            "/api/v2/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
+            # Core collections endpoints
             "/api/v1/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
+            "/api/v2/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
             
             # Collection-specific endpoints (with dynamic collection ID/name)
-            "/api/v2/collections/": "/api/v2/tenants/default_tenant/databases/default_database/collections/",
             "/api/v1/collections/": "/api/v2/tenants/default_tenant/databases/default_database/collections/",
+            "/api/v2/collections/": "/api/v2/tenants/default_tenant/databases/default_database/collections/",
+            
+            # System endpoints
+            "/api/v1/heartbeat": "/api/v2/heartbeat",
+            "/api/v1/version": "/api/v2/version",
+            "/api/v1/reset": "/api/v2/reset",
+            "/api/v1/persist": "/api/v2/persist",
+            "/api/v1/raw_sql": "/api/v2/raw_sql",
+            
+            # Database and tenant endpoints (V1 didn't have these, but for consistency)
+            "/api/v1/tenants": "/api/v2/tenants",
+            "/api/v1/databases": "/api/v2/databases",
+            
+            # Legacy endpoint mappings for older clients
+            "/heartbeat": "/api/v2/heartbeat",
+            "/version": "/api/v2/version",
+            "/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
         }
         
         # Direct mapping for exact matches
@@ -2220,12 +2236,35 @@ class UnifiedWALLoadBalancer:
             logger.error(f"🔧 V1→V2 PATH CONVERSION: {path} → {v1_to_v2_mappings[path]}")
             return v1_to_v2_mappings[path]
         
-        # Pattern-based conversion for paths with collection IDs/names
+        # Pattern-based conversion for paths with collection IDs/names and operations
         for v1_pattern, v2_pattern in v1_to_v2_mappings.items():
             if path.startswith(v1_pattern) and v1_pattern.endswith("/"):
                 # Replace the V1 prefix with V2 prefix, keeping the rest of the path
                 converted_path = path.replace(v1_pattern, v2_pattern, 1)
                 logger.error(f"🔧 V1→V2 PATH CONVERSION: {path} → {converted_path}")
+                return converted_path
+        
+        # Handle legacy paths without /api/ prefix for older ChromaDB clients
+        if not path.startswith("/api/") and not path.startswith("/health") and not path.startswith("/status"):
+            # Check if it's a collections operation
+            if path.startswith("collections/") or path.startswith("/collections/"):
+                clean_path = path.lstrip("/")
+                converted_path = f"/api/v2/tenants/default_tenant/databases/default_database/{clean_path}"
+                logger.error(f"🔧 LEGACY→V2 PATH CONVERSION: {path} → {converted_path}")
+                return converted_path
+            
+            # Check if it's a system operation
+            legacy_system_mappings = {
+                "heartbeat": "/api/v2/heartbeat",
+                "version": "/api/v2/version",
+                "reset": "/api/v2/reset",
+                "persist": "/api/v2/persist",
+            }
+            
+            clean_path = path.strip("/")
+            if clean_path in legacy_system_mappings:
+                converted_path = legacy_system_mappings[clean_path]
+                logger.error(f"🔧 LEGACY→V2 PATH CONVERSION: {path} → {converted_path}")
                 return converted_path
         
         # If already V2 format or unknown format, return as-is
