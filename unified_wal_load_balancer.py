@@ -774,46 +774,66 @@ class UnifiedWALLoadBalancer:
             logger.error(f"❌ Error initializing collection mappings: {e}")
 
     def collect_resource_metrics(self) -> ResourceMetrics:
-        """Collect current resource usage metrics with improved CPU monitoring"""
-        memory = psutil.virtual_memory()
+        """Collect current resource usage metrics with process-specific monitoring (aligned with Render)"""
         
-        # CRITICAL FIX: Proper CPU monitoring with longer interval for accuracy
-        # Short intervals (0.1s) can give unreliable CPU readings
+        # CRITICAL FIX: Use process-specific memory instead of system-wide memory
+        # This aligns with what Render actually monitors (container memory, not host memory)
         try:
-            # Use 1 second interval for more accurate CPU readings
-            cpu_percent = psutil.cpu_percent(interval=1.0, percpu=False)
+            process = psutil.Process()
+            process_memory = process.memory_info()
+            
+            # Calculate process memory percentage based on reasonable container limits
+            # Assume 512MB container limit (typical for Render free tier)
+            container_memory_limit_mb = int(os.getenv('CONTAINER_MEMORY_LIMIT_MB', '512'))
+            process_memory_mb = process_memory.rss / 1024 / 1024
+            process_memory_percent = (process_memory_mb / container_memory_limit_mb) * 100
+            
+            # Cap at 100% for safety
+            process_memory_percent = min(100.0, process_memory_percent)
+            
+            logger.info(f"📊 Process Memory: {process_memory_mb:.1f}MB / {container_memory_limit_mb}MB ({process_memory_percent:.1f}%)")
+            
+        except Exception as e:
+            logger.error(f"❌ Process memory monitoring error: {e}, using fallback")
+            process_memory_mb = 50.0  # Safe fallback
+            process_memory_percent = 10.0  # Safe fallback
+        
+        # IMPROVED CPU monitoring (process-specific)
+        try:
+            # Use process-specific CPU instead of system-wide CPU
+            process_cpu_percent = psutil.Process().cpu_percent(interval=1.0)
             
             # Validate CPU percentage is reasonable (0-100%)
-            if cpu_percent < 0 or cpu_percent > 100:
-                logger.warning(f"⚠️ Invalid CPU reading: {cpu_percent}%, using previous value")
-                cpu_percent = getattr(self, '_last_valid_cpu_percent', 5.0)  # Default to 5%
+            if process_cpu_percent < 0 or process_cpu_percent > 100:
+                logger.warning(f"⚠️ Invalid process CPU reading: {process_cpu_percent}%, using previous value")
+                process_cpu_percent = getattr(self, '_last_valid_cpu_percent', 5.0)
             else:
-                self._last_valid_cpu_percent = cpu_percent
+                self._last_valid_cpu_percent = process_cpu_percent
                 
         except Exception as e:
-            logger.error(f"❌ CPU monitoring error: {e}, using default")
-            cpu_percent = getattr(self, '_last_valid_cpu_percent', 5.0)
+            logger.error(f"❌ Process CPU monitoring error: {e}, using default")
+            process_cpu_percent = getattr(self, '_last_valid_cpu_percent', 5.0)
         
-        # DEBUGGING: Log actual values to identify any mixups
-        logger.info(f"📊 Resource Metrics - Memory: {memory.percent:.1f}%, CPU: {cpu_percent:.1f}%")
-        
-        # Validate memory percentage
-        if memory.percent < 0 or memory.percent > 100:
-            logger.error(f"❌ Invalid memory reading: {memory.percent}%")
-            memory_percent = 50.0  # Safe default
-        else:
-            memory_percent = memory.percent
+        # DEBUGGING: Log both system vs process metrics for comparison
+        try:
+            system_memory = psutil.virtual_memory()
+            logger.info(f"🔍 MONITORING COMPARISON:")
+            logger.info(f"   System Memory: {system_memory.percent:.1f}% (what we used to measure)")
+            logger.info(f"   Process Memory: {process_memory_percent:.1f}% (what Render measures)")
+            logger.info(f"   Process CPU: {process_cpu_percent:.1f}%")
+        except:
+            pass  # Don't fail if logging fails
         
         metrics = ResourceMetrics(
-            memory_usage_mb=memory.used / 1024 / 1024,
-            memory_percent=memory_percent,
-            cpu_percent=cpu_percent,
+            memory_usage_mb=process_memory_mb,
+            memory_percent=process_memory_percent,
+            cpu_percent=process_cpu_percent,
             timestamp=datetime.now()
         )
         
-        # DEBUGGING: Additional validation
-        if metrics.cpu_percent > 50 and metrics.memory_percent > 80:
-            logger.warning(f"🔍 High resource usage detected - Memory: {metrics.memory_percent:.1f}%, CPU: {metrics.cpu_percent:.1f}%")
+        # DEBUGGING: Alert if there's still high usage (should be rare now)
+        if metrics.cpu_percent > 50 or metrics.memory_percent > 80:
+            logger.warning(f"🔍 High PROCESS resource usage - Memory: {metrics.memory_percent:.1f}%, CPU: {metrics.cpu_percent:.1f}%")
         
         return metrics
 
