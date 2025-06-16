@@ -22,6 +22,15 @@ CHROMA_PID=$!
 
 echo "📋 ChromaDB started with PID: $CHROMA_PID"
 
+# Start resource monitoring if enabled
+if [ -f "comprehensive_resource_monitor.py" ] && [ -n "$SLACK_WEBHOOK_URL" ]; then
+    echo "📊 Starting resource monitoring..."
+    SERVICE_NAME=${INSTANCE_ROLE:-"chroma-service"}
+    python3 comprehensive_resource_monitor.py $SERVICE_NAME &
+    MONITOR_PID=$!
+    echo "📋 Resource monitor started with PID: $MONITOR_PID for service: $SERVICE_NAME"
+fi
+
 # Wait for ChromaDB to be ready
 echo "⏳ Waiting for ChromaDB to initialize..."
 RETRY_COUNT=0

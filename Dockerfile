@@ -10,6 +10,10 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy monitoring files for resource tracking and Slack alerts
+COPY comprehensive_resource_monitor.py ./
+COPY health_proxy.py ./
+
 # Create data directory for persistence
 RUN mkdir -p /chroma/chroma
 

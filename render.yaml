@@ -26,6 +26,15 @@ services:
         value: primary
       - key: INSTANCE_PRIORITY
         value: 100
+      # Resource monitoring for upgrade alerts
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: MEMORY_LIMIT_MB
+        value: "1024"
+      - key: RESOURCE_CHECK_INTERVAL
+        value: "60"
+      - key: DATABASE_URL
+        value: postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha
 
   # Replica ChromaDB instance - needs persistent storage
   - type: web
@@ -50,6 +59,15 @@ services:
         value: replica
       - key: INSTANCE_PRIORITY
         value: 80
+      # Resource monitoring for upgrade alerts
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: MEMORY_LIMIT_MB
+        value: "1024"
+      - key: RESOURCE_CHECK_INTERVAL
+        value: "60"
+      - key: DATABASE_URL
+        value: postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha
 
   # Unified WAL Load Balancer - Enhanced sync + load balancing
   - type: web
