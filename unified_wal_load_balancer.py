@@ -29,7 +29,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
-import re
 
 # Flask imports for web service
 from flask import Flask, request, Response, jsonify
@@ -393,11 +392,6 @@ class UnifiedWALLoadBalancer:
             logger.error(f"Error ensuring collection '{collection_name}' exists on {instance_name}: {e}")
             return None
 
-    def is_valid_uuid(self, identifier: str) -> bool:
-        """Check if identifier is a valid UUID format"""
-        uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-        return bool(re.match(uuid_pattern, identifier, re.IGNORECASE))
-
     def map_collection_id_for_sync(self, original_path: str, target_instance: str) -> str:
         """Map collection ID in path from source instance to target instance - WITH COMPREHENSIVE DEBUGGING"""
         logger.error(f"🔍 COLLECTION MAPPING DEBUG - Starting mapping")
@@ -423,15 +417,12 @@ class UnifiedWALLoadBalancer:
             logger.error(f"      Collection ID extracted: {collection_id}")
             logger.error(f"      Collection ID length: {len(collection_id)}")
             
-            # FIXED: Use UUID validation instead of length checking
-            if not self.is_valid_uuid(collection_id):
-                logger.error(f"   ℹ️ Collection identifier is name (not UUID format) - no mapping needed")
-                logger.error(f"      Identifier: {collection_id}")
-                logger.error(f"      UUID validation: {self.is_valid_uuid(collection_id)}")
+            # Check if this looks like a UUID (collection ID vs collection name)
+            if len(collection_id) < 30:  # Collection name, not ID
+                logger.error(f"   ℹ️ Collection identifier appears to be name (length < 30) - no mapping needed")
                 return original_path  # No mapping needed for name-based paths
             
-            logger.error(f"   🔍 Valid UUID detected - attempting mapping")
-            logger.error(f"      UUID: {collection_id}")
+            logger.error(f"   🔍 Collection ID detected (length >= 30) - attempting mapping")
             
             # First, try to find existing mapping in database
             try:
@@ -543,35 +534,26 @@ class UnifiedWALLoadBalancer:
                                 conn.commit()
                                 logger.error(f"   🎯 PROACTIVE REFRESH: Updated {mappings_updated} collection mappings")
                                 
-                                # Now find the specific collection mapping for this request
+                                # Now use the first available collection mapping for this request
                                 if mappings_updated > 0:
-                                    # Extract collection name from the original path instead of using random mapping
-                                    collection_identifier = self.extract_collection_identifier(original_path)
-                                    if collection_identifier:
-                                        # Try to find collection name that matches this identifier
-                                        cur.execute("""
-                                            SELECT collection_name, primary_collection_id, replica_collection_id 
-                                            FROM collection_id_mapping 
-                                            WHERE collection_name = %s OR primary_collection_id = %s OR replica_collection_id = %s
-                                            LIMIT 1
-                                        """, (collection_identifier, collection_identifier, collection_identifier))
+                                    cur.execute("""
+                                        SELECT collection_name, primary_collection_id, replica_collection_id 
+                                        FROM collection_id_mapping 
+                                        LIMIT 1
+                                    """)
+                                    
+                                    mapping_result = cur.fetchone()
+                                    if mapping_result:
+                                        coll_name, prim_id, repl_id = mapping_result
+                                        target_collection_id = repl_id if target_instance == "replica" else prim_id
                                         
-                                        mapping_result = cur.fetchone()
-                                        if mapping_result:
-                                            coll_name, prim_id, repl_id = mapping_result
-                                            target_collection_id = repl_id if target_instance == "replica" else prim_id
-                                            
-                                            mapped_path = original_path.replace(collection_id, target_collection_id)
-                                            logger.error(f"   🎯 PROACTIVE MAPPING SUCCESS:")
-                                            logger.error(f"      Using collection: {coll_name}")
-                                            logger.error(f"      Original: {original_path}")
-                                            logger.error(f"      Mapped: {mapped_path}")
-                                            logger.error(f"      ID change: {collection_id} → {target_collection_id}")
-                                            return mapped_path
-                                        else:
-                                            logger.error(f"   ⚠️ No specific mapping found for collection: {collection_identifier}")
-                                    else:
-                                        logger.error(f"   ⚠️ Could not extract collection identifier from path: {original_path}")
+                                        mapped_path = original_path.replace(collection_id, target_collection_id)
+                                        logger.error(f"   🎯 PROACTIVE MAPPING SUCCESS:")
+                                        logger.error(f"      Using collection: {coll_name}")
+                                        logger.error(f"      Original: {original_path}")
+                                        logger.error(f"      Mapped: {mapped_path}")
+                                        logger.error(f"      ID change: {collection_id} → {target_collection_id}")
+                                        return mapped_path
                         
             except Exception as e:
                 logger.error(f"   ❌ Proactive mapping refresh failed: {e}")
@@ -783,68 +765,16 @@ class UnifiedWALLoadBalancer:
             logger.error(f"❌ Error initializing collection mappings: {e}")
 
     def collect_resource_metrics(self) -> ResourceMetrics:
-        """Collect current resource usage metrics with process-specific monitoring (aligned with Render)"""
+        """Collect current resource usage metrics"""
+        memory = psutil.virtual_memory()
+        cpu_percent = psutil.cpu_percent(interval=0.1)  # Non-blocking
         
-        # CRITICAL FIX: Use process-specific memory instead of system-wide memory
-        # This aligns with what Render actually monitors (container memory, not host memory)
-        try:
-            process = psutil.Process()
-            process_memory = process.memory_info()
-            
-            # Calculate process memory percentage based on reasonable container limits
-            # Assume 512MB container limit (typical for Render free tier)
-            container_memory_limit_mb = int(os.getenv('CONTAINER_MEMORY_LIMIT_MB', '512'))
-            process_memory_mb = process_memory.rss / 1024 / 1024
-            process_memory_percent = (process_memory_mb / container_memory_limit_mb) * 100
-            
-            # Cap at 100% for safety
-            process_memory_percent = min(100.0, process_memory_percent)
-            
-            logger.info(f"📊 Process Memory: {process_memory_mb:.1f}MB / {container_memory_limit_mb}MB ({process_memory_percent:.1f}%)")
-            
-        except Exception as e:
-            logger.error(f"❌ Process memory monitoring error: {e}, using fallback")
-            process_memory_mb = 50.0  # Safe fallback
-            process_memory_percent = 10.0  # Safe fallback
-        
-        # IMPROVED CPU monitoring (process-specific)
-        try:
-            # Use process-specific CPU instead of system-wide CPU
-            process_cpu_percent = psutil.Process().cpu_percent(interval=1.0)
-            
-            # Validate CPU percentage is reasonable (0-100%)
-            if process_cpu_percent < 0 or process_cpu_percent > 100:
-                logger.warning(f"⚠️ Invalid process CPU reading: {process_cpu_percent}%, using previous value")
-                process_cpu_percent = getattr(self, '_last_valid_cpu_percent', 5.0)
-            else:
-                self._last_valid_cpu_percent = process_cpu_percent
-                
-        except Exception as e:
-            logger.error(f"❌ Process CPU monitoring error: {e}, using default")
-            process_cpu_percent = getattr(self, '_last_valid_cpu_percent', 5.0)
-        
-        # DEBUGGING: Log both system vs process metrics for comparison
-        try:
-            system_memory = psutil.virtual_memory()
-            logger.info(f"🔍 MONITORING COMPARISON:")
-            logger.info(f"   System Memory: {system_memory.percent:.1f}% (what we used to measure)")
-            logger.info(f"   Process Memory: {process_memory_percent:.1f}% (what Render measures)")
-            logger.info(f"   Process CPU: {process_cpu_percent:.1f}%")
-        except:
-            pass  # Don't fail if logging fails
-        
-        metrics = ResourceMetrics(
-            memory_usage_mb=process_memory_mb,
-            memory_percent=process_memory_percent,
-            cpu_percent=process_cpu_percent,
+        return ResourceMetrics(
+            memory_usage_mb=memory.used / 1024 / 1024,
+            memory_percent=memory.percent,
+            cpu_percent=cpu_percent,
             timestamp=datetime.now()
         )
-        
-        # DEBUGGING: Alert if there's still high usage (should be rare now)
-        if metrics.cpu_percent > 50 or metrics.memory_percent > 80:
-            logger.warning(f"🔍 High PROCESS resource usage - Memory: {metrics.memory_percent:.1f}%, CPU: {metrics.cpu_percent:.1f}%")
-        
-        return metrics
 
     def calculate_optimal_batch_size(self, estimated_total_writes: int = 100) -> int:
         """Calculate optimal WAL sync batch size based on current memory usage and volume"""
@@ -1235,7 +1165,7 @@ class UnifiedWALLoadBalancer:
                     logger.error(f"      Target: {batch.target_instance}")
                     logger.error(f"      Method: {method}")
                     logger.error(f"      Mapped path: {final_sync_path}")
-                    logger.error(f"      Data size: {len(data)}")
+                    logger.error(f"      Data size: {len(str(data))}")
                     logger.error(f"      Headers: {sync_headers}")
                     
                     response = self.make_direct_request(instance, method, final_sync_path, data=data, headers=sync_headers)
@@ -1258,42 +1188,8 @@ class UnifiedWALLoadBalancer:
                     logger.error(f"      Status code: {e.response.status_code if e.response else 'unknown'}")
                     logger.error(f"      Error message: {str(e)}")
                     
-                    # 🔥 ENHANCED 404 AND 400 DETECTION DEBUG - Check both status code and error message 🔥
-                    logger.error(f"   🔍 DEBUG ERROR DETECTION:")
-                    logger.error(f"      e.response exists: {e.response is not None}")
-                    if e.response:
-                        logger.error(f"      e.response.status_code: {e.response.status_code}")
-                    logger.error(f"      Error string: '{str(e)}'")
-                    logger.error(f"      Contains '404 Client Error': {'404 Client Error' in str(e)}")
-                    logger.error(f"      Contains 'Not Found': {'Not Found' in str(e)}")
-                    logger.error(f"      Contains 'Collection ID is not a valid UUIDv4': {'Collection ID is not a valid UUIDv4' in str(e)}")
-                    
-                    is_404_error = False
-    is_collection_deleted_error = False
-                    
-                    if e.response and e.response.status_code == 404:
-                        is_404_error = True
-                        logger.error(f"      ✅ 404 detected via status code")
-                    elif "404 Client Error" in str(e) or "Not Found" in str(e):
-                        is_404_error = True
-                        logger.error(f"      ✅ 404 detected via error message")
-                    elif e.response and e.response.status_code == 400 and "Collection ID is not a valid UUIDv4" in str(e):
-                        is_collection_deleted_error = True
-                        logger.error(f"      ✅ 400 UUID validation error detected - collection likely deleted")
-                    else:
-                        logger.error(f"      ❌ Neither 404 nor collection deletion error detected")
-                    
-                    logger.error(f"   🎯 ERROR DETECTION RESULT: is_404_error = {is_404_error}, is_collection_deleted_error = {is_collection_deleted_error}")
-                    logger.error(f"   📋 OPERATION DETAILS:")
-                    logger.error(f"      Method: {method}")
-                    logger.error(f"      final_sync_path: {final_sync_path}")
-                    logger.error(f"      Contains '/get': {'/get' in final_sync_path}")
-                    logger.error(f"      Contains '/query': {'/query' in final_sync_path}")
-                    logger.error(f"      Contains '/add': {'/add' in final_sync_path}")
-                    
                     # INTELLIGENT ERROR HANDLING WITH AUTO-COLLECTION CREATION
-                    if is_404_error or is_collection_deleted_error:
-                        logger.error(f"   🔄 ENTERING 404 HANDLING LOGIC")
+                    if e.response and e.response.status_code == 404:
                         # Handle 404 errors intelligently based on operation type
                         if method == "DELETE":
                             # 404 on DELETE is often expected (collection doesn't exist)
@@ -1301,17 +1197,6 @@ class UnifiedWALLoadBalancer:
                             self.mark_write_synced(write_id)
                             success_count += 1
                             self.stats["successful_syncs"] += 1
-                            continue
-                        elif method in ["GET", "POST"] and ("/get" in final_sync_path or "/query" in final_sync_path or "/add" in final_sync_path):
-                            # 404 on document operations when collection doesn't exist - graceful skip
-                            logger.error(f"   ✅ DOCUMENT OPERATION 404 - Collection no longer exists, marking as successful")
-                            logger.error(f"      Operation: {method} {final_sync_path}")
-                            logger.error(f"      Reason: Collection was likely deleted by test cleanup")
-                            logger.error(f"      🎯 GRACEFUL SKIP TRIGGERED!")
-                            self.mark_write_synced(write_id)
-                            success_count += 1
-                            self.stats["successful_syncs"] += 1
-                            self.stats["graceful_skips"] = self.stats.get("graceful_skips", 0) + 1
                             continue
                         elif '/collections/' in original_path:
                             logger.error(f"   🔧 404 detected - attempting auto-collection creation")
@@ -1600,57 +1485,39 @@ class UnifiedWALLoadBalancer:
                 time.sleep(60)
 
     def check_upgrade_recommendations(self, metrics: ResourceMetrics):
-        """Analyze metrics and generate upgrade recommendations with enhanced debugging"""
+        """Analyze metrics and generate upgrade recommendations (same as data_sync_service)"""
         recommendations = []
-        
-        # DEBUGGING: Log the exact metrics being analyzed
-        logger.info(f"🔍 UPGRADE CHECK - Analyzing metrics:")
-        logger.info(f"   Memory: {metrics.memory_percent:.1f}% (threshold: 85%)")
-        logger.info(f"   CPU: {metrics.cpu_percent:.1f}% (threshold: 80%)")
-        logger.info(f"   Memory MB: {metrics.memory_usage_mb:.1f}MB")
         
         # Memory upgrade check
         if metrics.memory_percent > 85:
-            memory_rec = {
+            recommendations.append({
                 'type': 'memory',
                 'current': metrics.memory_percent,
                 'recommended_tier': 'Standard or Pro Plan',
                 'reason': f'Memory usage at {metrics.memory_percent:.1f}% - approaching limit',
                 'urgency': 'high' if metrics.memory_percent > 95 else 'medium'
-            }
-            recommendations.append(memory_rec)
-            logger.warning(f"🧠 MEMORY ALERT TRIGGERED: {memory_rec['reason']}")
+            })
         
         # CPU upgrade check
         if metrics.cpu_percent > 80:
-            cpu_rec = {
+            recommendations.append({
                 'type': 'cpu',
                 'current': metrics.cpu_percent,
                 'recommended_tier': 'Standard or Pro Plan',
                 'reason': f'CPU usage at {metrics.cpu_percent:.1f}% - WAL sync performance degraded',
                 'urgency': 'high' if metrics.cpu_percent > 95 else 'medium'
-            }
-            recommendations.append(cpu_rec)
-            logger.warning(f"💻 CPU ALERT TRIGGERED: {cpu_rec['reason']}")
+            })
         
         # WAL backlog check (unique to WAL system)
         pending_count = self.get_pending_writes_count()
         if pending_count > 1000:
-            wal_rec = {
+            recommendations.append({
                 'type': 'performance',
                 'current': pending_count,
                 'recommended_tier': 'Standard or Pro Plan',
                 'reason': f'WAL backlog at {pending_count} writes - sync falling behind',
                 'urgency': 'high' if pending_count > 5000 else 'medium'
-            }
-            recommendations.append(wal_rec)
-            logger.warning(f"📝 WAL BACKLOG ALERT TRIGGERED: {wal_rec['reason']}")
-        
-        # DEBUGGING: Log all recommendations being processed
-        if recommendations:
-            logger.warning(f"🚨 PROCESSING {len(recommendations)} UPGRADE RECOMMENDATIONS:")
-            for i, rec in enumerate(recommendations):
-                logger.warning(f"   {i+1}. Type: {rec['type']}, Current: {rec['current']:.1f}, Urgency: {rec['urgency']}")
+            })
         
         # Process recommendations
         for rec in recommendations:
@@ -1659,13 +1526,12 @@ class UnifiedWALLoadBalancer:
         # Send alerts for urgent recommendations
         urgent_recs = [r for r in recommendations if r['urgency'] == 'high']
         for rec in urgent_recs:
-            logger.error(f"🚨 URGENT SLACK ALERT: {rec['type']} at {rec['current']:.1f}% - {rec['reason']}")
+            logger.warning(f"🚨 URGENT: Resource upgrade recommended - {rec['reason']}")
             self.send_slack_upgrade_alert(rec)
         
         # Send Slack for medium priority recommendations (daily limit)
         medium_recs = [r for r in recommendations if r['urgency'] == 'medium']
         if medium_recs:
-            logger.info(f"⚠️ MEDIUM SLACK ALERT: {medium_recs[0]['type']} at {medium_recs[0]['current']:.1f}%")
             self.send_slack_upgrade_alert(medium_recs[0], frequency_limit=True)
 
     def store_upgrade_recommendation(self, recommendation: dict):
@@ -1814,7 +1680,7 @@ class UnifiedWALLoadBalancer:
         # 🔍 DEBUGGING: Data handling analysis
         original_data = kwargs.get('data')
         logger.error(f"   Original data type: {type(original_data)}")
-        logger.error(f"   Original data size: {len(original_data) if original_data else 0} chars")
+        logger.error(f"   Original data size: {len(str(original_data)) if original_data else 0} chars")
         if original_data:
             logger.error(f"   Original data preview: {str(original_data)[:200]}...")
         
@@ -2019,8 +1885,8 @@ class UnifiedWALLoadBalancer:
         }
 
     # Keep other essential methods for load balancing functionality
-    def choose_instance(self, path: str, method: str, headers: Dict[str, str]) -> Optional[ChromaInstance]:
-        """Choose instance for both read and write operations with proper failover"""
+    def choose_read_instance(self, path: str, method: str, headers: Dict[str, str]) -> Optional[ChromaInstance]:
+        """Choose instance for read operations"""
         healthy_instances = self.get_healthy_instances()
         if not healthy_instances:
             return None
@@ -2038,19 +1904,8 @@ class UnifiedWALLoadBalancer:
             else:
                 return replica
         
-        # CRITICAL FIX: For write operations, prefer primary but fall back to replica for high availability
-        primary = self.get_primary_instance()
-        if primary:
-            return primary
-        
-        # Failover: Use replica for writes when primary is unavailable
-        replica = self.get_replica_instance()
-        if replica:
-            logger.warning(f"🔄 WRITE FAILOVER: Primary down, routing {method} {path} to replica")
-            return replica
-        
-        # Last resort: any healthy instance
-        return healthy_instances[0] if healthy_instances else None
+        # For write operations, always use primary
+        return self.get_primary_instance()
 
     def forward_request(self, method: str, path: str, headers: Dict[str, str], 
                        data: bytes = b'', target_instance: Optional[ChromaInstance] = None, 
@@ -2070,56 +1925,46 @@ class UnifiedWALLoadBalancer:
         
         # Choose target instance if not specified
         if not target_instance:
-            target_instance = self.choose_instance(path, method, headers)
+            target_instance = self.choose_read_instance(path, method, headers)
         
         if not target_instance:
             raise Exception("No healthy instances available")
+
+        # Apply collection ID mapping for real-time requests
+        original_request_path = path
+        if "/collections/" in path:
+            mapped_path = self.map_collection_id_for_sync(path, target_instance.name)
+            if mapped_path != path:
+                logger.error(f"Real-time mapping: {path} -> {mapped_path}")
+                path = mapped_path
         
-        # CRITICAL FIX: Proper DELETE operation handling with immediate execution and sync
+        # CRITICAL FIX: Special handling for DELETE operations to prevent double-deletion corruption
         if method == "DELETE":
             logger.info(f"🗑️ DELETE request received: {path}")
             
-            # Execute DELETE immediately on chosen instance to get real response
-            try:
-                url = f"{target_instance.url}{path}"
-                
-                # Set proper headers for DELETE request
-                request_params = {'timeout': self.request_timeout, 'headers': {}}
-                if headers:
-                    request_params['headers'].update(headers)
-                request_params['headers']['Accept'] = 'application/json'
-                
-                # Execute the DELETE
-                logger.info(f"🗑️ Executing DELETE on {target_instance.name}: {url}")
-                response = requests.delete(url, **request_params)
-                response.raise_for_status()
-                
-                logger.info(f"✅ DELETE executed successfully on {target_instance.name}: {response.status_code}")
-                
-                # Now log to WAL for sync to other instance
-                other_instance = TargetInstance.REPLICA if target_instance.name == "primary" else TargetInstance.PRIMARY
-                
-                self.add_wal_write(
-                    method=method,
-                    path=path,
-                    data=data,
-                    headers=headers,
-                    target_instance=other_instance,  # Sync to the other instance only
-                    executed_on=target_instance.name  # Mark as executed on current instance
-                )
-                
-                logger.info(f"📝 DELETE logged to WAL for sync to {other_instance.value}")
-                
-                target_instance.update_stats(True)
-                self.stats["successful_requests"] += 1
-                
-                return response
-                
-            except Exception as e:
-                logger.error(f"❌ DELETE execution failed on {target_instance.name}: {e}")
-                target_instance.update_stats(False)
-                self.stats["failed_requests"] += 1
-                raise e
+            # ONLY log to WAL - do NOT execute immediately to prevent corruption
+            self.add_wal_write(
+                method=method,
+                path=path,
+                data=data,
+                headers=headers,
+                target_instance=TargetInstance.BOTH,  # Delete from both instances via WAL
+                executed_on=None  # Mark as not yet executed
+            )
+            
+            # Return immediate success response without executing deletion
+            # The WAL system will handle the actual deletion safely
+            logger.info(f"✅ DELETE logged to WAL for both instances: {path}")
+            
+            # Create a mock successful response
+            from requests import Response as RequestsResponse
+            mock_response = RequestsResponse()
+            mock_response.status_code = 200
+            mock_response._content = b'{"success": true, "message": "Deletion queued for WAL processing"}'
+            mock_response.headers['Content-Type'] = 'application/json'
+            
+            self.stats["successful_requests"] += 1
+            return mock_response
         
         # For non-DELETE write operations, log to WAL and execute normally
         if method in ['POST', 'PUT', 'PATCH']:
@@ -2249,31 +2094,15 @@ class UnifiedWALLoadBalancer:
     def normalize_api_path_to_v2(self, path: str) -> str:
         """Convert V1-style API paths to proper V2 format for ChromaDB compatibility"""
         
-        # EXPANDED V1 to V2 path conversions for comprehensive compatibility
+        # V1 to V2 path conversions
         v1_to_v2_mappings = {
-            # Core collections endpoints
-            "/api/v1/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
+            # Collections endpoints
             "/api/v2/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
+            "/api/v1/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
             
             # Collection-specific endpoints (with dynamic collection ID/name)
-            "/api/v1/collections/": "/api/v2/tenants/default_tenant/databases/default_database/collections/",
             "/api/v2/collections/": "/api/v2/tenants/default_tenant/databases/default_database/collections/",
-            
-            # System endpoints
-            "/api/v1/heartbeat": "/api/v2/heartbeat",
-            "/api/v1/version": "/api/v2/version",
-            "/api/v1/reset": "/api/v2/reset",
-            "/api/v1/persist": "/api/v2/persist",
-            "/api/v1/raw_sql": "/api/v2/raw_sql",
-            
-            # Database and tenant endpoints (V1 didn't have these, but for consistency)
-            "/api/v1/tenants": "/api/v2/tenants",
-            "/api/v1/databases": "/api/v2/databases",
-            
-            # Legacy endpoint mappings for older clients
-            "/heartbeat": "/api/v2/heartbeat",
-            "/version": "/api/v2/version",
-            "/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
+            "/api/v1/collections/": "/api/v2/tenants/default_tenant/databases/default_database/collections/",
         }
         
         # Direct mapping for exact matches
@@ -2281,35 +2110,12 @@ class UnifiedWALLoadBalancer:
             logger.error(f"🔧 V1→V2 PATH CONVERSION: {path} → {v1_to_v2_mappings[path]}")
             return v1_to_v2_mappings[path]
         
-        # Pattern-based conversion for paths with collection IDs/names and operations
+        # Pattern-based conversion for paths with collection IDs/names
         for v1_pattern, v2_pattern in v1_to_v2_mappings.items():
             if path.startswith(v1_pattern) and v1_pattern.endswith("/"):
                 # Replace the V1 prefix with V2 prefix, keeping the rest of the path
                 converted_path = path.replace(v1_pattern, v2_pattern, 1)
                 logger.error(f"🔧 V1→V2 PATH CONVERSION: {path} → {converted_path}")
-                return converted_path
-        
-        # Handle legacy paths without /api/ prefix for older ChromaDB clients
-        if not path.startswith("/api/") and not path.startswith("/health") and not path.startswith("/status"):
-            # Check if it's a collections operation
-            if path.startswith("collections/") or path.startswith("/collections/"):
-                clean_path = path.lstrip("/")
-                converted_path = f"/api/v2/tenants/default_tenant/databases/default_database/{clean_path}"
-                logger.error(f"🔧 LEGACY→V2 PATH CONVERSION: {path} → {converted_path}")
-                return converted_path
-            
-            # Check if it's a system operation
-            legacy_system_mappings = {
-                "heartbeat": "/api/v2/heartbeat",
-                "version": "/api/v2/version",
-                "reset": "/api/v2/reset",
-                "persist": "/api/v2/persist",
-            }
-            
-            clean_path = path.strip("/")
-            if clean_path in legacy_system_mappings:
-                converted_path = legacy_system_mappings[clean_path]
-                logger.error(f"🔧 LEGACY→V2 PATH CONVERSION: {path} → {converted_path}")
                 return converted_path
         
         # If already V2 format or unknown format, return as-is
