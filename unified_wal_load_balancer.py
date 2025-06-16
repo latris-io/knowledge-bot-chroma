@@ -774,16 +774,48 @@ class UnifiedWALLoadBalancer:
             logger.error(f"❌ Error initializing collection mappings: {e}")
 
     def collect_resource_metrics(self) -> ResourceMetrics:
-        """Collect current resource usage metrics"""
+        """Collect current resource usage metrics with improved CPU monitoring"""
         memory = psutil.virtual_memory()
-        cpu_percent = psutil.cpu_percent(interval=0.1)  # Non-blocking
         
-        return ResourceMetrics(
+        # CRITICAL FIX: Proper CPU monitoring with longer interval for accuracy
+        # Short intervals (0.1s) can give unreliable CPU readings
+        try:
+            # Use 1 second interval for more accurate CPU readings
+            cpu_percent = psutil.cpu_percent(interval=1.0, percpu=False)
+            
+            # Validate CPU percentage is reasonable (0-100%)
+            if cpu_percent < 0 or cpu_percent > 100:
+                logger.warning(f"⚠️ Invalid CPU reading: {cpu_percent}%, using previous value")
+                cpu_percent = getattr(self, '_last_valid_cpu_percent', 5.0)  # Default to 5%
+            else:
+                self._last_valid_cpu_percent = cpu_percent
+                
+        except Exception as e:
+            logger.error(f"❌ CPU monitoring error: {e}, using default")
+            cpu_percent = getattr(self, '_last_valid_cpu_percent', 5.0)
+        
+        # DEBUGGING: Log actual values to identify any mixups
+        logger.info(f"📊 Resource Metrics - Memory: {memory.percent:.1f}%, CPU: {cpu_percent:.1f}%")
+        
+        # Validate memory percentage
+        if memory.percent < 0 or memory.percent > 100:
+            logger.error(f"❌ Invalid memory reading: {memory.percent}%")
+            memory_percent = 50.0  # Safe default
+        else:
+            memory_percent = memory.percent
+        
+        metrics = ResourceMetrics(
             memory_usage_mb=memory.used / 1024 / 1024,
-            memory_percent=memory.percent,
+            memory_percent=memory_percent,
             cpu_percent=cpu_percent,
             timestamp=datetime.now()
         )
+        
+        # DEBUGGING: Additional validation
+        if metrics.cpu_percent > 50 and metrics.memory_percent > 80:
+            logger.warning(f"🔍 High resource usage detected - Memory: {metrics.memory_percent:.1f}%, CPU: {metrics.cpu_percent:.1f}%")
+        
+        return metrics
 
     def calculate_optimal_batch_size(self, estimated_total_writes: int = 100) -> int:
         """Calculate optimal WAL sync batch size based on current memory usage and volume"""
@@ -1494,39 +1526,57 @@ class UnifiedWALLoadBalancer:
                 time.sleep(60)
 
     def check_upgrade_recommendations(self, metrics: ResourceMetrics):
-        """Analyze metrics and generate upgrade recommendations (same as data_sync_service)"""
+        """Analyze metrics and generate upgrade recommendations with enhanced debugging"""
         recommendations = []
+        
+        # DEBUGGING: Log the exact metrics being analyzed
+        logger.info(f"🔍 UPGRADE CHECK - Analyzing metrics:")
+        logger.info(f"   Memory: {metrics.memory_percent:.1f}% (threshold: 85%)")
+        logger.info(f"   CPU: {metrics.cpu_percent:.1f}% (threshold: 80%)")
+        logger.info(f"   Memory MB: {metrics.memory_usage_mb:.1f}MB")
         
         # Memory upgrade check
         if metrics.memory_percent > 85:
-            recommendations.append({
+            memory_rec = {
                 'type': 'memory',
                 'current': metrics.memory_percent,
                 'recommended_tier': 'Standard or Pro Plan',
                 'reason': f'Memory usage at {metrics.memory_percent:.1f}% - approaching limit',
                 'urgency': 'high' if metrics.memory_percent > 95 else 'medium'
-            })
+            }
+            recommendations.append(memory_rec)
+            logger.warning(f"🧠 MEMORY ALERT TRIGGERED: {memory_rec['reason']}")
         
         # CPU upgrade check
         if metrics.cpu_percent > 80:
-            recommendations.append({
+            cpu_rec = {
                 'type': 'cpu',
                 'current': metrics.cpu_percent,
                 'recommended_tier': 'Standard or Pro Plan',
                 'reason': f'CPU usage at {metrics.cpu_percent:.1f}% - WAL sync performance degraded',
                 'urgency': 'high' if metrics.cpu_percent > 95 else 'medium'
-            })
+            }
+            recommendations.append(cpu_rec)
+            logger.warning(f"💻 CPU ALERT TRIGGERED: {cpu_rec['reason']}")
         
         # WAL backlog check (unique to WAL system)
         pending_count = self.get_pending_writes_count()
         if pending_count > 1000:
-            recommendations.append({
+            wal_rec = {
                 'type': 'performance',
                 'current': pending_count,
                 'recommended_tier': 'Standard or Pro Plan',
                 'reason': f'WAL backlog at {pending_count} writes - sync falling behind',
                 'urgency': 'high' if pending_count > 5000 else 'medium'
-            })
+            }
+            recommendations.append(wal_rec)
+            logger.warning(f"📝 WAL BACKLOG ALERT TRIGGERED: {wal_rec['reason']}")
+        
+        # DEBUGGING: Log all recommendations being processed
+        if recommendations:
+            logger.warning(f"🚨 PROCESSING {len(recommendations)} UPGRADE RECOMMENDATIONS:")
+            for i, rec in enumerate(recommendations):
+                logger.warning(f"   {i+1}. Type: {rec['type']}, Current: {rec['current']:.1f}, Urgency: {rec['urgency']}")
         
         # Process recommendations
         for rec in recommendations:
@@ -1535,12 +1585,13 @@ class UnifiedWALLoadBalancer:
         # Send alerts for urgent recommendations
         urgent_recs = [r for r in recommendations if r['urgency'] == 'high']
         for rec in urgent_recs:
-            logger.warning(f"🚨 URGENT: Resource upgrade recommended - {rec['reason']}")
+            logger.error(f"🚨 URGENT SLACK ALERT: {rec['type']} at {rec['current']:.1f}% - {rec['reason']}")
             self.send_slack_upgrade_alert(rec)
         
         # Send Slack for medium priority recommendations (daily limit)
         medium_recs = [r for r in recommendations if r['urgency'] == 'medium']
         if medium_recs:
+            logger.info(f"⚠️ MEDIUM SLACK ALERT: {medium_recs[0]['type']} at {medium_recs[0]['current']:.1f}%")
             self.send_slack_upgrade_alert(medium_recs[0], frequency_limit=True)
 
     def store_upgrade_recommendation(self, recommendation: dict):
