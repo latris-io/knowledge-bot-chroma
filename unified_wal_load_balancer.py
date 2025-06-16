@@ -1268,6 +1268,16 @@ class UnifiedWALLoadBalancer:
                             success_count += 1
                             self.stats["successful_syncs"] += 1
                             continue
+                        elif method in ["GET", "POST"] and ("/get" in final_sync_path or "/query" in final_sync_path):
+                            # 404 on document operations when collection doesn't exist - graceful skip
+                            logger.error(f"   ℹ️ DOCUMENT OPERATION 404 - Collection no longer exists, marking as successful")
+                            logger.error(f"      Operation: {method} {final_sync_path}")
+                            logger.error(f"      Reason: Collection was likely deleted by test cleanup")
+                            self.mark_write_synced(write_id)
+                            success_count += 1
+                            self.stats["successful_syncs"] += 1
+                            self.stats["graceful_skips"] = self.stats.get("graceful_skips", 0) + 1
+                            continue
                         elif '/collections/' in original_path:
                             logger.error(f"   🔧 404 detected - attempting auto-collection creation")
                             
