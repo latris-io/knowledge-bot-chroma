@@ -417,12 +417,21 @@ class UnifiedWALLoadBalancer:
             logger.error(f"      Collection ID extracted: {collection_id}")
             logger.error(f"      Collection ID length: {len(collection_id)}")
             
-            # Check if this looks like a UUID (collection ID vs collection name)
-            if len(collection_id) >= 30:  # Collection UUID, not name
-                logger.error(f"   ℹ️ Collection identifier appears to be UUID (length >= 30) - no mapping needed")
+            # 🔧 CRITICAL FIX: Use proper UUID validation instead of flawed length-based heuristic
+            import re
+            uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+            is_uuid = bool(uuid_pattern.match(collection_id))
+            
+            logger.error(f"   🔍 UUID validation:")
+            logger.error(f"      Collection ID: {collection_id}")
+            logger.error(f"      Is valid UUID: {is_uuid}")
+            logger.error(f"      Length: {len(collection_id)}")
+            
+            if is_uuid:
+                logger.error(f"   ✅ Collection identifier is a valid UUID (pattern match) - no mapping needed")
                 return original_path  # No mapping needed for UUID-based paths
             
-            logger.error(f"   🔍 Collection NAME detected (length < 30) - attempting name→UUID mapping")
+            logger.error(f"   🔍 Collection NAME detected (not a UUID pattern) - attempting name→UUID mapping")
             
             # First, try to find existing mapping in database
             try:
