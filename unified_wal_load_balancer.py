@@ -470,13 +470,81 @@ class UnifiedWALLoadBalancer:
                 logger.error(f"      Error type: {type(e).__name__}")
                 logger.error(f"      Error message: {str(e)}")
             
-            # If no mapping found, try to create one by querying both instances
-            logger.error(f"   🔧 No existing mapping - attempting to create new mapping")
+            # 🔧 DYNAMIC MAPPING ENHANCEMENT: Check if collection ID exists anywhere
+            logger.error(f"   🔧 No existing mapping - attempting DYNAMIC DISCOVERY")
             
-            # Determine which instance currently has this collection
+            # FIRST: Try to find collection by the given ID on both instances
             collection_found_on = None
             collection_name = None
             collection_config = None
+            
+            # SECOND: If not found by ID, try to discover by name from existing mappings
+            logger.error(f"   🕵️ Attempting collection name discovery for orphaned ID: {collection_id}")
+            
+            # Check if we can find this collection ID in any existing mapping (might be stale)
+            try:
+                with self.get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT collection_name 
+                            FROM collection_id_mapping 
+                            WHERE primary_collection_id = %s OR replica_collection_id = %s
+                        """, (collection_id, collection_id))
+                        
+                        stale_mapping = cur.fetchone()
+                        if stale_mapping:
+                            potential_collection_name = stale_mapping[0]
+                            logger.error(f"   🔍 Found potential collection name from stale mapping: {potential_collection_name}")
+                            
+                            # Try to find this collection by name on both instances
+                            logger.error(f"   🔄 Attempting to refresh mapping for '{potential_collection_name}'")
+                            
+                            # Query both instances for collections by name
+                            current_primary_id = self.find_collection_by_name("primary", potential_collection_name)
+                            current_replica_id = self.find_collection_by_name("replica", potential_collection_name)
+                            
+                            if current_primary_id or current_replica_id:
+                                logger.error(f"   ✅ DYNAMIC MAPPING UPDATE:")
+                                logger.error(f"      Collection name: {potential_collection_name}")
+                                logger.error(f"      Current primary ID: {current_primary_id}")
+                                logger.error(f"      Current replica ID: {current_replica_id}")
+                                
+                                # Update the mapping with current IDs
+                                if current_primary_id and current_replica_id:
+                                    cur.execute("""
+                                        UPDATE collection_id_mapping 
+                                        SET primary_collection_id = %s, replica_collection_id = %s, updated_at = NOW()
+                                        WHERE collection_name = %s
+                                    """, (current_primary_id, current_replica_id, potential_collection_name))
+                                    conn.commit()
+                                    
+                                    # Now return the correct mapping
+                                    target_collection_id = current_replica_id if target_instance == "replica" else current_primary_id
+                                    if target_collection_id and target_collection_id != collection_id:
+                                        mapped_path = original_path.replace(collection_id, target_collection_id)
+                                        logger.error(f"   🎯 DYNAMIC MAPPING SUCCESS:")
+                                        logger.error(f"      Original: {original_path}")
+                                        logger.error(f"      Mapped: {mapped_path}")
+                                        logger.error(f"      ID change: {collection_id} → {target_collection_id}")
+                                        return mapped_path
+                                    else:
+                                        logger.error(f"   ℹ️ Collection ID unchanged after dynamic update")
+                                        return original_path
+                                else:
+                                    logger.error(f"   ⚠️ Collection '{potential_collection_name}' only exists on one instance")
+                                    # Continue with standard discovery logic below
+                            else:
+                                logger.error(f"   ❌ Collection '{potential_collection_name}' no longer exists - cleaning up stale mapping")
+                                # Clean up the stale mapping
+                                cur.execute("DELETE FROM collection_id_mapping WHERE collection_name = %s", (potential_collection_name,))
+                                conn.commit()
+                                logger.error(f"   🗑️ Removed stale mapping for '{potential_collection_name}'")
+                                
+            except Exception as e:
+                logger.error(f"   ❌ Dynamic mapping discovery failed: {e}")
+            
+            # THIRD: Standard discovery if dynamic mapping didn't work
+            logger.error(f"   🔧 Falling back to standard collection discovery")
             
             # Check primary instance
             logger.error(f"   🔍 Checking primary instance for collection...")
@@ -2026,6 +2094,101 @@ class UnifiedWALLoadBalancer:
         
         # If already V2 format or unknown format, return as-is
         return path
+
+    def find_collection_by_name(self, instance_name: str, collection_name: str) -> Optional[str]:
+        """Find collection ID by name on a specific instance - for dynamic mapping"""
+        try:
+            instance = next((inst for inst in self.instances if inst.name == instance_name and inst.is_healthy), None)
+            if not instance:
+                return None
+            
+            # Query collections endpoint
+            response = requests.get(
+                f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                collections = response.json()
+                for collection in collections:
+                    if collection.get('name') == collection_name:
+                        return collection.get('id')
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to find collection '{collection_name}' on {instance_name}: {e}")
+            return None
+    
+    def refresh_stale_collection_mapping(self, collection_id: str, target_instance: str, original_path: str) -> str:
+        """Dynamically refresh stale collection mappings by discovering current collection IDs"""
+        logger.error(f"🔄 DYNAMIC MAPPING REFRESH for collection ID: {collection_id}")
+        
+        try:
+            with self.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Check if this collection ID exists in any mapping (might be stale)
+                    cur.execute("""
+                        SELECT collection_name 
+                        FROM collection_id_mapping 
+                        WHERE primary_collection_id = %s OR replica_collection_id = %s
+                    """, (collection_id, collection_id))
+                    
+                    stale_mapping = cur.fetchone()
+                    if stale_mapping:
+                        collection_name = stale_mapping[0]
+                        logger.error(f"   📋 Found stale mapping for collection: {collection_name}")
+                        
+                        # Discover current collection IDs by name
+                        current_primary_id = self.find_collection_by_name("primary", collection_name)
+                        current_replica_id = self.find_collection_by_name("replica", collection_name)
+                        
+                        logger.error(f"   🔍 Discovery results:")
+                        logger.error(f"      Primary ID: {current_primary_id}")
+                        logger.error(f"      Replica ID: {current_replica_id}")
+                        
+                        if current_primary_id and current_replica_id:
+                            # Update mapping with current IDs
+                            logger.error(f"   ✅ Updating mapping with current IDs")
+                            cur.execute("""
+                                UPDATE collection_id_mapping 
+                                SET primary_collection_id = %s, replica_collection_id = %s, updated_at = NOW()
+                                WHERE collection_name = %s
+                            """, (current_primary_id, current_replica_id, collection_name))
+                            conn.commit()
+                            
+                            # Return mapped path with correct ID
+                            target_collection_id = current_replica_id if target_instance == "replica" else current_primary_id
+                            if target_collection_id != collection_id:
+                                mapped_path = original_path.replace(collection_id, target_collection_id)
+                                logger.error(f"   🎯 DYNAMIC MAPPING SUCCESS:")
+                                logger.error(f"      Collection: {collection_name}")
+                                logger.error(f"      Original: {original_path}")
+                                logger.error(f"      Mapped: {mapped_path}")
+                                logger.error(f"      ID change: {collection_id} → {target_collection_id}")
+                                return mapped_path
+                            else:
+                                logger.error(f"   ℹ️ Collection ID unchanged after refresh")
+                                return original_path
+                                
+                        elif current_primary_id or current_replica_id:
+                            logger.error(f"   ⚠️ Collection '{collection_name}' only exists on one instance")
+                            # Could attempt to create on missing instance, but for now just log
+                            return original_path
+                            
+                        else:
+                            logger.error(f"   ❌ Collection '{collection_name}' no longer exists - removing stale mapping")
+                            cur.execute("DELETE FROM collection_id_mapping WHERE collection_name = %s", (collection_name,))
+                            conn.commit()
+                            logger.error(f"   🗑️ Removed stale mapping for '{collection_name}'")
+                            return original_path
+                    else:
+                        logger.error(f"   ❌ No existing mapping found for collection ID: {collection_id}")
+                        return original_path
+                        
+        except Exception as e:
+            logger.error(f"   ❌ Dynamic mapping refresh failed: {e}")
+            return original_path
 
 # Main execution for web service  
 if __name__ == '__main__':
