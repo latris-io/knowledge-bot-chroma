@@ -1258,34 +1258,41 @@ class UnifiedWALLoadBalancer:
                     logger.error(f"      Status code: {e.response.status_code if e.response else 'unknown'}")
                     logger.error(f"      Error message: {str(e)}")
                     
-                    # 🔥 ENHANCED 404 DETECTION DEBUG - Check both status code and error message 🔥
-                    logger.error(f"   🔍 DEBUG 404 DETECTION:")
+                    # 🔥 ENHANCED 404 AND 400 DETECTION DEBUG - Check both status code and error message 🔥
+                    logger.error(f"   🔍 DEBUG ERROR DETECTION:")
                     logger.error(f"      e.response exists: {e.response is not None}")
                     if e.response:
                         logger.error(f"      e.response.status_code: {e.response.status_code}")
                     logger.error(f"      Error string: '{str(e)}'")
                     logger.error(f"      Contains '404 Client Error': {'404 Client Error' in str(e)}")
                     logger.error(f"      Contains 'Not Found': {'Not Found' in str(e)}")
+                    logger.error(f"      Contains 'Collection ID is not a valid UUIDv4': {'Collection ID is not a valid UUIDv4' in str(e)}")
                     
                     is_404_error = False
+    is_collection_deleted_error = False
+                    
                     if e.response and e.response.status_code == 404:
                         is_404_error = True
                         logger.error(f"      ✅ 404 detected via status code")
                     elif "404 Client Error" in str(e) or "Not Found" in str(e):
                         is_404_error = True
                         logger.error(f"      ✅ 404 detected via error message")
+                    elif e.response and e.response.status_code == 400 and "Collection ID is not a valid UUIDv4" in str(e):
+                        is_collection_deleted_error = True
+                        logger.error(f"      ✅ 400 UUID validation error detected - collection likely deleted")
                     else:
-                        logger.error(f"      ❌ 404 NOT detected")
+                        logger.error(f"      ❌ Neither 404 nor collection deletion error detected")
                     
-                    logger.error(f"   🎯 404 DETECTION RESULT: is_404_error = {is_404_error}")
+                    logger.error(f"   🎯 ERROR DETECTION RESULT: is_404_error = {is_404_error}, is_collection_deleted_error = {is_collection_deleted_error}")
                     logger.error(f"   📋 OPERATION DETAILS:")
                     logger.error(f"      Method: {method}")
                     logger.error(f"      final_sync_path: {final_sync_path}")
                     logger.error(f"      Contains '/get': {'/get' in final_sync_path}")
                     logger.error(f"      Contains '/query': {'/query' in final_sync_path}")
+                    logger.error(f"      Contains '/add': {'/add' in final_sync_path}")
                     
                     # INTELLIGENT ERROR HANDLING WITH AUTO-COLLECTION CREATION
-                    if is_404_error:
+                    if is_404_error or is_collection_deleted_error:
                         logger.error(f"   🔄 ENTERING 404 HANDLING LOGIC")
                         # Handle 404 errors intelligently based on operation type
                         if method == "DELETE":
@@ -1295,7 +1302,7 @@ class UnifiedWALLoadBalancer:
                             success_count += 1
                             self.stats["successful_syncs"] += 1
                             continue
-                        elif method in ["GET", "POST"] and ("/get" in final_sync_path or "/query" in final_sync_path):
+                        elif method in ["GET", "POST"] and ("/get" in final_sync_path or "/query" in final_sync_path or "/add" in final_sync_path):
                             # 404 on document operations when collection doesn't exist - graceful skip
                             logger.error(f"   ✅ DOCUMENT OPERATION 404 - Collection no longer exists, marking as successful")
                             logger.error(f"      Operation: {method} {final_sync_path}")
