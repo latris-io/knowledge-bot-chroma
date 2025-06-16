@@ -1965,8 +1965,8 @@ class UnifiedWALLoadBalancer:
         }
 
     # Keep other essential methods for load balancing functionality
-    def choose_read_instance(self, path: str, method: str, headers: Dict[str, str]) -> Optional[ChromaInstance]:
-        """Choose instance for read operations"""
+    def choose_instance(self, path: str, method: str, headers: Dict[str, str]) -> Optional[ChromaInstance]:
+        """Choose instance for both read and write operations with proper failover"""
         healthy_instances = self.get_healthy_instances()
         if not healthy_instances:
             return None
@@ -1984,8 +1984,19 @@ class UnifiedWALLoadBalancer:
             else:
                 return replica
         
-        # For write operations, always use primary
-        return self.get_primary_instance()
+        # CRITICAL FIX: For write operations, prefer primary but fall back to replica for high availability
+        primary = self.get_primary_instance()
+        if primary:
+            return primary
+        
+        # Failover: Use replica for writes when primary is unavailable
+        replica = self.get_replica_instance()
+        if replica:
+            logger.warning(f"🔄 WRITE FAILOVER: Primary down, routing {method} {path} to replica")
+            return replica
+        
+        # Last resort: any healthy instance
+        return healthy_instances[0] if healthy_instances else None
 
     def forward_request(self, method: str, path: str, headers: Dict[str, str], 
                        data: bytes = b'', target_instance: Optional[ChromaInstance] = None, 
@@ -2005,7 +2016,7 @@ class UnifiedWALLoadBalancer:
         
         # Choose target instance if not specified
         if not target_instance:
-            target_instance = self.choose_read_instance(path, method, headers)
+            target_instance = self.choose_instance(path, method, headers)
         
         if not target_instance:
             raise Exception("No healthy instances available")
