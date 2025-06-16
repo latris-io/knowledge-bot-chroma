@@ -534,26 +534,35 @@ class UnifiedWALLoadBalancer:
                                 conn.commit()
                                 logger.error(f"   🎯 PROACTIVE REFRESH: Updated {mappings_updated} collection mappings")
                                 
-                                # Now use the first available collection mapping for this request
+                                # Now find the specific collection mapping for this request
                                 if mappings_updated > 0:
-                                    cur.execute("""
-                                        SELECT collection_name, primary_collection_id, replica_collection_id 
-                                        FROM collection_id_mapping 
-                                        LIMIT 1
-                                    """)
-                                    
-                                    mapping_result = cur.fetchone()
-                                    if mapping_result:
-                                        coll_name, prim_id, repl_id = mapping_result
-                                        target_collection_id = repl_id if target_instance == "replica" else prim_id
+                                    # Extract collection name from the original path instead of using random mapping
+                                    collection_identifier = self.extract_collection_identifier(original_path)
+                                    if collection_identifier:
+                                        # Try to find collection name that matches this identifier
+                                        cur.execute("""
+                                            SELECT collection_name, primary_collection_id, replica_collection_id 
+                                            FROM collection_id_mapping 
+                                            WHERE collection_name = %s OR primary_collection_id = %s OR replica_collection_id = %s
+                                            LIMIT 1
+                                        """, (collection_identifier, collection_identifier, collection_identifier))
                                         
-                                        mapped_path = original_path.replace(collection_id, target_collection_id)
-                                        logger.error(f"   🎯 PROACTIVE MAPPING SUCCESS:")
-                                        logger.error(f"      Using collection: {coll_name}")
-                                        logger.error(f"      Original: {original_path}")
-                                        logger.error(f"      Mapped: {mapped_path}")
-                                        logger.error(f"      ID change: {collection_id} → {target_collection_id}")
-                                        return mapped_path
+                                        mapping_result = cur.fetchone()
+                                        if mapping_result:
+                                            coll_name, prim_id, repl_id = mapping_result
+                                            target_collection_id = repl_id if target_instance == "replica" else prim_id
+                                            
+                                            mapped_path = original_path.replace(collection_id, target_collection_id)
+                                            logger.error(f"   🎯 PROACTIVE MAPPING SUCCESS:")
+                                            logger.error(f"      Using collection: {coll_name}")
+                                            logger.error(f"      Original: {original_path}")
+                                            logger.error(f"      Mapped: {mapped_path}")
+                                            logger.error(f"      ID change: {collection_id} → {target_collection_id}")
+                                            return mapped_path
+                                        else:
+                                            logger.error(f"   ⚠️ No specific mapping found for collection: {collection_identifier}")
+                                    else:
+                                        logger.error(f"   ⚠️ Could not extract collection identifier from path: {original_path}")
                         
             except Exception as e:
                 logger.error(f"   ❌ Proactive mapping refresh failed: {e}")
