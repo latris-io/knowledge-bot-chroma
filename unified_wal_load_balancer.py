@@ -2677,7 +2677,7 @@ if __name__ == '__main__':
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
-        @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+    @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
         """Proxy all other requests through the load balancer"""
         try:
