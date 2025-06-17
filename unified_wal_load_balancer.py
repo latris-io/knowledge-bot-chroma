@@ -3,6 +3,11 @@
 Enhanced Unified WAL-First Load Balancer with High-Volume Processing
 Combines load balancing and bidirectional sync in a single service with PostgreSQL persistence.
 
+DEPLOYMENT TIMESTAMP: 2025-06-17 13:31:00 UTC - CRITICAL FIXES DEPLOYED
+- Fixed None return bug in forward_request
+- Enhanced production validation test coverage
+- Fixed write failover when primary instance down
+
 Features:
 - WAL-first approach with PostgreSQL persistence
 - Batched sync processing with adaptive sizing
