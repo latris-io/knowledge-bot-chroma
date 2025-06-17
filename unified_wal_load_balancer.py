@@ -439,12 +439,14 @@ class UnifiedWALLoadBalancer:
                 
                 with self.get_db_connection() as conn:
                     with conn.cursor() as cur:
-                        # Check if we have a mapping for this collection name
+                        # Check if we have a mapping for this collection name OR UUID
                         cur.execute("""
                             SELECT collection_name, primary_collection_id, replica_collection_id 
                             FROM collection_id_mapping 
-                            WHERE collection_name = %s
-                        """, (collection_id,))
+                            WHERE collection_name = %s 
+                               OR primary_collection_id = %s 
+                               OR replica_collection_id = %s
+                        """, (collection_id, collection_id, collection_id))
                         
                         result = cur.fetchone()
                         logger.error(f"   📊 Database query result: {result}")
