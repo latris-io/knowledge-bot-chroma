@@ -1,0 +1,68 @@
+
+# PATCH FOR unified_wal_load_balancer.py
+# Add this method to the UnifiedWALLoadBalancer class:
+
+def auto_create_collection_mapping(self, response, method, path, target_instance_name):
+    """
+    Automatically create collection mapping when a collection is successfully created
+    This should be called after successful collection creation responses
+    """
+    try:
+        # Only process successful collection creation requests
+        if method != "POST" or response.status_code not in [200, 201]:
+            return
+        
+        # Check if this is a collection creation endpoint
+        if "/collections" not in path or "/collections/" in path:
+            # Skip if this is not the main collections endpoint or is a sub-operation
+            return
+        
+        # Parse the response to get collection details
+        try:
+            collection_data = response.json()
+            collection_name = collection_data.get('name')
+            collection_id = collection_data.get('id')
+            collection_config = collection_data.get('configuration_json', {})
+            
+            if not collection_name or not collection_id:
+                logger.warning("Collection creation response missing name or id")
+                return
+            
+            logger.info(f"🔧 AUTO-MAPPING: Collection '{collection_name}' created on {target_instance_name}")
+            
+            # Create or update collection mapping
+            mapping = self.get_or_create_collection_mapping(
+                collection_name, 
+                collection_id, 
+                target_instance_name, 
+                collection_config
+            )
+            
+            if mapping:
+                logger.info(f"✅ AUTO-MAPPING: Mapping created for '{collection_name}'")
+            else:
+                logger.error(f"❌ AUTO-MAPPING: Failed to create mapping for '{collection_name}'")
+                
+        except json.JSONDecodeError:
+            logger.warning("Collection creation response is not valid JSON")
+        except Exception as e:
+            logger.error(f"Auto-mapping failed: {e}")
+            
+    except Exception as e:
+        logger.error(f"Auto-mapping error: {e}")
+
+# PATCH FOR proxy_request method (add after successful response):
+# In the proxy_request method, after this line:
+#     response = enhanced_wal.forward_request(...)
+# Add this:
+#     # Auto-create collection mapping for successful collection creations
+#     if enhanced_wal and response.status_code in [200, 201]:
+#         enhanced_wal.auto_create_collection_mapping(response, request.method, path, target_instance_name)
+
+# PATCH FOR forward_request method (add after successful response):
+# In the forward_request method, after this line:
+#     return response
+# Add this:
+#     # Auto-create collection mapping for successful collection creations
+#     self.auto_create_collection_mapping(response, method, path, target_instance.name)
+    
