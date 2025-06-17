@@ -2072,6 +2072,42 @@ class UnifiedWALLoadBalancer:
             
             logger.info(f"Successfully forwarded {method} /{path} -> {response.status_code}")
             
+            # 🔧 CRITICAL FIX: Auto-create collection mappings when collections are created
+            if (method == "POST" and "/collections" in path and 
+                response.status_code in [200, 201] and "application/json" in response.headers.get('Content-Type', '')):
+                
+                try:
+                    # Parse the response to get collection details
+                    response_data = response.json()
+                    collection_name = response_data.get('name')
+                    collection_id = response_data.get('id')
+                    
+                    if collection_name and collection_id:
+                        logger.error(f"🔧 AUTO-MAPPING: Collection '{collection_name}' created on {target_instance.name} with ID {collection_id[:8]}...")
+                        
+                        # Extract collection config from request
+                        collection_config = None
+                        if 'json' in kwargs and kwargs['json']:
+                            collection_config = kwargs['json'].get('configuration', {})
+                        
+                        # Create mapping between primary and replica instances
+                        mapping_result = self.get_or_create_collection_mapping(
+                            collection_name=collection_name,
+                            source_collection_id=collection_id,
+                            source_instance=target_instance.name,
+                            collection_config=collection_config
+                        )
+                        
+                        if mapping_result:
+                            logger.error(f"✅ AUTO-MAPPING SUCCESS: Collection '{collection_name}' mapping created")
+                            logger.error(f"   Primary: {mapping_result.get('primary_collection_id', 'N/A')[:8]}...")
+                            logger.error(f"   Replica: {mapping_result.get('replica_collection_id', 'N/A')[:8]}...")
+                        else:
+                            logger.error(f"❌ AUTO-MAPPING FAILED: Could not create mapping for '{collection_name}'")
+                            
+                except Exception as e:
+                    logger.error(f"❌ AUTO-MAPPING ERROR: Failed to create mapping for collection: {e}")
+            
             # Debug the response content before returning
             content_length = len(response.content)
             logger.info(f"Response content length: {content_length}")
