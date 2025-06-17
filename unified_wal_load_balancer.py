@@ -1965,8 +1965,9 @@ class UnifiedWALLoadBalancer:
             raise Exception("No healthy instances available")
 
         # 🔧 CRITICAL FIX: Apply collection NAME-to-UUID mapping for real-time requests
+        # SKIP MAPPING FOR DELETE OPERATIONS - they should use original UUID directly
         original_request_path = path
-        if "/collections/" in path:
+        if "/collections/" in path and method != "DELETE":
             logger.error(f"🔄 REAL-TIME MAPPING DEBUG: Original path: {path}")
             logger.error(f"🔄 REAL-TIME MAPPING DEBUG: Target instance: {target_instance.name}")
             
