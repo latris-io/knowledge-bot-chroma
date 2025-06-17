@@ -2677,31 +2677,25 @@ if __name__ == '__main__':
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
-    @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+        @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
         """Proxy all other requests through the load balancer"""
-        response = None  # Initialize response to prevent NoneType errors
         try:
-            logger.error(f"🔥 PROXY DEBUG: Starting {request.method} /{path}")
-            
             if enhanced_wal is None:
                 logger.error("Proxy request failed: WAL system not ready")
                 return jsonify({"error": "WAL system not ready"}), 503
                 
             logger.info(f"Forwarding {request.method} request to /{path}")
-            logger.error(f"🔥 PROXY DEBUG: WAL system ready, forwarding request")
             
-            # CRITICAL FIX: Properly handle JSON data and headers
+            # Extract request data and headers
             data = b''
             kwargs = {}
             
             # Check if request has JSON data
             if request.is_json and request.method in ['POST', 'PUT', 'PATCH']:
-                # Use json parameter for JSON requests
                 kwargs['json'] = request.get_json()
                 logger.debug(f"🔄 Using JSON data: {str(kwargs['json'])[:100]}...")
             elif request.method in ['POST', 'PUT', 'PATCH'] and request.content_length:
-                # Use data parameter for non-JSON requests
                 data = request.get_data()
                 logger.debug(f"🔄 Using raw data: {len(data)} bytes")
             
@@ -2710,101 +2704,37 @@ if __name__ == '__main__':
             if request.content_type:
                 headers['Content-Type'] = request.content_type
             
-            logger.error(f"🔥 PROXY DEBUG: About to call forward_request")
-            
+            # Forward the request through the load balancer
             response = enhanced_wal.forward_request(
                 method=request.method,
                 path=f"/{path}",
                 headers=headers,
                 data=data,
-                **kwargs  # Pass json parameter if present
+                **kwargs
             )
             
-            logger.error(f"🔥 PROXY DEBUG: forward_request returned: {type(response)}")
-            
-            # CRITICAL FIX: Check if response is None before accessing attributes
+            # CRITICAL: Ensure we have a valid response
             if response is None:
                 logger.error(f"❌ CRITICAL: forward_request returned None for {request.method} /{path}")
                 return jsonify({"error": "Internal error: No response from load balancer"}), 503
             
-            # Safely access response attributes
+            # Extract response details safely
             status_code = getattr(response, 'status_code', 503)
             content = getattr(response, 'content', b'{"error": "No content"}')
-            headers_dict = dict(getattr(response, 'headers', {}))
-            
-            logger.error(f"🔥 PROXY DEBUG: Response details - Status: {status_code}, Content length: {len(content)}")
+            response_headers = dict(getattr(response, 'headers', {}))
             
             logger.info(f"Successfully forwarded {request.method} /{path} -> {status_code}")
             
-            # Debug the response content before returning
-            content_length = len(content)
-            logger.info(f"Response content length: {content_length}")
-            if content_length > 0:
-                logger.info(f"Response preview: {content[:100]}")
-            else:
-                logger.error(f"❌ CRITICAL: Response content is empty! This will break clients!")
-                
-                # 🚨 EMERGENCY FALLBACK: Direct routing when response is empty
-                logger.error(f"🔥 EMERGENCY: Attempting direct instance routing as fallback")
-                try:
-                    # Try primary instance first
-                    primary_url = f"https://chroma-primary.onrender.com{path}"
-                    if not path.startswith('/'):
-                        primary_url = f"https://chroma-primary.onrender.com/{path}"
-                        
-                    logger.error(f"🔥 EMERGENCY: Trying direct request to {primary_url}")
-                    emergency_response = requests.get(primary_url, timeout=10)
-                    
-                    if emergency_response.status_code == 200 and len(emergency_response.content) > 0:
-                        logger.error(f"🔥 EMERGENCY SUCCESS: Direct primary returned {len(emergency_response.content)} bytes")
-                        emergency_headers = dict(emergency_response.headers)
-                        if 'Content-Type' not in emergency_headers:
-                            emergency_headers['Content-Type'] = 'application/json'
-                        return emergency_response.content, emergency_response.status_code, emergency_headers
-                    else:
-                        # Try replica as backup
-                        replica_url = f"https://chroma-replica.onrender.com{path}"
-                        if not path.startswith('/'):
-                            replica_url = f"https://chroma-replica.onrender.com/{path}"
-                            
-                        logger.error(f"🔥 EMERGENCY: Trying direct request to {replica_url}")
-                        emergency_response = requests.get(replica_url, timeout=10)
-                        
-                        if emergency_response.status_code == 200 and len(emergency_response.content) > 0:
-                            logger.error(f"🔥 EMERGENCY SUCCESS: Direct replica returned {len(emergency_response.content)} bytes")
-                            emergency_headers = dict(emergency_response.headers)
-                            if 'Content-Type' not in emergency_headers:
-                                emergency_headers['Content-Type'] = 'application/json'
-                            return emergency_response.content, emergency_response.status_code, emergency_headers
-                        
-                except Exception as e:
-                    logger.error(f"🔥 EMERGENCY FAILED: {e}")
-                
-                # If emergency fallback also fails, return proper error
-                return jsonify({"error": "Load balancer and emergency fallback both failed"}), 503
-            
             # Ensure content-type is set
-            if 'Content-Type' not in headers_dict:
-                headers_dict['Content-Type'] = 'application/json'
+            if 'Content-Type' not in response_headers:
+                response_headers['Content-Type'] = 'application/json'
             
-            logger.error(f"🔥 PROXY DEBUG: About to return response with {len(content)} bytes")
-            
-            return content, status_code, headers_dict
+            return content, status_code, response_headers
             
         except Exception as e:
             import traceback
             logger.error(f"Request forwarding failed for {request.method} /{path}: {e}")
             logger.error(f"Full traceback: {traceback.format_exc()}")
-            
-            # Additional debug info about response state
-            if response is not None:
-                logger.error(f"Response object type: {type(response)}")
-                logger.error(f"Response has status_code: {hasattr(response, 'status_code')}")
-                if hasattr(response, 'status_code'):
-                    logger.error(f"Response status_code: {response.status_code}")
-            else:
-                logger.error("Response object is None")
-                
             return jsonify({"error": f"Service temporarily unavailable: {str(e)}"}), 503
     
     # Start Flask web server immediately
