@@ -2026,36 +2026,11 @@ class UnifiedWALLoadBalancer:
             
             logger.error(f"🔄 FINAL mapped path: {path}")
         
-        # CRITICAL FIX: Special handling for DELETE operations to prevent double-deletion corruption
-        if method == "DELETE":
-            logger.info(f"🗑️ DELETE request received: {path}")
-            
-            # ONLY log to WAL - do NOT execute immediately to prevent corruption
-            self.add_wal_write(
-                method=method,
-                path=path,
-                data=data,
-                headers=headers,
-                target_instance=TargetInstance.BOTH,  # Delete from both instances via WAL
-                executed_on=None  # Mark as not yet executed
-            )
-            
-            # Return immediate success response without executing deletion
-            # The WAL system will handle the actual deletion safely
-            logger.info(f"✅ DELETE logged to WAL for both instances: {path}")
-            
-            # Create a mock successful response
-            from requests import Response as RequestsResponse
-            mock_response = RequestsResponse()
-            mock_response.status_code = 200
-            mock_response._content = b'{"success": true, "message": "Deletion queued for WAL processing"}'
-            mock_response.headers['Content-Type'] = 'application/json'
-            
-            self.stats["successful_requests"] += 1
-            return mock_response
+        # FIXED: DELETE operations now execute immediately AND sync via WAL (like all other operations)
+        # This fixes the bug where DELETE returned 200 but didn't actually delete anything
         
-        # For non-DELETE write operations, log to WAL and execute normally
-        if method in ['POST', 'PUT', 'PATCH']:
+        # For ALL write operations (including DELETE), log to WAL and execute normally
+        if method in ['POST', 'PUT', 'PATCH', 'DELETE']:
             # Determine sync target
             if target_instance.name == "primary":
                 sync_target = TargetInstance.REPLICA
@@ -2079,7 +2054,7 @@ class UnifiedWALLoadBalancer:
                 executed_on=target_instance.name
             )
         
-        # Execute the request normally for all non-DELETE operations
+        # Execute the request normally for all operations (including DELETE)
         try:
             url = f"{target_instance.url}{path}"
             
@@ -2457,6 +2432,41 @@ if __name__ == '__main__':
                     return jsonify({"mappings": mappings, "count": len(mappings)}), 200
         except Exception as e:
             return jsonify({"error": f"Failed to get mappings: {str(e)}"}), 500
+
+    @app.route('/collection/mappings/<collection_name>', methods=['DELETE'])
+    def delete_collection_mapping(collection_name):
+        """Delete a specific collection mapping - FIXED to actually delete"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not initialized"}), 503
+            
+            logger.info(f"🗑️ DELETE mapping request: {collection_name}")
+            
+            with enhanced_wal.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Check if mapping exists
+                    cur.execute("SELECT collection_name FROM collection_id_mapping WHERE collection_name = %s", (collection_name,))
+                    existing = cur.fetchone()
+                    
+                    if not existing:
+                        logger.info(f"✅ Mapping not found (already deleted): {collection_name}")
+                        return jsonify({"success": True, "message": f"Mapping for '{collection_name}' not found (already deleted)"}), 200
+                    
+                    # Actually delete the mapping
+                    cur.execute("DELETE FROM collection_id_mapping WHERE collection_name = %s", (collection_name,))
+                    deleted_count = cur.rowcount
+                    conn.commit()
+                    
+                    if deleted_count > 0:
+                        logger.info(f"✅ Successfully deleted mapping: {collection_name}")
+                        return jsonify({"success": True, "message": f"Mapping for '{collection_name}' deleted successfully"}), 200
+                    else:
+                        logger.warning(f"⚠️ No mapping was deleted for: {collection_name}")
+                        return jsonify({"success": False, "message": f"No mapping found for '{collection_name}'"}), 404
+                        
+        except Exception as e:
+            logger.error(f"❌ Error deleting mapping for {collection_name}: {e}")
+            return jsonify({"error": f"Failed to delete mapping: {str(e)}"}), 500
     
     @app.route('/metrics', methods=['GET'])
     def metrics():
