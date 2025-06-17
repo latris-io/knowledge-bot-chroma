@@ -2298,6 +2298,14 @@ class UnifiedWALLoadBalancer:
                         return self.forward_request(method, path, headers, data, other_instances[0], retry_count + 1, max_retries)
                 
                 raise e
+        
+        # CRITICAL FAILSAFE: If we reach here, something went wrong - return error response
+        logger.error(f"❌ CRITICAL: forward_request reached end without returning for {method} /{path}")
+        from requests import Response
+        error_response = Response()
+        error_response.status_code = 503
+        error_response._content = json.dumps({"error": "Internal load balancer error: no response generated"}).encode()
+        return error_response
 
     def clear_failed_wal_entries(self, max_age_hours: int = 24):
         """Clear old failed WAL entries to reset sync state"""
