@@ -428,10 +428,9 @@ class UnifiedWALLoadBalancer:
             logger.error(f"      Length: {len(collection_id)}")
             
             if is_uuid:
-                logger.error(f"   ✅ Collection identifier is a valid UUID (pattern match) - no mapping needed")
-                return original_path  # No mapping needed for UUID-based paths
-            
-            logger.error(f"   🔍 Collection NAME detected (not a UUID pattern) - attempting name→UUID mapping")
+                logger.error(f"   🔍 Collection UUID detected - checking for UUID mapping between instances")
+            else:
+                logger.error(f"   🔍 Collection NAME detected (not a UUID pattern) - attempting name→UUID mapping")
             
             # First, try to find existing mapping in database
             try:
