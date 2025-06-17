@@ -2034,6 +2034,55 @@ class UnifiedWALLoadBalancer:
         if method == "DELETE":
             logger.info(f"🗑️ DELETE operation - executing on BOTH instances immediately")
             
+            # CRITICAL FIX: Convert collection names to UUIDs for DELETE operations
+            primary_path = path
+            replica_path = path
+            
+            # Check if this is a collection DELETE operation that needs name→UUID mapping
+            if "/collections/" in path:
+                # Extract collection identifier from path
+                path_parts = path.split('/collections/')
+                if len(path_parts) >= 2:
+                    collection_identifier = path_parts[1].split('/')[0]
+                    
+                    # Check if this is a collection NAME (not UUID)
+                    import re
+                    uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+                    is_uuid = bool(uuid_pattern.match(collection_identifier))
+                    
+                    if not is_uuid:
+                        # This is a collection NAME - need to map to UUIDs for each instance
+                        logger.info(f"   🔄 DELETE name→UUID mapping needed for: {collection_identifier}")
+                        
+                        try:
+                            with self.get_db_connection() as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("""
+                                        SELECT primary_collection_id, replica_collection_id 
+                                        FROM collection_id_mapping 
+                                        WHERE collection_name = %s
+                                    """, (collection_identifier,))
+                                    
+                                    result = cur.fetchone()
+                                    if result:
+                                        primary_id, replica_id = result
+                                        
+                                        if primary_id:
+                                            primary_path = path.replace(collection_identifier, primary_id)
+                                            logger.info(f"   ✅ Primary mapping: {collection_identifier} → {primary_id}")
+                                        
+                                        if replica_id:
+                                            replica_path = path.replace(collection_identifier, replica_id)
+                                            logger.info(f"   ✅ Replica mapping: {collection_identifier} → {replica_id}")
+                                            
+                                    else:
+                                        logger.warning(f"   ❌ No mapping found for collection: {collection_identifier}")
+                                        # Use original path if no mapping found
+                                        
+                        except Exception as e:
+                            logger.error(f"   ❌ DELETE mapping lookup error: {e}")
+                            # Use original paths if mapping lookup fails
+            
             # Execute DELETE on both instances directly
             primary_instance = self.get_primary_instance()
             replica_instance = self.get_replica_instance()
@@ -2044,7 +2093,8 @@ class UnifiedWALLoadBalancer:
             # Execute on primary
             if primary_instance and primary_instance.is_healthy:
                 try:
-                    primary_url = f"{primary_instance.url}{path}"
+                    primary_url = f"{primary_instance.url}{primary_path}"
+                    logger.info(f"   🔄 Primary DELETE: {primary_url}")
                     primary_response = requests.request(method, primary_url, 
                                                       headers=headers or {}, 
                                                       data=data, timeout=30, 
@@ -2057,7 +2107,8 @@ class UnifiedWALLoadBalancer:
             # Execute on replica  
             if replica_instance and replica_instance.is_healthy:
                 try:
-                    replica_url = f"{replica_instance.url}{path}"
+                    replica_url = f"{replica_instance.url}{replica_path}"
+                    logger.info(f"   🔄 Replica DELETE: {replica_url}")
                     replica_response = requests.request(method, replica_url, 
                                                       headers=headers or {}, 
                                                       data=data, timeout=30, 
