@@ -2254,7 +2254,7 @@ class UnifiedWALLoadBalancer:
                     except Exception as e:
                         logger.error(f"❌ AUTO-MAPPING ERROR: Failed to create mapping for collection: {e}")
                     
-                    # Debug the response content before returning
+                    # Debug the response content before returning (for ALL requests)
                     content_length = len(response.content)
                     logger.info(f"Response content length: {content_length}")
                     if content_length > 0:
