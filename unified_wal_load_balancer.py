@@ -1835,21 +1835,39 @@ class UnifiedWALLoadBalancer:
         return [inst for inst in self.instances if inst.is_healthy]
 
     def health_monitor_loop(self):
-        """Health monitoring for instances"""
+        """Enhanced health monitoring that tests actual functionality"""
         while True:
             try:
                 for instance in self.instances:
                     try:
-                        response = requests.get(f"{instance.url}/api/v2/version", timeout=5)
+                        # ENHANCED HEALTH CHECK: Test actual collection functionality instead of just version
+                        # This prevents the issue where version endpoint works but collection endpoints return 502
+                        
+                        # Step 1: Basic connectivity check
+                        version_response = requests.get(f"{instance.url}/api/v2/version", timeout=5)
+                        basic_connectivity = version_response.status_code == 200
+                        
+                        # Step 2: Test actual collection functionality (the endpoints users actually need)
+                        collections_response = requests.get(
+                            f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections", 
+                            timeout=10
+                        )
+                        functional_health = collections_response.status_code == 200
+                        
+                        # Instance is only healthy if BOTH connectivity AND functionality work
                         was_healthy = instance.is_healthy
-                        instance.is_healthy = response.status_code == 200
+                        instance.is_healthy = basic_connectivity and functional_health
                         instance.last_health_check = datetime.now()
                         instance.update_stats(instance.is_healthy)
                         
+                        # Enhanced logging to show what's working and what's not
                         if instance.is_healthy and not was_healthy:
-                            logger.info(f"✅ {instance.name} recovered")
+                            logger.info(f"✅ {instance.name} recovered (version: {version_response.status_code}, collections: {collections_response.status_code})")
                         elif not instance.is_healthy and was_healthy:
-                            logger.warning(f"❌ {instance.name} went down")
+                            logger.warning(f"❌ {instance.name} went down (version: {version_response.status_code}, collections: {collections_response.status_code})")
+                        elif not instance.is_healthy:
+                            # Log details about what's failing for debugging
+                            logger.debug(f"🔍 {instance.name} health details: version={version_response.status_code}, collections={collections_response.status_code}")
                         
                     except Exception as e:
                         was_healthy = instance.is_healthy
