@@ -1963,18 +1963,67 @@ class UnifiedWALLoadBalancer:
         if not target_instance:
             raise Exception("No healthy instances available")
 
-        # 🔧 CRITICAL FIX: Apply collection ID mapping for real-time requests
+        # 🔧 CRITICAL FIX: Apply collection NAME-to-UUID mapping for real-time requests
         original_request_path = path
         if "/collections/" in path:
             logger.error(f"🔄 REAL-TIME MAPPING DEBUG: Original path: {path}")
             logger.error(f"🔄 REAL-TIME MAPPING DEBUG: Target instance: {target_instance.name}")
-            mapped_path = self.map_collection_id_for_sync(path, target_instance.name)
-            logger.error(f"🔄 REAL-TIME MAPPING DEBUG: Mapped path: {mapped_path}")
-            if mapped_path != path:
-                logger.error(f"✅ Real-time mapping SUCCESS: {path} → {mapped_path}")
-                path = mapped_path
-            else:
-                logger.error(f"ℹ️ Real-time mapping: No change needed for {path}")
+            
+            # Extract collection identifier from path
+            path_parts = path.split('/collections/')
+            if len(path_parts) >= 2:
+                collection_id_and_rest = path_parts[1]
+                collection_identifier = collection_id_and_rest.split('/')[0]
+                
+                # Check if this is a collection NAME (not UUID)
+                import re
+                uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+                is_uuid = bool(uuid_pattern.match(collection_identifier))
+                
+                logger.error(f"🔄 Collection identifier: {collection_identifier}, is_uuid: {is_uuid}")
+                
+                if not is_uuid:
+                    # This is a collection NAME - map to UUID for target instance
+                    logger.error(f"🔄 NAME-to-UUID mapping needed for: {collection_identifier}")
+                    
+                    try:
+                        with self.get_db_connection() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    SELECT primary_collection_id, replica_collection_id 
+                                    FROM collection_id_mapping 
+                                    WHERE collection_name = %s
+                                """, (collection_identifier,))
+                                
+                                result = cur.fetchone()
+                                if result:
+                                    primary_id, replica_id = result
+                                    target_uuid = primary_id if target_instance.name == "primary" else replica_id
+                                    
+                                    if target_uuid:
+                                        mapped_path = path.replace(collection_identifier, target_uuid)
+                                        logger.error(f"✅ NAME-to-UUID mapping SUCCESS:")
+                                        logger.error(f"   {collection_identifier} → {target_uuid}")
+                                        logger.error(f"   {path} → {mapped_path}")
+                                        path = mapped_path
+                                    else:
+                                        logger.error(f"❌ No UUID found for {target_instance.name} instance")
+                                else:
+                                    logger.error(f"❌ No mapping found for collection: {collection_identifier}")
+                                    
+                    except Exception as e:
+                        logger.error(f"❌ NAME-to-UUID mapping error: {e}")
+                
+                else:
+                    # This is already a UUID - use existing UUID-to-UUID mapping logic
+                    mapped_path = self.map_collection_id_for_sync(path, target_instance.name)
+                    if mapped_path != path:
+                        logger.error(f"✅ UUID-to-UUID mapping SUCCESS: {path} → {mapped_path}")
+                        path = mapped_path
+                    else:
+                        logger.error(f"ℹ️ UUID mapping: No change needed for {path}")
+            
+            logger.error(f"🔄 FINAL mapped path: {path}")
         
         # CRITICAL FIX: Special handling for DELETE operations to prevent double-deletion corruption
         if method == "DELETE":
