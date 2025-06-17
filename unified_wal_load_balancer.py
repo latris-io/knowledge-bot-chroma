@@ -2609,6 +2609,7 @@ if __name__ == '__main__':
     @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
         """Proxy all other requests through the load balancer"""
+        response = None  # Initialize response to prevent NoneType errors
         try:
             if enhanced_wal is None:
                 logger.error("Proxy request failed: WAL system not ready")
@@ -2643,30 +2644,44 @@ if __name__ == '__main__':
                 **kwargs  # Pass json parameter if present
             )
             
-            logger.info(f"Successfully forwarded {request.method} /{path} -> {response.status_code}")
+            # CRITICAL FIX: Check if response is None before accessing attributes
+            if response is None:
+                logger.error(f"❌ CRITICAL: forward_request returned None for {request.method} /{path}")
+                return jsonify({"error": "Internal error: No response from load balancer"}), 503
+            
+            # Safely access response attributes
+            status_code = getattr(response, 'status_code', 503)
+            content = getattr(response, 'content', b'{"error": "No content"}')
+            headers_dict = dict(getattr(response, 'headers', {}))
+            
+            logger.info(f"Successfully forwarded {request.method} /{path} -> {status_code}")
             
             # Debug the response content before returning
-            content_length = len(response.content)
+            content_length = len(content)
             logger.info(f"Response content length: {content_length}")
             if content_length > 0:
-                logger.info(f"Response preview: {response.content[:100]}")
-            
-            # Return the raw requests.Response for proxy_request to handle
-            flask_response = Response(
-                response.content,
-                status=response.status_code,
-                headers=dict(response.headers) if hasattr(response, 'headers') else {}
-            )
+                logger.info(f"Response preview: {content[:100]}")
             
             # Ensure content-type is set
-            if 'application/json' not in (response.headers.get('Content-Type', '') if hasattr(response, 'headers') else ''):
-                flask_response.headers['Content-Type'] = 'application/json'
+            if 'Content-Type' not in headers_dict:
+                headers_dict['Content-Type'] = 'application/json'
                 
-            return response.content, response.status_code, {"Content-Type": "application/json"}
+            return content, status_code, headers_dict
+            
         except Exception as e:
             import traceback
             logger.error(f"Request forwarding failed for {request.method} /{path}: {e}")
             logger.error(f"Full traceback: {traceback.format_exc()}")
+            
+            # Additional debug info about response state
+            if response is not None:
+                logger.error(f"Response object type: {type(response)}")
+                logger.error(f"Response has status_code: {hasattr(response, 'status_code')}")
+                if hasattr(response, 'status_code'):
+                    logger.error(f"Response status_code: {response.status_code}")
+            else:
+                logger.error("Response object is None")
+                
             return jsonify({"error": f"Service temporarily unavailable: {str(e)}"}), 503
     
     # Start Flask web server immediately
