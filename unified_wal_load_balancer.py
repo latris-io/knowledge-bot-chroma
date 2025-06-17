@@ -2259,8 +2259,9 @@ class UnifiedWALLoadBalancer:
                     logger.info(f"Response content length: {content_length}")
                     if content_length > 0:
                         logger.info(f"Response preview: {response.content[:100]}")
-                    
-                    return response
+                
+                # CRITICAL FIX: Always return response for non-DELETE methods
+                return response
                     
             except Exception as e:
                 target_instance.update_stats(False)
