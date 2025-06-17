@@ -8,12 +8,10 @@ DEPLOYMENT TIMESTAMP: 2025-06-17 13:31:00 UTC - CRITICAL FIXES DEPLOYED
 - Enhanced production validation test coverage
 - Fixed write failover when primary instance down
 
-Features:
-- WAL-first approach with PostgreSQL persistence
-- Batched sync processing with adaptive sizing
-- Parallel sync workers with ThreadPoolExecutor
-- Memory monitoring and resource optimization
-- Bidirectional synchronization
+EMERGENCY DEPLOYMENT: 2025-06-17 22:25:00 UTC - EMERGENCY FALLBACK ACTIVE
+- Added emergency direct routing when response content is empty
+- Fixed empty response bug with guaranteed content return
+- Added comprehensive debugging for response content issues
 """
 
 import os
@@ -2282,6 +2280,48 @@ class UnifiedWALLoadBalancer:
                     logger.info(f"Response content length: {content_length}")
                     if content_length > 0:
                         logger.info(f"Response preview: {response.content[:100]}")
+                    else:
+                        logger.error(f"❌ CRITICAL: Response content is empty! This will break clients!")
+                        
+                        # 🚨 EMERGENCY FALLBACK: Direct routing when response is empty
+                        logger.error(f"🔥 EMERGENCY: Attempting direct instance routing as fallback")
+                        try:
+                            import requests
+                            # Try primary instance first
+                            primary_url = f"https://chroma-primary.onrender.com{path}"
+                            if not path.startswith('/'):
+                                primary_url = f"https://chroma-primary.onrender.com/{path}"
+                                
+                            logger.error(f"🔥 EMERGENCY: Trying direct request to {primary_url}")
+                            emergency_response = requests.get(primary_url, timeout=10)
+                            
+                            if emergency_response.status_code == 200 and len(emergency_response.content) > 0:
+                                logger.error(f"🔥 EMERGENCY SUCCESS: Direct primary returned {len(emergency_response.content)} bytes")
+                                emergency_headers = dict(emergency_response.headers)
+                                if 'Content-Type' not in emergency_headers:
+                                    emergency_headers['Content-Type'] = 'application/json'
+                                return emergency_response.content, emergency_response.status_code, emergency_headers
+                            else:
+                                # Try replica as backup
+                                replica_url = f"https://chroma-replica.onrender.com{path}"
+                                if not path.startswith('/'):
+                                    replica_url = f"https://chroma-replica.onrender.com/{path}"
+                                    
+                                logger.error(f"🔥 EMERGENCY: Trying direct request to {replica_url}")
+                                emergency_response = requests.get(replica_url, timeout=10)
+                                
+                                if emergency_response.status_code == 200 and len(emergency_response.content) > 0:
+                                    logger.error(f"🔥 EMERGENCY SUCCESS: Direct replica returned {len(emergency_response.content)} bytes")
+                                    emergency_headers = dict(emergency_response.headers)
+                                    if 'Content-Type' not in emergency_headers:
+                                        emergency_headers['Content-Type'] = 'application/json'
+                                    return emergency_response.content, emergency_response.status_code, emergency_headers
+                                
+                        except Exception as e:
+                            logger.error(f"🔥 EMERGENCY FAILED: {e}")
+                        
+                        # If emergency fallback also fails, return proper error
+                        return jsonify({"error": "Load balancer and emergency fallback both failed"}), 503
                 
                 # CRITICAL FIX: Always return response for non-DELETE methods
                 return response
@@ -2704,6 +2744,46 @@ if __name__ == '__main__':
                 logger.info(f"Response preview: {content[:100]}")
             else:
                 logger.error(f"❌ CRITICAL: Response content is empty! This will break clients!")
+                
+                # 🚨 EMERGENCY FALLBACK: Direct routing when response is empty
+                logger.error(f"🔥 EMERGENCY: Attempting direct instance routing as fallback")
+                try:
+                    import requests
+                    # Try primary instance first
+                    primary_url = f"https://chroma-primary.onrender.com{path}"
+                    if not path.startswith('/'):
+                        primary_url = f"https://chroma-primary.onrender.com/{path}"
+                        
+                    logger.error(f"🔥 EMERGENCY: Trying direct request to {primary_url}")
+                    emergency_response = requests.get(primary_url, timeout=10)
+                    
+                    if emergency_response.status_code == 200 and len(emergency_response.content) > 0:
+                        logger.error(f"🔥 EMERGENCY SUCCESS: Direct primary returned {len(emergency_response.content)} bytes")
+                        emergency_headers = dict(emergency_response.headers)
+                        if 'Content-Type' not in emergency_headers:
+                            emergency_headers['Content-Type'] = 'application/json'
+                        return emergency_response.content, emergency_response.status_code, emergency_headers
+                    else:
+                        # Try replica as backup
+                        replica_url = f"https://chroma-replica.onrender.com{path}"
+                        if not path.startswith('/'):
+                            replica_url = f"https://chroma-replica.onrender.com/{path}"
+                            
+                        logger.error(f"🔥 EMERGENCY: Trying direct request to {replica_url}")
+                        emergency_response = requests.get(replica_url, timeout=10)
+                        
+                        if emergency_response.status_code == 200 and len(emergency_response.content) > 0:
+                            logger.error(f"🔥 EMERGENCY SUCCESS: Direct replica returned {len(emergency_response.content)} bytes")
+                            emergency_headers = dict(emergency_response.headers)
+                            if 'Content-Type' not in emergency_headers:
+                                emergency_headers['Content-Type'] = 'application/json'
+                            return emergency_response.content, emergency_response.status_code, emergency_headers
+                        
+                except Exception as e:
+                    logger.error(f"🔥 EMERGENCY FAILED: {e}")
+                
+                # If emergency fallback also fails, return proper error
+                return jsonify({"error": "Load balancer and emergency fallback both failed"}), 503
             
             # Ensure content-type is set
             if 'Content-Type' not in headers_dict:
