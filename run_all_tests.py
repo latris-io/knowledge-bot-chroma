@@ -450,6 +450,10 @@ class UnifiedWALTestSuite:
                 json=collection_payload,
                 timeout=30
             )
+            
+            # CRITICAL: Validate response structure to catch production bugs
+            self.validate_response_structure(response, "DELETE Sync: Create Test Collection")
+            
             duration = time.time() - start_time
             
             if response.status_code in [200, 201]:
@@ -731,6 +735,9 @@ class UnifiedWALTestSuite:
                 timeout=30
             )
             
+            # CRITICAL: Validate response structure to catch production bugs
+            self.validate_response_structure(response, "Auto-Mapping: Create Collection")
+            
             duration = time.time() - start_time
             
             if response.status_code in [200, 201]:
@@ -794,6 +801,9 @@ class UnifiedWALTestSuite:
                     json=test_docs,
                     timeout=30
                 )
+                
+                # CRITICAL: Validate response structure to catch production bugs
+                self.validate_response_structure(response, "Auto-Mapping: Document Add")
                 
                 if response.status_code in [200, 201]:
                     # Wait for WAL sync
@@ -1218,6 +1228,37 @@ class UnifiedWALTestSuite:
             logger.info("  ✅ Test data properly isolated - only infrastructure zombies persist (not test failures).")
         
         return functional_success
+
+    def validate_response_structure(self, response, operation_name):
+        """Validate that response has proper structure to catch production bugs"""
+        try:
+            # Check that response exists and has status_code
+            if response is None:
+                raise Exception(f"Response is None - critical production bug!")
+            
+            if not hasattr(response, 'status_code'):
+                raise Exception(f"Response missing status_code attribute - critical production bug!")
+                
+            # Check for specific error patterns that break production
+            if hasattr(response, 'text'):
+                error_text = response.text.lower()
+                critical_errors = [
+                    "'nonetype' object has no attribute 'status_code'",
+                    "internal server error",
+                    "service temporarily unavailable",
+                    "502 bad gateway",
+                    "500 internal server error"
+                ]
+                
+                for critical_error in critical_errors:
+                    if critical_error in error_text:
+                        raise Exception(f"CRITICAL PRODUCTION BUG: {critical_error}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"🚨 PRODUCTION-CRITICAL ERROR in {operation_name}: {e}")
+            raise
 
 def main():
     """Main test runner"""
