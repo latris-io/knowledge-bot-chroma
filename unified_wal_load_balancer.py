@@ -2643,11 +2643,14 @@ if __name__ == '__main__':
         """Proxy all other requests through the load balancer"""
         response = None  # Initialize response to prevent NoneType errors
         try:
+            logger.error(f"🔥 PROXY DEBUG: Starting {request.method} /{path}")
+            
             if enhanced_wal is None:
                 logger.error("Proxy request failed: WAL system not ready")
                 return jsonify({"error": "WAL system not ready"}), 503
                 
             logger.info(f"Forwarding {request.method} request to /{path}")
+            logger.error(f"🔥 PROXY DEBUG: WAL system ready, forwarding request")
             
             # CRITICAL FIX: Properly handle JSON data and headers
             data = b''
@@ -2668,6 +2671,8 @@ if __name__ == '__main__':
             if request.content_type:
                 headers['Content-Type'] = request.content_type
             
+            logger.error(f"🔥 PROXY DEBUG: About to call forward_request")
+            
             response = enhanced_wal.forward_request(
                 method=request.method,
                 path=f"/{path}",
@@ -2675,6 +2680,8 @@ if __name__ == '__main__':
                 data=data,
                 **kwargs  # Pass json parameter if present
             )
+            
+            logger.error(f"🔥 PROXY DEBUG: forward_request returned: {type(response)}")
             
             # CRITICAL FIX: Check if response is None before accessing attributes
             if response is None:
@@ -2686,6 +2693,8 @@ if __name__ == '__main__':
             content = getattr(response, 'content', b'{"error": "No content"}')
             headers_dict = dict(getattr(response, 'headers', {}))
             
+            logger.error(f"🔥 PROXY DEBUG: Response details - Status: {status_code}, Content length: {len(content)}")
+            
             logger.info(f"Successfully forwarded {request.method} /{path} -> {status_code}")
             
             # Debug the response content before returning
@@ -2693,11 +2702,15 @@ if __name__ == '__main__':
             logger.info(f"Response content length: {content_length}")
             if content_length > 0:
                 logger.info(f"Response preview: {content[:100]}")
+            else:
+                logger.error(f"❌ CRITICAL: Response content is empty! This will break clients!")
             
             # Ensure content-type is set
             if 'Content-Type' not in headers_dict:
                 headers_dict['Content-Type'] = 'application/json'
-                
+            
+            logger.error(f"🔥 PROXY DEBUG: About to return response with {len(content)} bytes")
+            
             return content, status_code, headers_dict
             
         except Exception as e:
