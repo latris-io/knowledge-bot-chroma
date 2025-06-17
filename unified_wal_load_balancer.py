@@ -2030,8 +2030,67 @@ class UnifiedWALLoadBalancer:
         # FIXED: DELETE operations now execute immediately AND sync via WAL (like all other operations)
         # This fixes the bug where DELETE returned 200 but didn't actually delete anything
         
-        # For ALL write operations (including DELETE), log to WAL and execute normally
-        if method in ['POST', 'PUT', 'PATCH', 'DELETE']:
+        # CRITICAL FIX: DELETE operations execute on BOTH instances immediately (no WAL dependency)
+        if method == "DELETE":
+            logger.info(f"🗑️ DELETE operation - executing on BOTH instances immediately")
+            
+            # Execute DELETE on both instances directly
+            primary_instance = self.get_primary_instance()
+            replica_instance = self.get_replica_instance()
+            
+            primary_success = False
+            replica_success = False
+            
+            # Execute on primary
+            if primary_instance and primary_instance.is_healthy:
+                try:
+                    primary_url = f"{primary_instance.url}{path}"
+                    primary_response = requests.request(method, primary_url, 
+                                                      headers=headers or {}, 
+                                                      data=data, timeout=30, 
+                                                      **kwargs)
+                    primary_success = primary_response.status_code in [200, 204, 404]
+                    logger.info(f"   Primary DELETE: {primary_response.status_code} {'✅' if primary_success else '❌'}")
+                except Exception as e:
+                    logger.error(f"   Primary DELETE failed: {e}")
+            
+            # Execute on replica  
+            if replica_instance and replica_instance.is_healthy:
+                try:
+                    replica_url = f"{replica_instance.url}{path}"
+                    replica_response = requests.request(method, replica_url, 
+                                                      headers=headers or {}, 
+                                                      data=data, timeout=30, 
+                                                      **kwargs)
+                    replica_success = replica_response.status_code in [200, 204, 404]
+                    logger.info(f"   Replica DELETE: {replica_response.status_code} {'✅' if replica_success else '❌'}")
+                except Exception as e:
+                    logger.error(f"   Replica DELETE failed: {e}")
+            
+            # Return success if at least one succeeded
+            if primary_success or replica_success:
+                from requests import Response
+                success_response = Response()
+                success_response.status_code = 200 if (primary_success and replica_success) else 207
+                success_response._content = json.dumps({
+                    "success": True,
+                    "primary_deleted": primary_success,
+                    "replica_deleted": replica_success
+                }).encode()
+                logger.info(f"✅ DELETE completed: Primary={primary_success}, Replica={replica_success}")
+                return success_response
+            else:
+                from requests import Response
+                error_response = Response()
+                error_response.status_code = 503
+                error_response._content = json.dumps({
+                    "error": "DELETE failed on all instances"
+                }).encode()
+                logger.error(f"❌ DELETE failed on both instances")
+                return error_response
+        
+        # For non-DELETE write operations, log to WAL and execute normally
+        elif method in ['POST', 'PUT', 'PATCH']:
             # Determine sync target
             if target_instance.name == "primary":
                 sync_target = TargetInstance.REPLICA
@@ -2055,105 +2114,115 @@ class UnifiedWALLoadBalancer:
                 executed_on=target_instance.name
             )
         
-        # Execute the request normally for all operations (including DELETE)
-        try:
-            url = f"{target_instance.url}{path}"
+        # Execute the request normally for non-DELETE operations (DELETE handled separately above)
+        if method != "DELETE":
+            try:
+                url = f"{target_instance.url}{path}"
             
-            # CRITICAL FIX: Improved request handling with proper headers like make_direct_request
-            request_params = {'timeout': self.request_timeout}
-            
-            # Set proper headers for ChromaDB API compatibility
-            if 'headers' not in request_params:
-                request_params['headers'] = {}
-            
-            # Merge passed headers
-            if headers:
-                request_params['headers'].update(headers)
-            
-            # Set Content-Type and Accept headers for API compatibility
-            if method in ['POST', 'PUT', 'PATCH'] and (data or kwargs.get('json')):
-                request_params['headers']['Content-Type'] = 'application/json'
-            
-            request_params['headers']['Accept'] = 'application/json'
-            
-            # Add data or json to request parameters
-            if data:
-                request_params['data'] = data
-            
-            # Add other kwargs (including json parameter)
-            request_params.update(kwargs)
-            
-            logger.debug(f"🔄 Forward request: {method} {url} with headers: {request_params['headers']}")
-            
-            # Make direct request without session (simpler and more reliable)
-            response = requests.request(method, url, **request_params)
-            response.raise_for_status()
-            logger.info(f"Debug: Response status {response.status_code}, content length {len(response.content)}")
-            
-            # Debug logging to see response content
-            logger.info(f"Response status: {response.status_code}, Content length: {len(response.content)}, Content preview: {response.content[:100]}")
-            
-            target_instance.update_stats(True)
-            self.stats["successful_requests"] += 1
-            
-            logger.info(f"Successfully forwarded {method} /{path} -> {response.status_code}")
-            
-            # 🔧 CRITICAL FIX: Auto-create collection mappings when collections are created
-            if (method == "POST" and "/collections" in path and 
-                response.status_code in [200, 201] and "application/json" in response.headers.get('Content-Type', '')):
+                # CRITICAL FIX: Improved request handling with proper headers like make_direct_request
+                request_params = {'timeout': self.request_timeout}
                 
-                try:
-                    # Parse the response to get collection details
-                    response_data = response.json()
-                    collection_name = response_data.get('name')
-                    collection_id = response_data.get('id')
+                # Set proper headers for ChromaDB API compatibility
+                if 'headers' not in request_params:
+                    request_params['headers'] = {}
+                
+                # Merge passed headers
+                if headers:
+                    request_params['headers'].update(headers)
+                
+                # Set Content-Type and Accept headers for API compatibility
+                if method in ['POST', 'PUT', 'PATCH'] and (data or kwargs.get('json')):
+                    request_params['headers']['Content-Type'] = 'application/json'
+                
+                request_params['headers']['Accept'] = 'application/json'
+                
+                # Add data or json to request parameters
+                if data:
+                    request_params['data'] = data
+                
+                # Add other kwargs (including json parameter)
+                request_params.update(kwargs)
+                
+                logger.debug(f"🔄 Forward request: {method} {url} with headers: {request_params['headers']}")
+                
+                # Make direct request without session (simpler and more reliable)
+                response = requests.request(method, url, **request_params)
+                
+                # CRITICAL FIX: Don't raise_for_status on DELETE operations - 404 is SUCCESS for DELETE
+                if method == "DELETE" and response.status_code == 404:
+                    logger.info(f"✅ DELETE: Collection already deleted (404 is success for DELETE)")
+                elif method != "DELETE":
+                    response.raise_for_status()
+                elif response.status_code not in [200, 204, 404]:
+                    # For DELETE, only raise if it's not a success code
+                    response.raise_for_status()
                     
-                    if collection_name and collection_id:
-                        logger.error(f"🔧 AUTO-MAPPING: Collection '{collection_name}' created on {target_instance.name} with ID {collection_id[:8]}...")
+                logger.info(f"Debug: Response status {response.status_code}, content length {len(response.content)}")
+                
+                # Debug logging to see response content
+                logger.info(f"Response status: {response.status_code}, Content length: {len(response.content)}, Content preview: {response.content[:100]}")
+                
+                target_instance.update_stats(True)
+                self.stats["successful_requests"] += 1
+                
+                logger.info(f"Successfully forwarded {method} /{path} -> {response.status_code}")
+                
+                # 🔧 CRITICAL FIX: Auto-create collection mappings when collections are created
+                if (method == "POST" and "/collections" in path and 
+                    response.status_code in [200, 201] and "application/json" in response.headers.get('Content-Type', '')):
+                    
+                    try:
+                        # Parse the response to get collection details
+                        response_data = response.json()
+                        collection_name = response_data.get('name')
+                        collection_id = response_data.get('id')
                         
-                        # Extract collection config from request
-                        collection_config = None
-                        if 'json' in kwargs and kwargs['json']:
-                            collection_config = kwargs['json'].get('configuration', {})
-                        
-                        # Create mapping between primary and replica instances
-                        mapping_result = self.get_or_create_collection_mapping(
-                            collection_name=collection_name,
-                            source_collection_id=collection_id,
-                            source_instance=target_instance.name,
-                            collection_config=collection_config
-                        )
-                        
-                        if mapping_result:
-                            logger.error(f"✅ AUTO-MAPPING SUCCESS: Collection '{collection_name}' mapping created")
-                            logger.error(f"   Primary: {mapping_result.get('primary_collection_id', 'N/A')[:8]}...")
-                            logger.error(f"   Replica: {mapping_result.get('replica_collection_id', 'N/A')[:8]}...")
-                        else:
-                            logger.error(f"❌ AUTO-MAPPING FAILED: Could not create mapping for '{collection_name}'")
+                        if collection_name and collection_id:
+                            logger.error(f"🔧 AUTO-MAPPING: Collection '{collection_name}' created on {target_instance.name} with ID {collection_id[:8]}...")
                             
-                except Exception as e:
-                    logger.error(f"❌ AUTO-MAPPING ERROR: Failed to create mapping for collection: {e}")
-            
-            # Debug the response content before returning
-            content_length = len(response.content)
-            logger.info(f"Response content length: {content_length}")
-            if content_length > 0:
-                logger.info(f"Response preview: {response.content[:100]}")
-            
-            return response
-            
-        except Exception as e:
-            target_instance.update_stats(False)
-            self.stats["failed_requests"] += 1
-            
-            # For critical failures, try other instances (with retry limit)
-            if target_instance.consecutive_failures > 2 and retry_count < max_retries:
-                other_instances = [inst for inst in self.get_healthy_instances() if inst != target_instance]
-                if other_instances:
-                    logger.warning(f"Retrying request on {other_instances[0].name} due to {target_instance.name} failures (attempt {retry_count + 1}/{max_retries})")
-                    return self.forward_request(method, path, headers, data, other_instances[0], retry_count + 1, max_retries)
-            
-            raise e
+                            # Extract collection config from request
+                            collection_config = None
+                            if 'json' in kwargs and kwargs['json']:
+                                collection_config = kwargs['json'].get('configuration', {})
+                            
+                            # Create mapping between primary and replica instances
+                            mapping_result = self.get_or_create_collection_mapping(
+                                collection_name=collection_name,
+                                source_collection_id=collection_id,
+                                source_instance=target_instance.name,
+                                collection_config=collection_config
+                            )
+                            
+                            if mapping_result:
+                                logger.error(f"✅ AUTO-MAPPING SUCCESS: Collection '{collection_name}' mapping created")
+                                logger.error(f"   Primary: {mapping_result.get('primary_collection_id', 'N/A')[:8]}...")
+                                logger.error(f"   Replica: {mapping_result.get('replica_collection_id', 'N/A')[:8]}...")
+                            else:
+                                logger.error(f"❌ AUTO-MAPPING FAILED: Could not create mapping for '{collection_name}'")
+                                
+                    except Exception as e:
+                        logger.error(f"❌ AUTO-MAPPING ERROR: Failed to create mapping for collection: {e}")
+                    
+                    # Debug the response content before returning
+                    content_length = len(response.content)
+                    logger.info(f"Response content length: {content_length}")
+                    if content_length > 0:
+                        logger.info(f"Response preview: {response.content[:100]}")
+                    
+                    return response
+                    
+            except Exception as e:
+                target_instance.update_stats(False)
+                self.stats["failed_requests"] += 1
+                
+                # For critical failures, try other instances (with retry limit)
+                if target_instance.consecutive_failures > 2 and retry_count < max_retries:
+                    other_instances = [inst for inst in self.get_healthy_instances() if inst != target_instance]
+                    if other_instances:
+                        logger.warning(f"Retrying request on {other_instances[0].name} due to {target_instance.name} failures (attempt {retry_count + 1}/{max_retries})")
+                        return self.forward_request(method, path, headers, data, other_instances[0], retry_count + 1, max_retries)
+                
+                raise e
 
     def clear_failed_wal_entries(self, max_age_hours: int = 24):
         """Clear old failed WAL entries to reset sync state"""
