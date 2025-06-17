@@ -27,12 +27,23 @@ class ProductionValidator:
     def validate_json(self, response, operation):
         """Validate response is proper JSON - catch bugs like your CMS encountered"""
         try:
+            # Log detailed response information for debugging
+            print(f"   Debug: HTTP {response.status_code}, Content-Length: {len(response.text)}, Content: {response.text[:100]}...")
+            
+            if response.status_code >= 500:
+                return self.fail(operation, f"Server error {response.status_code}", response.text[:200])
+            
             if response.status_code >= 400:
-                return self.fail(operation, f"HTTP error {response.status_code}", response.text[:200])
-            return response.json()
+                return self.fail(operation, f"Client error {response.status_code}", response.text[:200])
+            
+            data = response.json()
+            return data
+            
         except json.JSONDecodeError:
             return self.fail(operation, "Invalid JSON response - would break real applications", 
                            f"Status: {response.status_code}, Content: {response.text[:100]}")
+        except Exception as e:
+            return self.fail(operation, f"Unexpected error: {e}", f"Status: {response.status_code}")
     
     def test_system_health(self):
         """Test system is actually healthy, not just responding"""
@@ -66,6 +77,8 @@ class ProductionValidator:
         test_collection = f"REAL_TEST_{self.session_id}"
         self.test_collections.add(test_collection)
         
+        print(f"   Creating collection: {test_collection}")
+        
         # Create collection
         response = requests.post(
             f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
@@ -82,7 +95,10 @@ class ProductionValidator:
         if not collection_id:
             return self.fail("Collection Creation", "No collection ID returned", str(data))
             
+        print(f"   Collection created successfully: {collection_id[:8]}...")
+        
         # Verify on primary instance
+        print("   Verifying on primary instance...")
         time.sleep(3)
         primary_response = requests.get(
             f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}",
@@ -93,6 +109,7 @@ class ProductionValidator:
             return self.fail("Primary Replication", f"Collection not on primary: {primary_response.status_code}")
             
         # Verify on replica instance
+        print("   Verifying on replica instance...")
         replica_response = requests.get(
             f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
             timeout=15
