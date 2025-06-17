@@ -2220,31 +2220,17 @@ class UnifiedWALLoadBalancer:
                 # Make direct request without session (simpler and more reliable)
                 response = requests.request(method, url, **request_params)
                 
-                # CRITICAL FIX: Don't raise_for_status on DELETE operations - 404 is SUCCESS for DELETE
-                if method == "DELETE" and response.status_code == 404:
-                    logger.info(f"✅ DELETE: Collection already deleted (404 is success for DELETE)")
-                elif method != "DELETE":
-                    response.raise_for_status()
-                elif response.status_code not in [200, 204, 404]:
-                    # For DELETE, only raise if it's not a success code
-                    response.raise_for_status()
-                    
-                logger.info(f"Debug: Response status {response.status_code}, content length {len(response.content)}")
-                
-                # Debug logging to see response content
-                logger.info(f"Response status: {response.status_code}, Content length: {len(response.content)}, Content preview: {response.content[:100]}")
+                # Don't raise for status - let the caller handle HTTP errors
+                logger.info(f"Response: {response.status_code}, Content: {len(response.content)} bytes")
                 
                 target_instance.update_stats(True)
                 self.stats["successful_requests"] += 1
                 
-                logger.info(f"Successfully forwarded {method} /{path} -> {response.status_code}")
-                
-                # 🔧 CRITICAL FIX: Auto-create collection mappings when collections are created
+                # 🔧 Auto-create collection mappings when collections are created (simplified)
                 if (method == "POST" and "/collections" in path and 
-                    response.status_code in [200, 201] and "application/json" in response.headers.get('Content-Type', '')):
+                    response.status_code in [200, 201] and response.content):
                     
                     try:
-                        # Parse the response to get collection details
                         response_data = response.json()
                         collection_name = response_data.get('name')
                         collection_id = response_data.get('id')
@@ -2267,62 +2253,13 @@ class UnifiedWALLoadBalancer:
                             
                             if mapping_result:
                                 logger.error(f"✅ AUTO-MAPPING SUCCESS: Collection '{collection_name}' mapping created")
-                                logger.error(f"   Primary: {mapping_result.get('primary_collection_id', 'N/A')[:8]}...")
-                                logger.error(f"   Replica: {mapping_result.get('replica_collection_id', 'N/A')[:8]}...")
                             else:
                                 logger.error(f"❌ AUTO-MAPPING FAILED: Could not create mapping for '{collection_name}'")
                                 
                     except Exception as e:
                         logger.error(f"❌ AUTO-MAPPING ERROR: Failed to create mapping for collection: {e}")
-                    
-                    # Debug the response content before returning (for ALL requests)
-                    content_length = len(response.content)
-                    logger.info(f"Response content length: {content_length}")
-                    if content_length > 0:
-                        logger.info(f"Response preview: {response.content[:100]}")
-                    else:
-                        logger.error(f"❌ CRITICAL: Response content is empty! This will break clients!")
-                        
-                        # 🚨 EMERGENCY FALLBACK: Direct routing when response is empty
-                        logger.error(f"🔥 EMERGENCY: Attempting direct instance routing as fallback")
-                        try:
-                            # Try primary instance first
-                            primary_url = f"https://chroma-primary.onrender.com{path}"
-                            if not path.startswith('/'):
-                                primary_url = f"https://chroma-primary.onrender.com/{path}"
-                                
-                            logger.error(f"🔥 EMERGENCY: Trying direct request to {primary_url}")
-                            emergency_response = requests.get(primary_url, timeout=10)
-                            
-                            if emergency_response.status_code == 200 and len(emergency_response.content) > 0:
-                                logger.error(f"🔥 EMERGENCY SUCCESS: Direct primary returned {len(emergency_response.content)} bytes")
-                                emergency_headers = dict(emergency_response.headers)
-                                if 'Content-Type' not in emergency_headers:
-                                    emergency_headers['Content-Type'] = 'application/json'
-                                return emergency_response.content, emergency_response.status_code, emergency_headers
-                            else:
-                                # Try replica as backup
-                                replica_url = f"https://chroma-replica.onrender.com{path}"
-                                if not path.startswith('/'):
-                                    replica_url = f"https://chroma-replica.onrender.com/{path}"
-                                    
-                                logger.error(f"🔥 EMERGENCY: Trying direct request to {replica_url}")
-                                emergency_response = requests.get(replica_url, timeout=10)
-                                
-                                if emergency_response.status_code == 200 and len(emergency_response.content) > 0:
-                                    logger.error(f"🔥 EMERGENCY SUCCESS: Direct replica returned {len(emergency_response.content)} bytes")
-                                    emergency_headers = dict(emergency_response.headers)
-                                    if 'Content-Type' not in emergency_headers:
-                                        emergency_headers['Content-Type'] = 'application/json'
-                                    return emergency_response.content, emergency_response.status_code, emergency_headers
-                                
-                        except Exception as e:
-                            logger.error(f"🔥 EMERGENCY FAILED: {e}")
-                        
-                        # If emergency fallback also fails, return proper error
-                        return jsonify({"error": "Load balancer and emergency fallback both failed"}), 503
                 
-                # CRITICAL FIX: Always return response for non-DELETE methods
+                # CRITICAL FIX: Always return response - no complex emergency fallback logic
                 return response
                     
             except Exception as e:
