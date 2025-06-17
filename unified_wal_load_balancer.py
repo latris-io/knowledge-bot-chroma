@@ -2286,7 +2286,6 @@ class UnifiedWALLoadBalancer:
                         # 🚨 EMERGENCY FALLBACK: Direct routing when response is empty
                         logger.error(f"🔥 EMERGENCY: Attempting direct instance routing as fallback")
                         try:
-                            import requests
                             # Try primary instance first
                             primary_url = f"https://chroma-primary.onrender.com{path}"
                             if not path.startswith('/'):
@@ -2748,7 +2747,6 @@ if __name__ == '__main__':
                 # 🚨 EMERGENCY FALLBACK: Direct routing when response is empty
                 logger.error(f"🔥 EMERGENCY: Attempting direct instance routing as fallback")
                 try:
-                    import requests
                     # Try primary instance first
                     primary_url = f"https://chroma-primary.onrender.com{path}"
                     if not path.startswith('/'):
