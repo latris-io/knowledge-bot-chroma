@@ -61,7 +61,7 @@ class EnhancedTestBase:
             logger.info(f"🗄️ PostgreSQL cleanup enabled - all test data will be removed")
         else:
             logger.warning(f"⚠️ PostgreSQL cleanup disabled - install psycopg2 for complete cleanup")
-        
+    
     def get_db_connection(self):
         """Get PostgreSQL database connection"""
         if not self.postgresql_enabled:
