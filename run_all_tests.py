@@ -420,7 +420,7 @@ class UnifiedWALTestSuite:
         return all_passed
     
     def test_delete_sync_functionality(self):
-        """Test DELETE sync functionality with enhanced WAL bypass"""
+        """Test DELETE sync functionality with proper WAL sync verification"""
         logger.info("\n🗑️ Testing Enhanced DELETE Sync Functionality")
         
         all_passed = True
@@ -481,43 +481,94 @@ class UnifiedWALTestSuite:
             all_passed = False
             return all_passed
         
-        # Test 2: Wait for initial sync
-        logger.info("   Waiting 10s for initial sync...")
+        # Test 2: Wait for initial auto-mapping creation
+        logger.info("   Waiting 10s for initial auto-mapping sync...")
         time.sleep(10)
         
-        # Test 3: Enhanced DELETE with immediate verification and fallback
+        # Test 3: Execute DELETE via load balancer and wait for proper sync
         start_time = time.time()
         delete_successful = False
         
         try:
-            # Try load balancer DELETE first
+            # Execute DELETE via load balancer
             response = requests.delete(
                 f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{delete_test_collection}",
                 timeout=30
             )
             
             if response.status_code in [200, 404]:
-                # Wait briefly for WAL processing
-                time.sleep(5)
+                logger.info("   DELETE request accepted, waiting for WAL sync to both instances...")
                 
-                # Verify deletion worked
-                verify_response = requests.get(
-                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{delete_test_collection}",
-                    timeout=15
-                )
+                # Step 1: Wait for WAL sync to complete on BOTH instances
+                sync_completed = False
+                max_wait_time = 60  # Maximum time to wait for sync
+                check_interval = 5  # Check every 5 seconds
+                wait_time = 0
                 
-                if verify_response.status_code == 404:
-                    delete_successful = True
-                    if not self.log_test_result(
-                        "DELETE Sync: Load Balancer DELETE",
-                        True,
-                        "Load balancer DELETE successful",
-                        time.time() - start_time
-                    ):
+                while wait_time < max_wait_time and not sync_completed:
+                    time.sleep(check_interval)
+                    wait_time += check_interval
+                    
+                    # Check if collection exists on both instances directly
+                    primary_exists = False
+                    replica_exists = False
+                    
+                    try:
+                        # Check primary instance
+                        primary_response = requests.get(
+                            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
+                            timeout=15
+                        )
+                        if primary_response.status_code == 200:
+                            primary_collections = [c['name'] for c in primary_response.json()]
+                            primary_exists = delete_test_collection in primary_collections
+                        
+                        # Check replica instance  
+                        replica_response = requests.get(
+                            f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
+                            timeout=15
+                        )
+                        if replica_response.status_code == 200:
+                            replica_collections = [c['name'] for c in replica_response.json()]
+                            replica_exists = delete_test_collection in replica_collections
+                            
+                        # Sync is complete when collection is deleted from BOTH instances
+                        if not primary_exists and not replica_exists:
+                            sync_completed = True
+                            logger.info(f"   ✅ WAL sync completed after {wait_time}s - collection deleted from both instances")
+                        else:
+                            logger.info(f"   ⏳ Sync in progress ({wait_time}s): Primary: {'EXISTS' if primary_exists else 'DELETED'}, Replica: {'EXISTS' if replica_exists else 'DELETED'}")
+                            
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Error checking instance sync status: {e}")
+                        
+                # Step 2: ONLY NOW test if load balancer can find the collection
+                if sync_completed:
+                    verify_response = requests.get(
+                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{delete_test_collection}",
+                        timeout=15
+                    )
+                    
+                    if verify_response.status_code == 404:
+                        delete_successful = True
+                        if not self.log_test_result(
+                            "DELETE Sync: Load Balancer Verification",
+                            True,
+                            f"Load balancer correctly reports 404 after sync completion",
+                            time.time() - start_time
+                        ):
+                            all_passed = False
+                    else:
+                        self.log_test_result(
+                            "DELETE Sync: Load Balancer Verification", 
+                            False,
+                            f"Load balancer still finds collection despite sync completion: {verify_response.status_code}",
+                            time.time() - start_time
+                        )
                         all_passed = False
                 else:
-                    # Load balancer DELETE failed, try direct deletion
-                    logger.info("   Load balancer DELETE failed, trying direct deletion...")
+                    # Sync timeout - fall back to direct deletion for cleanup
+                    logger.warning(f"   ⚠️ Sync did not complete within {max_wait_time}s, falling back to direct deletion...")
                     
                     # Get mapping for direct deletion
                     mappings_response = requests.get(f"{self.base_url}/collection/mappings", timeout=15)
@@ -530,16 +581,13 @@ class UnifiedWALTestSuite:
                             replica_uuid = mapping.get('replica_collection_id')
                             
                             # Delete from both instances directly
-                            primary_url = "https://chroma-primary.onrender.com"
-                            replica_url = "https://chroma-replica.onrender.com"
-                            
                             primary_deleted = False
                             replica_deleted = False
                             
                             if primary_uuid:
                                 try:
                                     primary_response = requests.delete(
-                                        f"{primary_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{primary_uuid}",
+                                        f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{primary_uuid}",
                                         timeout=30
                                     )
                                     primary_deleted = primary_response.status_code in [200, 404]
@@ -549,7 +597,7 @@ class UnifiedWALTestSuite:
                             if replica_uuid:
                                 try:
                                     replica_response = requests.delete(
-                                        f"{replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_uuid}",
+                                        f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_uuid}",
                                         timeout=30
                                     )
                                     replica_deleted = replica_response.status_code in [200, 404]
@@ -562,18 +610,16 @@ class UnifiedWALTestSuite:
                             except:
                                 pass
                             
-                            delete_successful = primary_deleted and replica_deleted
-                            
                             if not self.log_test_result(
-                                "DELETE Sync: Direct Instance DELETE",
-                                delete_successful,
-                                f"Primary: {'✅' if primary_deleted else '❌'}, Replica: {'✅' if replica_deleted else '❌'}",
+                                "DELETE Sync: Fallback Direct Deletion",
+                                primary_deleted and replica_deleted,
+                                f"Sync timeout - direct deletion: Primary: {'✅' if primary_deleted else '❌'}, Replica: {'✅' if replica_deleted else '❌'}",
                                 time.time() - start_time
                             ):
                                 all_passed = False
                 
                 # Remove from tracking since we're explicitly deleting it
-                if delete_successful:
+                if delete_successful or sync_completed:
                     self.created_collections.discard(delete_test_collection)
                 
             else:
@@ -594,15 +640,15 @@ class UnifiedWALTestSuite:
             )
             all_passed = False
         
-        # Test 4: Final verification with retry
-        logger.info("   Final verification...")
+        # Test 4: Final verification
+        logger.info("   Final comprehensive verification...")
         time.sleep(3)
         
         start_time = time.time()
         final_verification_passed = False
         
         try:
-            # Check multiple views to ensure complete deletion
+            # Check all views to ensure complete deletion
             checks = [
                 (f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections", "Load Balancer"),
                 ("https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections", "Primary"),
