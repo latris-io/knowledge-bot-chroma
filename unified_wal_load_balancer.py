@@ -1946,20 +1946,21 @@ class UnifiedWALLoadBalancer:
             else:
                 return replica
         
-        # 🔧 CRITICAL FIX: Write operations with proper failover
-        # For write operations, prefer primary but fall back to replica
+        # 🔧 CRITICAL FIX: Write operations MUST use primary first
+        # For write operations, strongly prefer primary instance
         primary = self.get_primary_instance()
         replica = self.get_replica_instance()
         
-        if primary and primary.is_healthy:
-            # Primary is available - use it
+        # CRITICAL: Always try primary first for writes
+        if primary:
+            logger.info(f"🔄 WRITE OPERATION: Selecting primary instance (healthy: {primary.is_healthy})")
             return primary
-        elif replica and replica.is_healthy:
-            # Primary is down but replica is available - use replica with warning
-            logger.warning(f"⚠️ WRITE FAILOVER: Primary unavailable, using replica for write operation")
+        elif replica:
+            # Only use replica if primary doesn't exist at all
+            logger.warning(f"⚠️ WRITE FAILOVER: No primary instance available, using replica")
             return replica
         else:
-            # No healthy instances
+            logger.error(f"❌ WRITE OPERATION: No instances available")
             return None
 
     def forward_request(self, method: str, path: str, headers: Dict[str, str], 
