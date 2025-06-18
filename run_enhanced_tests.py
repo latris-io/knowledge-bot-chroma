@@ -60,8 +60,8 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             )
 
     def test_collection_operations(self):
-        """Test collection operations"""
-        logger.info("📚 Testing Collection Operations")
+        """Test collection operations with distributed architecture validation"""
+        logger.info("📚 Testing Collection Operations & Distributed Mapping")
         
         self.start_test("Collection Operations")
         start_time = time.time()
@@ -96,12 +96,104 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 )
             
             collection_data = create_response.json()
-            collection_uuid = collection_data.get('id')
+            collection_name_returned = collection_data.get('name')
+            
+            if collection_name_returned != collection_name:
+                return self.log_test_result(
+                    "Collection Operations",
+                    False,
+                    f"Collection name mismatch: expected {collection_name}, got {collection_name_returned}",
+                    time.time() - start_time
+                )
+            
+            # Wait for auto-mapping to complete
+            logger.info("   Waiting for auto-mapping system...")
+            time.sleep(5)
+            
+            # Verify collection exists on primary instance BY NAME
+            primary_response = self.make_request('GET', "https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections")
+            if primary_response.status_code != 200:
+                return self.log_test_result(
+                    "Collection Operations",
+                    False,
+                    f"Primary instance check failed: {primary_response.status_code}",
+                    time.time() - start_time
+                )
+            
+            primary_collections = primary_response.json()
+            primary_collection = next((c for c in primary_collections if c['name'] == collection_name), None)
+            
+            if not primary_collection:
+                return self.log_test_result(
+                    "Collection Operations",
+                    False,
+                    f"Collection not found on primary by name",
+                    time.time() - start_time
+                )
+            
+            primary_uuid = primary_collection['id']
+            logger.info(f"   ✅ Found on primary: {primary_uuid[:8]}... (name: {collection_name})")
+            
+            # Verify collection exists on replica instance BY NAME
+            replica_response = self.make_request('GET', "https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections")
+            if replica_response.status_code != 200:
+                return self.log_test_result(
+                    "Collection Operations",
+                    False,
+                    f"Replica instance check failed: {replica_response.status_code}",
+                    time.time() - start_time
+                )
+            
+            replica_collections = replica_response.json()
+            replica_collection = next((c for c in replica_collections if c['name'] == collection_name), None)
+            
+            if not replica_collection:
+                return self.log_test_result(
+                    "Collection Operations",
+                    False,
+                    f"Collection not found on replica by name",
+                    time.time() - start_time
+                )
+            
+            replica_uuid = replica_collection['id']
+            logger.info(f"   ✅ Found on replica: {replica_uuid[:8]}... (name: {collection_name})")
+            
+            # Verify UUIDs are different (correct distributed architecture)
+            if primary_uuid == replica_uuid:
+                return self.log_test_result(
+                    "Collection Operations",
+                    False,
+                    f"Same UUID on both instances - violates distributed design",
+                    time.time() - start_time
+                )
+            
+            # Verify collection mapping exists
+            mapping_response = self.make_request('GET', f"{self.base_url}/collection/mappings")
+            if mapping_response.status_code != 200:
+                return self.log_test_result(
+                    "Collection Operations",
+                    False,
+                    f"Collection mapping check failed: {mapping_response.status_code}",
+                    time.time() - start_time
+                )
+            
+            mapping_data = mapping_response.json()
+            test_mapping = next((m for m in mapping_data['mappings'] if m['collection_name'] == collection_name), None)
+            
+            if not test_mapping:
+                return self.log_test_result(
+                    "Collection Operations",
+                    False,
+                    f"No mapping found for collection {collection_name}",
+                    time.time() - start_time
+                )
+            
+            logger.info(f"   ✅ Mapping: P:{test_mapping['primary_collection_id'][:8]}..., R:{test_mapping['replica_collection_id'][:8]}...")
             
             return self.log_test_result(
                 "Collection Operations",
                 True,
-                f"Created collection {collection_uuid[:8]}... from {initial_count} existing",
+                f"✅ Distributed collection created: different UUIDs (P:{primary_uuid[:8]}..., R:{replica_uuid[:8]}...), auto-mapped correctly",
                 time.time() - start_time
             )
             
@@ -376,25 +468,41 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             logger.info("   DELETE request successful, waiting 15s for sync...")
             time.sleep(15)
             
-            # Verify deletion on replica by checking via load balancer
-            verify_response = self.make_request(
+            # CRITICAL FIX: Verify deletion on BOTH instances directly, not just through load balancer
+            logger.info("   Verifying deletion on primary instance...")
+            primary_verify = self.make_request(
                 'GET',
-                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+                f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
             )
             
-            # Should return 404 if properly deleted and synced
-            if verify_response.status_code == 404:
+            logger.info("   Verifying deletion on replica instance...")
+            replica_verify = self.make_request(
+                'GET', 
+                f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+            )
+            
+            # Both should return 404 if properly deleted and synced
+            primary_deleted = primary_verify.status_code == 404
+            replica_deleted = replica_verify.status_code == 404
+            
+            if primary_deleted and replica_deleted:
                 return self.log_test_result(
                     "DELETE Sync Functionality",
                     True,
-                    "Collection successfully deleted and synced",
+                    "Collection successfully deleted from both instances",
                     time.time() - start_time
                 )
             else:
+                failure_details = []
+                if not primary_deleted:
+                    failure_details.append(f"primary still has collection ({primary_verify.status_code})")
+                if not replica_deleted:
+                    failure_details.append(f"replica still has collection ({replica_verify.status_code})")
+                
                 return self.log_test_result(
                     "DELETE Sync Functionality",
                     False,
-                    f"Collection still exists after sync: {verify_response.status_code}",
+                    f"DELETE sync failed: {', '.join(failure_details)}",
                     time.time() - start_time
                 )
             

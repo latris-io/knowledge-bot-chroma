@@ -35,7 +35,7 @@ class EnhancedTestBase:
         
         # PostgreSQL connection setup
         self.database_url = os.getenv('DATABASE_URL', 
-            'postgresql://unified_wal_user:wal_secure_2024@dpg-cu5l49bv2p9s73c7l1u0-a.oregon-postgres.render.com/unified_wal_db')
+            'postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha')
         self.postgresql_enabled = POSTGRESQL_AVAILABLE
         
         # Test data tracking - organized by test name

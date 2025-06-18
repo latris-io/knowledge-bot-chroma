@@ -24,7 +24,7 @@ class ComprehensiveSystemCleanup:
         
         # Database connection string from environment or default
         self.database_url = os.getenv('DATABASE_URL', 
-            'postgresql://unified_wal_user:wal_secure_2024@dpg-cu5l49bv2p9s73c7l1u0-a.oregon-postgres.render.com/unified_wal_db')
+            'postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha')
     
     def get_db_connection(self):
         """Get PostgreSQL database connection"""
@@ -56,11 +56,11 @@ class ComprehensiveSystemCleanup:
                     # Clean up any monitoring data if tables exist
                     logger.info("  Clearing monitoring data...")
                     try:
-                        cur.execute("DELETE FROM performance_metrics")
+                        cur.execute("DELETE FROM wal_performance_metrics")
                         metrics_deleted = cur.rowcount
                         logger.info(f"    ✅ Deleted {metrics_deleted} performance metric entries")
                     except Exception:
-                        logger.info("    ℹ️ Performance metrics table not found (OK)")
+                        logger.info("    ℹ️ WAL performance metrics table not found (OK)")
                     
                     try:
                         cur.execute("DELETE FROM upgrade_recommendations")
@@ -73,7 +73,7 @@ class ComprehensiveSystemCleanup:
                     logger.info("  Resetting database sequences...")
                     try:
                         cur.execute("ALTER SEQUENCE IF EXISTS unified_wal_writes_id_seq RESTART WITH 1")
-                        cur.execute("ALTER SEQUENCE IF EXISTS collection_id_mapping_id_seq RESTART WITH 1")
+                        cur.execute("ALTER SEQUENCE IF EXISTS collection_id_mapping_mapping_id_seq RESTART WITH 1")
                         logger.info("    ✅ Database sequences reset")
                     except Exception as e:
                         logger.info(f"    ℹ️ Sequence reset skipped: {e}")

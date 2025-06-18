@@ -2060,7 +2060,7 @@ class UnifiedWALLoadBalancer:
             primary_path = path
             replica_path = path
             
-            # Check if this is a collection DELETE operation that needs name→UUID mapping
+            # CRITICAL FIX: DELETE by name instead of UUID due to ChromaDB UUID consistency bug
             if "/collections/" in path:
                 # Extract collection identifier from path
                 path_parts = path.split('/collections/')
@@ -2072,38 +2072,38 @@ class UnifiedWALLoadBalancer:
                     uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
                     is_uuid = bool(uuid_pattern.match(collection_identifier))
                     
-                    if not is_uuid:
-                        # This is a collection NAME - need to map to UUIDs for each instance
-                        logger.info(f"   🔄 DELETE name→UUID mapping needed for: {collection_identifier}")
+                    # CRITICAL FIX: Always use collection NAME for DELETE operations
+                    # ChromaDB has UUID consistency bug where name-based access works but UUID-based fails
+                    if is_uuid:
+                        # If UUID provided, try to find collection name from mapping
+                        logger.info(f"   🔄 DELETE UUID→name conversion needed for: {collection_identifier}")
                         
                         try:
                             with self.get_db_connection() as conn:
                                 with conn.cursor() as cur:
                                     cur.execute("""
-                                        SELECT primary_collection_id, replica_collection_id 
+                                        SELECT collection_name 
                                         FROM collection_id_mapping 
-                                        WHERE collection_name = %s
-                                    """, (collection_identifier,))
+                                        WHERE primary_collection_id = %s OR replica_collection_id = %s
+                                    """, (collection_identifier, collection_identifier))
                                     
                                     result = cur.fetchone()
                                     if result:
-                                        primary_id, replica_id = result
-                                        
-                                        if primary_id:
-                                            primary_path = path.replace(collection_identifier, primary_id)
-                                            logger.info(f"   ✅ Primary mapping: {collection_identifier} → {primary_id}")
-                                        
-                                        if replica_id:
-                                            replica_path = path.replace(collection_identifier, replica_id)
-                                            logger.info(f"   ✅ Replica mapping: {collection_identifier} → {replica_id}")
-                                            
+                                        collection_name = result[0]
+                                        primary_path = path.replace(collection_identifier, collection_name)
+                                        replica_path = path.replace(collection_identifier, collection_name)
+                                        logger.info(f"   ✅ UUID→name conversion: {collection_identifier} → {collection_name}")
                                     else:
-                                        logger.warning(f"   ❌ No mapping found for collection: {collection_identifier}")
-                                        # Use original path if no mapping found
+                                        logger.warning(f"   ❌ No name found for UUID: {collection_identifier}")
+                                        # Use original UUID path as fallback
                                         
                         except Exception as e:
-                            logger.error(f"   ❌ DELETE mapping lookup error: {e}")
-                            # Use original paths if mapping lookup fails
+                            logger.error(f"   ❌ DELETE UUID→name lookup error: {e}")
+                            # Use original paths if lookup fails
+                    else:
+                        # Already a collection name - use directly on both instances
+                        logger.info(f"   ✅ DELETE using collection name directly: {collection_identifier}")
+                        # No mapping needed - use same name on both instances
             
             # Execute DELETE on both instances directly
             primary_instance = self.get_primary_instance()

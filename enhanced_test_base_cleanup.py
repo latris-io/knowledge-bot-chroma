@@ -35,7 +35,7 @@ class EnhancedTestBase:
         
         # PostgreSQL connection setup
         self.database_url = os.getenv('DATABASE_URL', 
-            'postgresql://unified_wal_user:wal_secure_2024@dpg-cu5l49bv2p9s73c7l1u0-a.oregon-postgres.render.com/unified_wal_db')
+            'postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha')
         self.postgresql_enabled = POSTGRESQL_AVAILABLE
         
         # Test data tracking - organized by test name
@@ -88,49 +88,67 @@ class EnhancedTestBase:
                         # Selective cleanup - only remove specific test collections
                         logger.debug("🗄️ PostgreSQL selective cleanup...")
                         for collection_name in test_collections:
-                            # Delete collection mappings
+                            # First get collection IDs from mapping
+                            cur.execute(
+                                "SELECT primary_collection_id, replica_collection_id FROM collection_id_mapping WHERE collection_name = %s",
+                                (collection_name,)
+                            )
+                            mapping_result = cur.fetchone()
+                            
+                            if mapping_result:
+                                primary_id, replica_id = mapping_result
+                                
+                                # Delete WAL entries using collection_id
+                                if primary_id:
+                                    cur.execute(
+                                        "DELETE FROM unified_wal_writes WHERE collection_id = %s",
+                                        (primary_id,)
+                                    )
+                                    wal_entries_deleted += cur.rowcount
+                                    
+                                if replica_id and replica_id != primary_id:
+                                    cur.execute(
+                                        "DELETE FROM unified_wal_writes WHERE collection_id = %s",
+                                        (replica_id,)
+                                    )
+                                    wal_entries_deleted += cur.rowcount
+                            
+                            # Delete collection mapping
                             cur.execute(
                                 "DELETE FROM collection_id_mapping WHERE collection_name = %s",
                                 (collection_name,)
                             )
                             mappings_deleted += cur.rowcount
-                            
-                            # Delete WAL entries
-                            cur.execute(
-                                "DELETE FROM unified_wal_writes WHERE collection_name = %s",
-                                (collection_name,)
-                            )
-                            wal_entries_deleted += cur.rowcount
                     else:
                         # Comprehensive cleanup - remove all test data
                         logger.debug("🗄️ PostgreSQL comprehensive cleanup...")
                         
-                        # Delete all test collection mappings
+                        # First get all test collection IDs before deleting mappings
                         cur.execute(
-                            "DELETE FROM collection_id_mapping WHERE collection_name LIKE %s",
-                            (f"{self.test_prefix}_%",)
+                            "SELECT primary_collection_id, replica_collection_id FROM collection_id_mapping WHERE collection_name LIKE %s OR collection_name LIKE %s OR collection_name LIKE %s",
+                            (f"{self.test_prefix}_%", "test_%", f"%{self.test_session_id}%")
+                        )
+                        collection_ids = []
+                        for row in cur.fetchall():
+                            if row[0]:  # primary_collection_id
+                                collection_ids.append(row[0])
+                            if row[1] and row[1] != row[0]:  # replica_collection_id (if different)
+                                collection_ids.append(row[1])
+                        
+                        # Delete WAL entries using collection_id
+                        for collection_id in collection_ids:
+                            cur.execute(
+                                "DELETE FROM unified_wal_writes WHERE collection_id = %s",
+                                (collection_id,)
+                            )
+                            wal_entries_deleted += cur.rowcount
+                        
+                        # Delete test collection mappings
+                        cur.execute(
+                            "DELETE FROM collection_id_mapping WHERE collection_name LIKE %s OR collection_name LIKE %s OR collection_name LIKE %s",
+                            (f"{self.test_prefix}_%", "test_%", f"%{self.test_session_id}%")
                         )
                         mappings_deleted = cur.rowcount
-                        
-                        # Delete all test WAL entries
-                        cur.execute(
-                            "DELETE FROM unified_wal_writes WHERE collection_name LIKE %s OR collection_name LIKE %s",
-                            (f"{self.test_prefix}_%", "test_%")
-                        )
-                        wal_entries_deleted = cur.rowcount
-                        
-                        # Also clean by session ID pattern
-                        cur.execute(
-                            "DELETE FROM collection_id_mapping WHERE collection_name LIKE %s",
-                            (f"%{self.test_session_id}%",)
-                        )
-                        mappings_deleted += cur.rowcount
-                        
-                        cur.execute(
-                            "DELETE FROM unified_wal_writes WHERE collection_name LIKE %s",
-                            (f"%{self.test_session_id}%",)
-                        )
-                        wal_entries_deleted += cur.rowcount
                     
                     conn.commit()
                     
@@ -275,21 +293,32 @@ class EnhancedTestBase:
                             cleanup_results['failed_cleanups'] += 1
                             logger.warning(f"     ⚠️ Error deleting documents from {collection_name}: {e}")
                 
-                # Clean collections (ChromaDB)
+                # CRITICAL FIX: Clean collections from BOTH instances directly  
                 for collection_name in test_info['collections']:
                     try:
-                        logger.debug(f"     Deleting collection: {collection_name}")
-                        response = self.make_request(
+                        logger.debug(f"     Deleting collection from both instances: {collection_name}")
+                        
+                        # Delete from primary instance
+                        primary_response = self.make_request(
                             'DELETE',
-                            f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+                            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
                         )
                         
-                        if response.status_code in [200, 404]:
+                        # Delete from replica instance  
+                        replica_response = self.make_request(
+                            'DELETE',
+                            f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+                        )
+                        
+                        primary_success = primary_response.status_code in [200, 404]
+                        replica_success = replica_response.status_code in [200, 404]
+                        
+                        if primary_success and replica_success:
                             cleanup_results['collections_deleted'] += 1
-                            logger.debug(f"     ✅ Deleted collection: {collection_name}")
+                            logger.debug(f"     ✅ Deleted collection from both instances: {collection_name}")
                         else:
                             cleanup_results['failed_cleanups'] += 1
-                            logger.warning(f"     ⚠️ Failed to delete collection {collection_name}: {response.status_code}")
+                            logger.warning(f"     ⚠️ Partial deletion of {collection_name} - Primary: {primary_response.status_code}, Replica: {replica_response.status_code}")
                             
                     except Exception as e:
                         cleanup_results['failed_cleanups'] += 1
@@ -392,22 +421,34 @@ class EnhancedTestBase:
                 except Exception as e:
                     cleanup_results['failed_cleanups'] += 1
         
-        # Clean collections (ChromaDB)
+        # CRITICAL FIX: Clean collections from BOTH instances directly
         for collection_name in all_collections:
             try:
-                response = self.make_request(
+                # Delete from primary instance
+                primary_response = self.make_request(
                     'DELETE',
-                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+                    f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
                 )
                 
-                if response.status_code in [200, 404]:
+                # Delete from replica instance
+                replica_response = self.make_request(
+                    'DELETE', 
+                    f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+                )
+                
+                primary_success = primary_response.status_code in [200, 404]
+                replica_success = replica_response.status_code in [200, 404]
+                
+                if primary_success and replica_success:
                     cleanup_results['collections_deleted'] += 1
                     logger.info(f"  ✅ Deleted collection: {collection_name}")
                 else:
                     cleanup_results['failed_cleanups'] += 1
+                    logger.warning(f"  ⚠️ Partial deletion of {collection_name} - Primary: {primary_response.status_code}, Replica: {replica_response.status_code}")
                     
             except Exception as e:
                 cleanup_results['failed_cleanups'] += 1
+                logger.warning(f"  ⚠️ Error deleting collection {collection_name}: {e}")
         
         # Clean PostgreSQL data (comprehensive)
         logger.info("  🗄️ Cleaning PostgreSQL data...")
