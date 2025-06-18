@@ -2629,6 +2629,27 @@ if __name__ == '__main__':
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
+    @app.route('/debug/simple-proxy', methods=['GET'])
+    def debug_simple_proxy():
+        """Debug endpoint: Simple proxy without complex load balancer logic"""
+        try:
+            import requests
+            from flask import Response as FlaskResponse
+            
+            # Simple request to replica (which we know works)
+            response = requests.get("https://chroma-replica.onrender.com/api/v2/version", timeout=10)
+            
+            # Create proper Flask response
+            flask_response = FlaskResponse(
+                response=response.content,
+                status=response.status_code,
+                headers=dict(response.headers)
+            )
+            
+            return flask_response
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
     @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
         """Proxy all other requests through the load balancer"""
