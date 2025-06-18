@@ -96,28 +96,34 @@ class ProductionValidationTests:
             
         print(f"   Collection created with ID: {collection_id[:8]}...")
         
-        # Step 2: Wait for replication and verify on primary instance
-        print("   Step 2: Verifying collection exists on primary instance...")
-        time.sleep(3)
+        # Step 2: Wait for auto-mapping and verify collection exists on primary BY NAME
+        print("   Step 2: Verifying collection exists on primary instance by name...")
+        time.sleep(5)  # Wait for auto-mapping system
         
         primary_response = requests.get(
-            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}",
+            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
             timeout=15
         )
         
-        primary_data = self.validate_json_response(primary_response, "Primary Instance Verification")
-        if not primary_data:
+        primary_collections = self.validate_json_response(primary_response, "Primary Instance Verification")
+        if not primary_collections:
             return False
-            
-        if primary_data.get('id') != collection_id:
+        
+        # Find collection by name (UUIDs will be different per instance)
+        primary_collection = next((c for c in primary_collections if c['name'] == test_collection), None)
+        if not primary_collection:
+            primary_names = [c['name'] for c in primary_collections]
             return self.fail_test(
                 "Primary Instance Verification",
-                "Collection ID mismatch",
-                f"Expected: {collection_id}, Got: {primary_data.get('id')}"
+                "Collection not found on primary by name",
+                f"Primary has {len(primary_names)} collections, test collection not found"
             )
             
-        # Step 3: Verify collection exists on replica instance
-        print("   Step 3: Verifying collection exists on replica instance...")
+        primary_uuid = primary_collection['id']
+        print(f"   ✅ Found on primary: {primary_uuid[:8]}... (name: {test_collection})")
+            
+        # Step 3: Verify collection exists on replica instance by name  
+        print("   Step 3: Verifying collection exists on replica instance by name...")
         replica_response = requests.get(
             f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
             timeout=15
@@ -126,14 +132,29 @@ class ProductionValidationTests:
         replica_collections = self.validate_json_response(replica_response, "Replica Instance Verification")
         if not replica_collections:
             return False
-            
-        replica_collection_names = [c['name'] for c in replica_collections]
-        if test_collection not in replica_collection_names:
+        
+        # Find collection by name (UUIDs will be different per instance)
+        replica_collection = next((c for c in replica_collections if c['name'] == test_collection), None)
+        if not replica_collection:
+            replica_names = [c['name'] for c in replica_collections]
             return self.fail_test(
                 "Replica Instance Verification",
-                "Collection not replicated to replica instance",
-                f"Replica has: {replica_collection_names}"
+                "Collection not found on replica by name",
+                f"Replica has {len(replica_names)} collections, test collection not found"
             )
+            
+        replica_uuid = replica_collection['id']
+        print(f"   ✅ Found on replica: {replica_uuid[:8]}... (name: {test_collection})")
+        
+        # Verify UUIDs are different (correct distributed architecture)
+        if primary_uuid == replica_uuid:
+            return self.fail_test(
+                "Distributed Architecture Validation",
+                "Same UUID on both instances - violates distributed design",
+                f"Both instances have UUID: {primary_uuid}"
+            )
+            
+        print(f"   ✅ Confirmed different UUIDs: Primary={primary_uuid[:8]}..., Replica={replica_uuid[:8]}...")
             
         # Step 4: Verify collection mapping was created
         print("   Step 4: Verifying collection mapping was created...")
@@ -152,27 +173,37 @@ class ProductionValidationTests:
                 f"Available mappings: {[m['collection_name'] for m in mappings]}"
             )
             
-        # Step 5: Verify the mapping has valid UUIDs for both instances
-        primary_uuid = test_mapping.get('primary_collection_id')
-        replica_uuid = test_mapping.get('replica_collection_id')
+        # Step 5: Verify the mapping has the correct UUIDs for both instances
+        mapping_primary_uuid = test_mapping.get('primary_collection_id')
+        mapping_replica_uuid = test_mapping.get('replica_collection_id')
         
-        if not primary_uuid or not replica_uuid:
+        if not mapping_primary_uuid or not mapping_replica_uuid:
             return self.fail_test(
                 "Collection Mapping Validation",
                 "Mapping missing primary or replica UUID",
-                f"Primary: {primary_uuid}, Replica: {replica_uuid}"
+                f"Mapping Primary: {mapping_primary_uuid}, Mapping Replica: {mapping_replica_uuid}"
             )
             
-        if primary_uuid != collection_id:
+        # Verify mapping UUIDs match what we found on the actual instances
+        if mapping_primary_uuid != primary_uuid:
             return self.fail_test(
                 "Collection Mapping Validation",
-                "Primary UUID mismatch in mapping",
-                f"Expected: {collection_id}, Mapping has: {primary_uuid}"
+                "Primary UUID mismatch between mapping and actual instance",
+                f"Instance: {primary_uuid}, Mapping: {mapping_primary_uuid}"
             )
+            
+        if mapping_replica_uuid != replica_uuid:
+            return self.fail_test(
+                "Collection Mapping Validation", 
+                "Replica UUID mismatch between mapping and actual instance",
+                f"Instance: {replica_uuid}, Mapping: {mapping_replica_uuid}"
+            )
+            
+        print(f"   ✅ Mapping validated: {test_collection} -> P:{mapping_primary_uuid[:8]}..., R:{mapping_replica_uuid[:8]}...")
             
         return self.pass_test(
             "Collection Creation & Replication",
-            f"Collection created, replicated, and mapped correctly (Primary: {primary_uuid[:8]}..., Replica: {replica_uuid[:8]}...)"
+            f"✅ Distributed architecture working correctly - Collection created, auto-mapped to both instances with different UUIDs, load balancer mapping accurate"
         )
     
     def test_real_document_ingestion_and_sync(self):
@@ -395,36 +426,52 @@ class ProductionValidationTests:
         collection_id = create_response.json().get('id')
         time.sleep(5)  # Wait for replication
         
-        # Step 2: Verify collection exists on both instances before deletion
-        print("   Step 2: Verifying collection exists on both instances before deletion...")
+        # Step 2: Verify collection exists on both instances BY NAME before deletion
+        print("   Step 2: Verifying collection exists on both instances by name before deletion...")
+        
+        # Check primary by name
         primary_before = requests.get(
-            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}",
+            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
             timeout=15
         )
         
+        primary_collections_before = self.validate_json_response(primary_before, "DELETE Test: Pre-deletion Primary Check")
+        if not primary_collections_before:
+            return False
+            
+        primary_collection_before = next((c for c in primary_collections_before if c['name'] == delete_test_collection), None)
+        if not primary_collection_before:
+            primary_names = [c['name'] for c in primary_collections_before]
+            return self.fail_test(
+                "DELETE Test: Pre-deletion Verification",
+                "Collection not found on primary by name before deletion",
+                f"Primary has {len(primary_names)} collections, test collection not found"
+            )
+            
+        primary_delete_uuid = primary_collection_before['id']
+        print(f"   ✅ Found on primary before DELETE: {primary_delete_uuid[:8]}... (name: {delete_test_collection})")
+        
+        # Check replica by name
         replica_before = requests.get(
             f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
             timeout=15
         )
         
-        if primary_before.status_code != 200:
-            return self.fail_test(
-                "DELETE Test: Pre-deletion Verification",
-                "Collection not found on primary before deletion",
-                f"Primary status: {primary_before.status_code}"
-            )
-            
         replica_collections_before = self.validate_json_response(replica_before, "DELETE Test: Pre-deletion Replica Check")
         if not replica_collections_before:
             return False
             
-        replica_names_before = [c['name'] for c in replica_collections_before]
-        if delete_test_collection not in replica_names_before:
+        replica_collection_before = next((c for c in replica_collections_before if c['name'] == delete_test_collection), None)
+        if not replica_collection_before:
+            replica_names = [c['name'] for c in replica_collections_before]
             return self.fail_test(
                 "DELETE Test: Pre-deletion Verification", 
-                "Collection not found on replica before deletion",
-                f"Replica collections: {replica_names_before}"
+                "Collection not found on replica by name before deletion",
+                f"Replica has {len(replica_names)} collections, test collection not found"
             )
+            
+        replica_delete_uuid = replica_collection_before['id']
+        print(f"   ✅ Found on replica before DELETE: {replica_delete_uuid[:8]}... (name: {delete_test_collection})")
             
         # Step 3: Execute DELETE via load balancer
         print("   Step 3: Executing DELETE via load balancer...")
@@ -440,24 +487,31 @@ class ProductionValidationTests:
                 delete_response.text[:200]
             )
             
-        # Step 4: Wait for deletion to propagate and verify on both instances
-        print("   Step 4: Waiting for deletion to propagate and verifying on both instances...")
+        # Step 4: Wait for deletion to propagate and verify BY NAME on both instances
+        print("   Step 4: Waiting for deletion to propagate and verifying by name on both instances...")
         time.sleep(10)  # Wait for deletion sync
         
-        # Check primary instance
+        # Check primary instance by name (not UUID)
         primary_after = requests.get(
-            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}",
+            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
             timeout=15
         )
         
-        if primary_after.status_code != 404:
+        primary_collections_after = self.validate_json_response(primary_after, "DELETE Test: Post-deletion Primary Check")
+        if not primary_collections_after:
+            return False
+        
+        primary_collection_after = next((c for c in primary_collections_after if c['name'] == delete_test_collection), None)
+        if primary_collection_after:
             return self.fail_test(
                 "DELETE Test: Primary Instance Verification",
-                f"Collection still exists on primary after DELETE: {primary_after.status_code}",
-                "DELETE sync to primary failed"
+                f"Collection still exists on primary after DELETE (name: {delete_test_collection})",
+                f"Found: {primary_collection_after['id'][:8]}... - DELETE sync to primary failed"
             )
             
-        # Check replica instance
+        print(f"   ✅ Confirmed deleted from primary (collection name not found)")
+        
+        # Check replica instance by name
         replica_after = requests.get(
             f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
             timeout=15
@@ -466,14 +520,16 @@ class ProductionValidationTests:
         replica_collections_after = self.validate_json_response(replica_after, "DELETE Test: Post-deletion Replica Check")
         if not replica_collections_after:
             return False
-            
-        replica_names_after = [c['name'] for c in replica_collections_after]
-        if delete_test_collection in replica_names_after:
+        
+        replica_collection_after = next((c for c in replica_collections_after if c['name'] == delete_test_collection), None)
+        if replica_collection_after:
             return self.fail_test(
                 "DELETE Test: Replica Instance Verification",
-                "Collection still exists on replica after DELETE",
-                f"Replica still has: {replica_names_after}"
+                f"Collection still exists on replica after DELETE (name: {delete_test_collection})",
+                f"Found: {replica_collection_after['id'][:8]}... - DELETE sync to replica failed"
             )
+            
+        print(f"   ✅ Confirmed deleted from replica (collection name not found)")
             
         # Step 5: Verify load balancer correctly reports 404
         print("   Step 5: Verifying load balancer correctly reports 404...")
