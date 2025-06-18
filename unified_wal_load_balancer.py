@@ -2787,31 +2787,25 @@ if __name__ == '__main__':
                 logger.error(f"❌ CRITICAL: forward_request returned None for {request.method} /{path}")
                 return jsonify({"error": "Internal error: No response from load balancer"}), 503
             
-            # CRITICAL FIX: Proper Flask response handling with extensive debugging
-            from flask import Response as FlaskResponse
-            
+            # CRITICAL FIX: Direct response handling - bypass Flask Response object creation
             status_code = getattr(response, 'status_code', 503)
             content = response.content if hasattr(response, 'content') else b'{"error": "No content"}'
             response_headers = dict(response.headers) if hasattr(response, 'headers') else {}
             
-            # EXTENSIVE DEBUG LOGGING
-            logger.error(f"🔍 PROXY DEBUG - Response object: {type(response)}")
-            logger.error(f"🔍 PROXY DEBUG - Status code: {status_code}")
-            logger.error(f"🔍 PROXY DEBUG - Has content attr: {hasattr(response, 'content')}")
-            logger.error(f"🔍 PROXY DEBUG - Content length: {len(content)}")
-            logger.error(f"🔍 PROXY DEBUG - Content preview: {content[:100] if content else '(empty)'}")
-            logger.error(f"🔍 PROXY DEBUG - Response headers: {response_headers}")
+            # Filter out problematic headers that might cause issues
+            safe_headers = {}
+            for key, value in response_headers.items():
+                if key.lower() not in ['content-length', 'transfer-encoding', 'connection']:
+                    safe_headers[key] = value
             
-            # CRITICAL FIX: Create proper Flask response object
-            flask_response = FlaskResponse(
-                response=content,
-                status=status_code,
-                headers=response_headers
-            )
+            # Set correct content-type
+            if 'content-type' not in safe_headers and 'Content-Type' not in safe_headers:
+                safe_headers['Content-Type'] = 'application/json'
             
-            logger.error(f"🔍 PROXY DEBUG - Flask response created with {len(content)} bytes")
+            logger.info(f"✅ Proxy forwarded {request.method} /{path} -> {status_code}, Content: {len(content)} bytes")
             
-            return flask_response
+            # CRITICAL FIX: Return tuple format that Flask handles correctly
+            return content, status_code, safe_headers
             
         except Exception as e:
             import traceback
