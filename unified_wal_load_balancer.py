@@ -2670,10 +2670,19 @@ if __name__ == '__main__':
                 logger.error(f"❌ CRITICAL: forward_request returned None for {request.method} /{path}")
                 return jsonify({"error": "Internal error: No response from load balancer"}), 503
             
-            # FIXED: Extract response details with proper debugging
+            # FIXED: Extract response details with extensive debugging
+            logger.error(f"🔍 DEBUG: Response object type: {type(response)}")
+            logger.error(f"🔍 DEBUG: Response has status_code: {hasattr(response, 'status_code')}")
+            logger.error(f"🔍 DEBUG: Response has content: {hasattr(response, 'content')}")
+            logger.error(f"🔍 DEBUG: Response has headers: {hasattr(response, 'headers')}")
+            
             status_code = getattr(response, 'status_code', 503)
             content = response.content if hasattr(response, 'content') else b'{"error": "No content"}'
             response_headers = dict(response.headers) if hasattr(response, 'headers') else {}
+            
+            logger.error(f"🔍 DEBUG: Extracted status_code: {status_code}")
+            logger.error(f"🔍 DEBUG: Extracted content length: {len(content)}")
+            logger.error(f"🔍 DEBUG: Extracted content preview: {content[:100]}")
             
             # Debug logging to track response content
             logger.info(f"✅ Successfully forwarded {request.method} /{path} -> {status_code}, Content: {len(content)} bytes")
