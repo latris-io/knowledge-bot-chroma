@@ -2670,28 +2670,24 @@ if __name__ == '__main__':
                 logger.error(f"❌ CRITICAL: forward_request returned None for {request.method} /{path}")
                 return jsonify({"error": "Internal error: No response from load balancer"}), 503
             
-            # FIXED: Extract response details with extensive debugging
-            logger.error(f"🔍 DEBUG: Response object type: {type(response)}")
-            logger.error(f"🔍 DEBUG: Response has status_code: {hasattr(response, 'status_code')}")
-            logger.error(f"🔍 DEBUG: Response has content: {hasattr(response, 'content')}")
-            logger.error(f"🔍 DEBUG: Response has headers: {hasattr(response, 'headers')}")
+            # CRITICAL FIX: Proper Flask response handling
+            from flask import Response as FlaskResponse
             
             status_code = getattr(response, 'status_code', 503)
             content = response.content if hasattr(response, 'content') else b'{"error": "No content"}'
             response_headers = dict(response.headers) if hasattr(response, 'headers') else {}
             
-            logger.error(f"🔍 DEBUG: Extracted status_code: {status_code}")
-            logger.error(f"🔍 DEBUG: Extracted content length: {len(content)}")
-            logger.error(f"🔍 DEBUG: Extracted content preview: {content[:100]}")
-            
             # Debug logging to track response content
             logger.info(f"✅ Successfully forwarded {request.method} /{path} -> {status_code}, Content: {len(content)} bytes")
             
-            # Ensure content-type is set
-            if 'Content-Type' not in response_headers:
-                response_headers['Content-Type'] = 'application/json'
+            # CRITICAL FIX: Create proper Flask response object
+            flask_response = FlaskResponse(
+                response=content,
+                status=status_code,
+                headers=response_headers
+            )
             
-            return content, status_code, response_headers
+            return flask_response
             
         except Exception as e:
             import traceback
