@@ -2266,6 +2266,8 @@ class UnifiedWALLoadBalancer:
                 target_instance.update_stats(False)
                 self.stats["failed_requests"] += 1
                 
+                logger.error(f"❌ Request failed on {target_instance.name}: {e}")
+                
                 # For critical failures, try other instances (with retry limit)
                 if target_instance.consecutive_failures > 2 and retry_count < max_retries:
                     other_instances = [inst for inst in self.get_healthy_instances() if inst != target_instance]
@@ -2273,7 +2275,16 @@ class UnifiedWALLoadBalancer:
                         logger.warning(f"Retrying request on {other_instances[0].name} due to {target_instance.name} failures (attempt {retry_count + 1}/{max_retries})")
                         return self.forward_request(method, path, headers, data, other_instances[0], retry_count + 1, max_retries)
                 
-                raise e
+                # CRITICAL FIX: Return proper error response instead of raising exception
+                from requests import Response
+                error_response = Response()
+                error_response.status_code = 503
+                error_response._content = json.dumps({
+                    "error": f"Service temporarily unavailable: {str(e)}",
+                    "instance": target_instance.name
+                }).encode()
+                logger.error(f"❌ Returning 503 error response for failed request to {target_instance.name}")
+                return error_response
         
         # CRITICAL FAILSAFE: If we reach here, something went wrong - return error response
         logger.error(f"❌ CRITICAL: forward_request reached end without returning for {method} /{path}")
