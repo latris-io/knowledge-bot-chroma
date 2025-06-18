@@ -2795,7 +2795,7 @@ if __name__ == '__main__':
             # Filter out problematic headers that might cause issues
             safe_headers = {}
             for key, value in response_headers.items():
-                if key.lower() not in ['content-length', 'transfer-encoding', 'connection']:
+                if key.lower() not in ['content-length', 'transfer-encoding', 'connection', 'content-encoding']:
                     safe_headers[key] = value
             
             # Set correct content-type
