@@ -2223,8 +2223,25 @@ class UnifiedWALLoadBalancer:
                 # Don't raise for status - let the caller handle HTTP errors
                 logger.info(f"Response: {response.status_code}, Content: {len(response.content)} bytes")
                 
-                target_instance.update_stats(True)
-                self.stats["successful_requests"] += 1
+                # CRITICAL FIX: Auto-failover on 5xx server errors
+                if response.status_code >= 500:
+                    logger.error(f"❌ Server error {response.status_code} from {target_instance.name}, attempting failover...")
+                    target_instance.update_stats(False)
+                    self.stats["failed_requests"] += 1
+                    
+                    # Try failover to other healthy instances
+                    if retry_count < max_retries:
+                        other_instances = [inst for inst in self.get_healthy_instances() if inst != target_instance]
+                        if other_instances:
+                            logger.warning(f"🔄 FAILOVER: Retrying on {other_instances[0].name} due to 5xx error from {target_instance.name}")
+                            return self.forward_request(method, path, headers, data, other_instances[0], retry_count + 1, max_retries, **kwargs)
+                    
+                    # If no failover possible, return the error response
+                    logger.error(f"❌ No failover available for 5xx error from {target_instance.name}")
+                    return response
+                else:
+                    target_instance.update_stats(True)
+                    self.stats["successful_requests"] += 1
                 
                 # 🔧 Auto-create collection mappings when collections are created (simplified)
                 if (method == "POST" and "/collections" in path and 
