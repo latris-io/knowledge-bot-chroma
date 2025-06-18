@@ -2787,15 +2787,20 @@ if __name__ == '__main__':
                 logger.error(f"❌ CRITICAL: forward_request returned None for {request.method} /{path}")
                 return jsonify({"error": "Internal error: No response from load balancer"}), 503
             
-            # CRITICAL FIX: Proper Flask response handling
+            # CRITICAL FIX: Proper Flask response handling with extensive debugging
             from flask import Response as FlaskResponse
             
             status_code = getattr(response, 'status_code', 503)
             content = response.content if hasattr(response, 'content') else b'{"error": "No content"}'
             response_headers = dict(response.headers) if hasattr(response, 'headers') else {}
             
-            # Debug logging to track response content
-            logger.info(f"✅ Successfully forwarded {request.method} /{path} -> {status_code}, Content: {len(content)} bytes")
+            # EXTENSIVE DEBUG LOGGING
+            logger.error(f"🔍 PROXY DEBUG - Response object: {type(response)}")
+            logger.error(f"🔍 PROXY DEBUG - Status code: {status_code}")
+            logger.error(f"🔍 PROXY DEBUG - Has content attr: {hasattr(response, 'content')}")
+            logger.error(f"🔍 PROXY DEBUG - Content length: {len(content)}")
+            logger.error(f"🔍 PROXY DEBUG - Content preview: {content[:100] if content else '(empty)'}")
+            logger.error(f"🔍 PROXY DEBUG - Response headers: {response_headers}")
             
             # CRITICAL FIX: Create proper Flask response object
             flask_response = FlaskResponse(
@@ -2803,6 +2808,8 @@ if __name__ == '__main__':
                 status=status_code,
                 headers=response_headers
             )
+            
+            logger.error(f"🔍 PROXY DEBUG - Flask response created with {len(content)} bytes")
             
             return flask_response
             
