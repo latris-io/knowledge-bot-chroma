@@ -2614,6 +2614,21 @@ if __name__ == '__main__':
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
+    @app.route('/debug/direct-primary', methods=['GET'])
+    def debug_direct_primary():
+        """Debug endpoint: Direct request to primary instance bypassing load balancer logic"""
+        try:
+            import requests
+            response = requests.get("https://chroma-primary.onrender.com/api/v2/version", timeout=10)
+            return jsonify({
+                "status_code": response.status_code,
+                "content": response.text,
+                "content_length": len(response.content),
+                "headers": dict(response.headers)
+            }), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
     @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
         """Proxy all other requests through the load balancer"""
