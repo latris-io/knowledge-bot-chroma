@@ -2661,6 +2661,74 @@ if __name__ == '__main__':
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
+    @app.route('/debug/trace-collection-create', methods=['POST'])
+    def debug_trace_collection_create():
+        """Debug endpoint: Trace collection creation through load balancer logic"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not initialized"}), 503
+                
+            import time
+            collection_name = f"DEBUG_TRACE_{int(time.time())}"
+            
+            # Get selected instance
+            target_instance = enhanced_wal.choose_read_instance(
+                "/api/v2/tenants/default_tenant/databases/default_database/collections", 
+                "POST", 
+                {"Content-Type": "application/json"}
+            )
+            
+            debug_info = {
+                "collection_name": collection_name,
+                "selected_instance": target_instance.name if target_instance else None,
+                "instance_url": target_instance.url if target_instance else None,
+                "instance_healthy": target_instance.is_healthy if target_instance else None,
+                "all_instances": []
+            }
+            
+            # Get all instance info
+            for inst in enhanced_wal.instances:
+                debug_info["all_instances"].append({
+                    "name": inst.name,
+                    "url": inst.url,
+                    "healthy": inst.is_healthy,
+                    "consecutive_failures": inst.consecutive_failures,
+                    "total_requests": inst.total_requests,
+                    "successful_requests": inst.successful_requests
+                })
+            
+            if not target_instance:
+                debug_info["error"] = "No target instance selected"
+                return jsonify(debug_info), 503
+            
+            # Make the actual request
+            import requests
+            url = f"{target_instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections"
+            
+            debug_info["request_url"] = url
+            debug_info["request_data"] = {"name": collection_name}
+            
+            response = requests.post(
+                url,
+                json={"name": collection_name},
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+            
+            debug_info["response_status"] = response.status_code
+            debug_info["response_content_length"] = len(response.content)
+            debug_info["response_content_preview"] = response.text[:200] if response.text else "(empty)"
+            debug_info["response_headers"] = dict(response.headers)
+            
+            return jsonify(debug_info), 200
+            
+        except Exception as e:
+            import traceback
+            return jsonify({
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+    
     @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
         """Proxy all other requests through the load balancer"""
