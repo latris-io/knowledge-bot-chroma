@@ -36,6 +36,10 @@ import gc
 # Flask imports for web service
 from flask import Flask, request, Response, jsonify
 
+# Configure logging FIRST before any imports that use logger
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 # Import transaction safety service
 try:
     from transaction_safety_service import TransactionSafetyService, TransactionStatus
@@ -46,10 +50,6 @@ except ImportError as e:
     TRANSACTION_SAFETY_AVAILABLE = False
     TransactionSafetyService = None
     TransactionStatus = None
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 class WALWriteStatus(Enum):
     PENDING = "pending"

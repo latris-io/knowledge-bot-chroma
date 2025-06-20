@@ -11,8 +11,10 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.loadbalancer.txt ./
 RUN pip install --no-cache-dir -r requirements.loadbalancer.txt
 
-# Copy unified WAL load balancer application
+# Copy unified WAL load balancer application and transaction safety files
 COPY unified_wal_load_balancer.py ./
+COPY transaction_safety_service.py ./
+COPY transaction_safety_schema.sql ./
 
 EXPOSE 8000
 
