@@ -2038,11 +2038,66 @@ class UnifiedWALLoadBalancer:
                                         path = mapped_path
                                     else:
                                         logger.error(f"❌ No UUID found for {target_instance.name} instance")
+                                        # CRITICAL FIX: During failover, if mapping incomplete, try to find collection directly
+                                        if target_instance.name == "replica":
+                                            logger.error(f"🔄 FAILOVER RECOVERY: Attempting direct collection lookup on replica")
+                                            direct_uuid = self.find_collection_by_name(target_instance.name, collection_identifier)
+                                            if direct_uuid:
+                                                mapped_path = path.replace(collection_identifier, direct_uuid)
+                                                logger.error(f"✅ FAILOVER RECOVERY SUCCESS: {collection_identifier} → {direct_uuid}")
+                                                path = mapped_path
+                                            else:
+                                                logger.error(f"❌ FAILOVER RECOVERY FAILED: Collection '{collection_identifier}' not found on {target_instance.name}")
                                 else:
                                     logger.error(f"❌ No mapping found for collection: {collection_identifier}")
+                                    # CRITICAL FIX: During failover, attempt direct collection discovery
+                                    logger.error(f"🔄 FAILOVER MAPPING: Attempting to find collection directly on {target_instance.name}")
+                                    direct_uuid = self.find_collection_by_name(target_instance.name, collection_identifier)
+                                    if direct_uuid:
+                                        mapped_path = path.replace(collection_identifier, direct_uuid)
+                                        logger.error(f"✅ FAILOVER MAPPING SUCCESS: {collection_identifier} → {direct_uuid}")
+                                        path = mapped_path
+                                        
+                                        # CRITICAL FIX: Create missing mapping for future operations
+                                        logger.error(f"🔧 Creating missing mapping for discovered collection")
+                                        try:
+                                            if target_instance.name == "primary":
+                                                cur.execute("""
+                                                    INSERT INTO collection_id_mapping (collection_name, primary_collection_id, created_at)
+                                                    VALUES (%s, %s, NOW())
+                                                    ON CONFLICT (collection_name) DO UPDATE SET
+                                                    primary_collection_id = EXCLUDED.primary_collection_id,
+                                                    updated_at = NOW()
+                                                """, (collection_identifier, direct_uuid))
+                                            else:
+                                                cur.execute("""
+                                                    INSERT INTO collection_id_mapping (collection_name, replica_collection_id, created_at)
+                                                    VALUES (%s, %s, NOW())
+                                                    ON CONFLICT (collection_name) DO UPDATE SET
+                                                    replica_collection_id = EXCLUDED.replica_collection_id,
+                                                    updated_at = NOW()
+                                                """, (collection_identifier, direct_uuid))
+                                            conn.commit()
+                                            logger.error(f"✅ MISSING MAPPING CREATED: {collection_identifier} on {target_instance.name}")
+                                        except Exception as e:
+                                            logger.error(f"❌ Failed to create missing mapping: {e}")
+                                    else:
+                                        logger.error(f"❌ FAILOVER MAPPING FAILED: Collection '{collection_identifier}' not found on {target_instance.name}")
                                     
                     except Exception as e:
                         logger.error(f"❌ NAME-to-UUID mapping error: {e}")
+                        # CRITICAL FIX: Fallback to direct collection discovery during database errors
+                        logger.error(f"🔄 DATABASE ERROR RECOVERY: Attempting direct collection lookup")
+                        try:
+                            direct_uuid = self.find_collection_by_name(target_instance.name, collection_identifier)
+                            if direct_uuid:
+                                mapped_path = path.replace(collection_identifier, direct_uuid)
+                                logger.error(f"✅ DATABASE ERROR RECOVERY SUCCESS: {collection_identifier} → {direct_uuid}")
+                                path = mapped_path
+                            else:
+                                logger.error(f"❌ DATABASE ERROR RECOVERY FAILED: Collection not found")
+                        except Exception as recovery_error:
+                            logger.error(f"❌ DATABASE ERROR RECOVERY EXCEPTION: {recovery_error}")
                 
                 else:
                     # This is already a UUID - use existing UUID-to-UUID mapping logic
@@ -2309,7 +2364,7 @@ class UnifiedWALLoadBalancer:
                             if 'json' in kwargs and kwargs['json']:
                                 collection_config = kwargs['json'].get('configuration', {})
                             
-                            # Create mapping between primary and replica instances
+                            # CRITICAL FIX: Create mapping SYNCHRONOUSLY during failover to prevent document operation failures
                             mapping_result = self.get_or_create_collection_mapping(
                                 collection_name=collection_name,
                                 source_collection_id=collection_id,
@@ -2319,6 +2374,24 @@ class UnifiedWALLoadBalancer:
                             
                             if mapping_result:
                                 logger.error(f"✅ AUTO-MAPPING SUCCESS: Collection '{collection_name}' mapping created")
+                                # CRITICAL FIX: Verify mapping was created correctly for immediate use
+                                try:
+                                    with self.get_db_connection() as conn:
+                                        with conn.cursor() as cur:
+                                            cur.execute("""
+                                                SELECT primary_collection_id, replica_collection_id 
+                                                FROM collection_id_mapping 
+                                                WHERE collection_name = %s
+                                            """, (collection_name,))
+                                            
+                                            verify_result = cur.fetchone()
+                                            if verify_result:
+                                                primary_id, replica_id = verify_result
+                                                logger.error(f"✅ MAPPING VERIFIED: {collection_name} → P:{primary_id[:8] if primary_id else 'None'}... R:{replica_id[:8] if replica_id else 'None'}...")
+                                            else:
+                                                logger.error(f"❌ MAPPING VERIFICATION FAILED: No mapping found for {collection_name}")
+                                except Exception as e:
+                                    logger.error(f"❌ MAPPING VERIFICATION ERROR: {e}")
                             else:
                                 logger.error(f"❌ AUTO-MAPPING FAILED: Could not create mapping for '{collection_name}'")
                                 
