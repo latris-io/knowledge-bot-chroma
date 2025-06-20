@@ -2148,6 +2148,48 @@ class UnifiedWALLoadBalancer:
             
             # Return success if at least one succeeded
             if primary_success or replica_success:
+                # CRITICAL FIX: Clean up collection mapping after successful DELETE
+                if "/collections/" in path:
+                    # Extract collection identifier from path for mapping cleanup
+                    path_parts = path.split('/collections/')
+                    if len(path_parts) >= 2:
+                        collection_identifier = path_parts[1].split('/')[0]
+                        logger.info(f"🧹 Cleaning up mapping for deleted collection: {collection_identifier}")
+                        
+                        try:
+                            # Check if this is a UUID or name
+                            import re
+                            uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+                            is_uuid = bool(uuid_pattern.match(collection_identifier))
+                            
+                            with self.get_db_connection() as conn:
+                                with conn.cursor() as cur:
+                                    if is_uuid:
+                                        # If UUID, find collection name first
+                                        cur.execute("""
+                                            SELECT collection_name 
+                                            FROM collection_id_mapping 
+                                            WHERE primary_collection_id = %s OR replica_collection_id = %s
+                                        """, (collection_identifier, collection_identifier))
+                                        result = cur.fetchone()
+                                        if result:
+                                            collection_name = result[0]
+                                            cur.execute("DELETE FROM collection_id_mapping WHERE collection_name = %s", (collection_name,))
+                                            mapping_deleted = cur.rowcount > 0
+                                            conn.commit()
+                                            logger.info(f"🧹 Mapping cleanup (UUID→name): {collection_identifier} → {collection_name} {'✅' if mapping_deleted else '❌'}")
+                                        else:
+                                            logger.info(f"🧹 No mapping found for UUID: {collection_identifier}")
+                                    else:
+                                        # If name, delete mapping directly
+                                        cur.execute("DELETE FROM collection_id_mapping WHERE collection_name = %s", (collection_identifier,))
+                                        mapping_deleted = cur.rowcount > 0
+                                        conn.commit()
+                                        logger.info(f"🧹 Mapping cleanup (name): {collection_identifier} {'✅' if mapping_deleted else '❌'}")
+                                        
+                        except Exception as e:
+                            logger.error(f"❌ Mapping cleanup failed for {collection_identifier}: {e}")
+                
                 from requests import Response
                 success_response = Response()
                 success_response.status_code = 200 if (primary_success and replica_success) else 207
