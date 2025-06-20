@@ -36,6 +36,17 @@ import gc
 # Flask imports for web service
 from flask import Flask, request, Response, jsonify
 
+# Import transaction safety service
+try:
+    from transaction_safety_service import TransactionSafetyService, TransactionStatus
+    TRANSACTION_SAFETY_AVAILABLE = True
+    logger.info("✅ Transaction safety service imported successfully")
+except ImportError as e:
+    logger.warning(f"⚠️ Transaction safety service not available - running without transaction protection: {e}")
+    TRANSACTION_SAFETY_AVAILABLE = False
+    TransactionSafetyService = None
+    TransactionStatus = None
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -142,10 +153,29 @@ class UnifiedWALLoadBalancer:
         if not self.database_url:
             raise Exception("DATABASE_URL environment variable not set")
         
+        # Initialize transaction safety service
+        self.transaction_safety_service = None
+        if TRANSACTION_SAFETY_AVAILABLE:
+            try:
+                self.transaction_safety_service = TransactionSafetyService(self.database_url)
+                # Inject load balancer reference for recovery
+                self.transaction_safety_service.process_recovery_queue = lambda: self.transaction_safety_service.process_recovery_queue(self)
+                logger.info("✅ Transaction safety service initialized")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize transaction safety service: {e}")
+                self.transaction_safety_service = None
+        else:
+            logger.warning("⚠️ Transaction safety service not available")
+        
         # Initialize database schema and health check instances
         try:
             self._initialize_unified_wal_schema()
             logger.info("✅ Unified WAL schema initialized")
+            
+            # Initialize transaction safety schema if service is available
+            if self.transaction_safety_service:
+                self.transaction_safety_service._initialize_schema()
+                logger.info("✅ Transaction safety schema initialized")
             
             # Initialize existing collection mappings
             self.initialize_existing_collection_mappings()
@@ -2603,6 +2633,147 @@ class UnifiedWALLoadBalancer:
             logger.error(f"   ❌ Dynamic mapping refresh failed: {e}")
             return original_path
 
+    def forward_request_with_transaction_safety(self, method: str, path: str, headers: Dict[str, str], 
+                                              data: bytes = b'', target_instance: Optional[ChromaInstance] = None, 
+                                              retry_count: int = 0, max_retries: int = 1, 
+                                              original_transaction_id: Optional[str] = None, **kwargs) -> requests.Response:
+        """
+        Transaction-safe wrapper for forward_request that implements pre-execution logging
+        to prevent data loss during timing gaps
+        """
+        transaction_id = original_transaction_id
+        
+        # Only log if transaction safety is available and this is a write operation
+        if (self.transaction_safety_service and 
+            method in ['POST', 'PUT', 'PATCH', 'DELETE'] and 
+            not original_transaction_id):  # Don't double-log retry operations
+            
+            try:
+                # Extract client info from Flask request if available
+                client_ip = getattr(request, 'remote_addr', 'unknown') if 'request' in globals() else 'unknown'
+                
+                # Log transaction attempt BEFORE execution
+                transaction_id = self.transaction_safety_service.log_transaction_attempt(
+                    method=method,
+                    path=path,
+                    data=data,
+                    headers=headers,
+                    remote_addr=client_ip,
+                    target_instance=target_instance.name if target_instance else None
+                )
+                
+                logger.info(f"🛡️ Transaction {transaction_id[:8]} logged for {method} {path}")
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to log transaction attempt: {e}")
+                # Continue without transaction logging rather than failing the request
+                transaction_id = None
+        
+        try:
+            # Execute the actual request
+            response = self.forward_request(
+                method=method,
+                path=path,
+                headers=headers,
+                data=data,
+                target_instance=target_instance,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                **kwargs
+            )
+            
+            # Mark transaction as completed if we logged it
+            if transaction_id and self.transaction_safety_service:
+                try:
+                    response_data = None
+                    if hasattr(response, 'json'):
+                        try:
+                            response_data = response.json()
+                        except:
+                            pass
+                    
+                    self.transaction_safety_service.mark_transaction_completed(
+                        transaction_id=transaction_id,
+                        response_status=response.status_code,
+                        response_data=response_data
+                    )
+                    
+                    logger.debug(f"✅ Transaction {transaction_id[:8]} completed successfully")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Failed to mark transaction completed: {e}")
+            
+            return response
+            
+        except Exception as e:
+            # Mark transaction as failed if we logged it
+            if transaction_id and self.transaction_safety_service:
+                try:
+                    # Detect if this is a timing gap failure
+                    is_timing_gap = self._is_timing_gap_failure(e, target_instance)
+                    
+                    self.transaction_safety_service.mark_transaction_failed(
+                        transaction_id=transaction_id,
+                        failure_reason=str(e),
+                        is_timing_gap=is_timing_gap,
+                        response_status=getattr(e, 'response', {}).get('status_code') if hasattr(e, 'response') else None
+                    )
+                    
+                    if is_timing_gap:
+                        logger.warning(f"⚠️ Timing gap failure detected for transaction {transaction_id[:8]}")
+                    else:
+                        logger.error(f"❌ Transaction {transaction_id[:8]} failed: {str(e)[:100]}")
+                        
+                except Exception as mark_error:
+                    logger.error(f"❌ Failed to mark transaction failed: {mark_error}")
+            
+            # Re-raise the original exception
+            raise e
+    
+    def _is_timing_gap_failure(self, exception: Exception, target_instance: Optional[ChromaInstance]) -> bool:
+        """
+        Detect if a failure is likely due to the timing gap issue
+        """
+        if not target_instance:
+            return False
+        
+        # Check if the primary instance is marked as healthy but the request failed
+        # This is the classic timing gap scenario
+        if (target_instance.name == "primary" and 
+            target_instance.is_healthy and
+            ("Connection" in str(exception) or 
+             "Timeout" in str(exception) or
+             "502" in str(exception) or
+             "503" in str(exception))):
+            return True
+        
+        # Also check if we're in a failover scenario but the instance was marked healthy
+        error_str = str(exception).lower()
+        if (target_instance.is_healthy and 
+            ("connection refused" in error_str or
+             "connection timeout" in error_str or
+             "bad gateway" in error_str or
+             "service unavailable" in error_str)):
+            return True
+        
+        return False
+    
+    def forward_request_with_recovery(self, method: str, path: str, headers: Dict[str, str], 
+                                    data: bytes = b'', original_transaction_id: str = None, **kwargs) -> requests.Response:
+        """
+        Special method for retrying failed transactions during recovery
+        """
+        logger.info(f"🔄 Retrying transaction {original_transaction_id[:8] if original_transaction_id else 'unknown'}")
+        
+        return self.forward_request_with_transaction_safety(
+            method=method,
+            path=path, 
+            headers=headers,
+            data=data,
+            original_transaction_id=original_transaction_id,
+            **kwargs
+        )
+
 # Main execution for web service  
 if __name__ == '__main__':
     logger.info("🚀 Starting Enhanced Unified WAL Load Balancer with High-Volume Support")
@@ -2772,6 +2943,155 @@ if __name__ == '__main__':
             }), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+    
+    @app.route('/transaction/safety/status', methods=['GET'])
+    def transaction_safety_status():
+        """Transaction safety system status and summary"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not initialized"}), 503
+            
+            if not enhanced_wal.transaction_safety_service:
+                return jsonify({
+                    "available": False,
+                    "message": "Transaction safety service not available"
+                }), 503
+            
+            summary = enhanced_wal.transaction_safety_service.get_safety_summary()
+            return jsonify({
+                "available": True,
+                "service_running": enhanced_wal.transaction_safety_service.is_running,
+                "recovery_interval": enhanced_wal.transaction_safety_service.recovery_interval,
+                **summary
+            }), 200
+            
+        except Exception as e:
+            return jsonify({"error": f"Failed to get transaction safety status: {str(e)}"}), 500
+    
+    @app.route('/transaction/safety/recovery/trigger', methods=['POST'])
+    def trigger_transaction_recovery():
+        """Manually trigger transaction recovery process"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not initialized"}), 503
+            
+            if not enhanced_wal.transaction_safety_service:
+                return jsonify({"error": "Transaction safety service not available"}), 503
+            
+            # Trigger recovery manually
+            enhanced_wal.transaction_safety_service.process_recovery_queue()
+            
+            return jsonify({
+                "success": True,
+                "message": "Transaction recovery triggered successfully"
+            }), 200
+            
+        except Exception as e:
+            return jsonify({"error": f"Failed to trigger recovery: {str(e)}"}), 500
+    
+    @app.route('/transaction/safety/transaction/<transaction_id>', methods=['GET'])
+    def get_transaction_status(transaction_id):
+        """Get status of a specific transaction"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not initialized"}), 503
+            
+            if not enhanced_wal.transaction_safety_service:
+                return jsonify({"error": "Transaction safety service not available"}), 503
+            
+            transaction = enhanced_wal.transaction_safety_service.get_transaction_status(transaction_id)
+            
+            if not transaction:
+                return jsonify({"error": f"Transaction {transaction_id} not found"}), 404
+            
+            return jsonify({
+                "transaction_id": transaction['transaction_id'],
+                "status": transaction['status'],
+                "method": transaction['method'],
+                "path": transaction['path'],
+                "operation_type": transaction.get('operation_type'),
+                "created_at": transaction['created_at'].isoformat() if transaction.get('created_at') else None,
+                "completed_at": transaction['completed_at'].isoformat() if transaction.get('completed_at') else None,
+                "retry_count": transaction.get('retry_count', 0),
+                "max_retries": transaction.get('max_retries', 3),
+                "is_timing_gap_failure": transaction.get('is_timing_gap_failure', False),
+                "failure_reason": transaction.get('failure_reason'),
+                "response_status": transaction.get('response_status')
+            }), 200
+            
+        except Exception as e:
+            return jsonify({"error": f"Failed to get transaction status: {str(e)}"}), 500
+    
+    @app.route('/transaction/safety/cleanup', methods=['POST'])
+    def cleanup_old_transactions():
+        """Clean up old completed transactions"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not initialized"}), 503
+            
+            if not enhanced_wal.transaction_safety_service:
+                return jsonify({"error": "Transaction safety service not available"}), 503
+            
+            # Get days parameter, default to 7 days
+            days_old = request.json.get('days_old', 7) if request.is_json else 7
+            
+            deleted_count = enhanced_wal.transaction_safety_service.cleanup_old_transactions(days_old)
+            
+            return jsonify({
+                "success": True,
+                "deleted_transactions": deleted_count,
+                "message": f"Cleaned up {deleted_count} old transactions older than {days_old} days"
+            }), 200
+            
+        except Exception as e:
+            return jsonify({"error": f"Failed to cleanup transactions: {str(e)}"}), 500
+
+    @app.route('/admin/create_mapping', methods=['POST'])
+    def admin_create_mapping():
+        """Admin endpoint to manually create collection mappings"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not initialized"}), 503
+            
+            request_data = request.get_json() or {}
+            collection_name = request_data.get('collection_name')
+            primary_id = request_data.get('primary_id')
+            replica_id = request_data.get('replica_id')
+            
+            if not collection_name:
+                return jsonify({"error": "collection_name is required"}), 400
+            
+            if not primary_id and not replica_id:
+                return jsonify({"error": "At least one of primary_id or replica_id is required"}), 400
+            
+            try:
+                with enhanced_wal.get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO collection_id_mapping 
+                            (collection_name, primary_collection_id, replica_collection_id, created_at)
+                            VALUES (%s, %s, %s, NOW())
+                            ON CONFLICT (collection_name) 
+                            DO UPDATE SET 
+                                primary_collection_id = COALESCE(EXCLUDED.primary_collection_id, collection_id_mapping.primary_collection_id),
+                                replica_collection_id = COALESCE(EXCLUDED.replica_collection_id, collection_id_mapping.replica_collection_id),
+                                updated_at = NOW()
+                        """, (collection_name, primary_id, replica_id))
+                        conn.commit()
+                
+                return jsonify({
+                    "success": True,
+                    "collection_name": collection_name,
+                    "primary_id": primary_id,
+                    "replica_id": replica_id,
+                    "message": f"Mapping created/updated for '{collection_name}'"
+                }), 200
+                
+            except Exception as e:
+                return jsonify({"error": f"Failed to create mapping: {str(e)}"}), 500
+            
+        except Exception as e:
+            return jsonify({"error": f"Admin create mapping failed: {str(e)}"}), 500
     
     @app.route('/debug/direct-primary', methods=['GET'])
     def debug_direct_primary():
@@ -3000,8 +3320,8 @@ if __name__ == '__main__':
             if request.content_type:
                 headers['Content-Type'] = request.content_type
             
-            # Forward the request through the load balancer
-            response = enhanced_wal.forward_request(
+            # Forward the request through the load balancer WITH TRANSACTION SAFETY
+            response = enhanced_wal.forward_request_with_transaction_safety(
                 method=request.method,
                 path=f"/{path}",
                 headers=headers,

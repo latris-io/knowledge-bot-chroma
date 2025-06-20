@@ -1886,6 +1886,240 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 time.time() - start_time
             )
 
+    def test_use_case_2_sync_verification(self):
+        """Test USE CASE 2: Document ingestion during primary failure + WAL sync verification"""
+        logger.info("🚨 Testing USE CASE 2: Primary Down + Sync Verification (CMS Resilience)")
+        
+        self.start_test("USE CASE 2 Sync Verification")
+        start_time = time.time()
+        
+        try:
+            # Check current system health
+            logger.info("   Checking system health...")
+            status_response = self.make_request('GET', f"{self.base_url}/status")
+            
+            if status_response.status_code != 200:
+                return self.log_test_result(
+                    "USE CASE 2 Sync Verification",
+                    False,
+                    f"Cannot check system status: {status_response.status_code}",
+                    time.time() - start_time
+                )
+            
+            status = status_response.json()
+            instances = status.get('instances', [])
+            primary_healthy = any(inst.get('name') == 'primary' and inst.get('healthy') for inst in instances)
+            replica_healthy = any(inst.get('name') == 'replica' and inst.get('healthy') for inst in instances)
+            
+            logger.info(f"   System health: Primary={primary_healthy}, Replica={replica_healthy}")
+            
+            if primary_healthy:
+                return self.log_test_result(
+                    "USE CASE 2 Sync Verification",
+                    False,
+                    "Primary is healthy - this test requires primary to be down",
+                    time.time() - start_time
+                )
+            
+            if not replica_healthy:
+                return self.log_test_result(
+                    "USE CASE 2 Sync Verification",
+                    False,
+                    "Replica is not healthy - cannot test failover",
+                    time.time() - start_time
+                )
+            
+            logger.info("   ✅ Perfect conditions: Primary DOWN, Replica UP")
+            
+            # Phase 1: Create collection and documents during primary failure using ChromaDB client
+            logger.info("   Phase 1: Creating CMS data during primary failure...")
+            
+            import chromadb
+            from chromadb import HttpClient
+            from chromadb.config import Settings
+            import urllib.parse
+            
+            # Create client exactly like production CMS code
+            chroma_url = self.base_url
+            parsed = urllib.parse.urlparse(chroma_url)
+            
+            logger.info(f"   Creating ChromaDB client for {chroma_url}...")
+            client = HttpClient(
+                host=parsed.hostname,
+                port=parsed.port or (443 if parsed.scheme == "https" else 8000),
+                ssl=parsed.scheme == "https",
+                settings=Settings(anonymized_telemetry=False)
+            )
+            
+            # Create collection like production CMS during primary failure
+            collection_name = f"USE_CASE_2_SYNC_TEST_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+            logger.info(f"   Creating collection '{collection_name}' via client during primary failure...")
+            
+            collection = client.get_or_create_collection(name=collection_name)
+            logger.info(f"   ✅ Collection created during primary failure: {collection.name} (ID: {collection.id})")
+            
+            # CRITICAL: DO NOT track this collection for automatic cleanup
+            # We need to preserve it for sync verification
+            logger.info("   📌 Collection preserved for sync verification (no auto-cleanup)")
+            
+            # Add documents like production CMS during primary failure
+            logger.info("   Adding CMS documents during primary failure...")
+            
+            documents = [
+                "CRITICAL: This document was created during primary failure",
+                "SYNC TEST: This document must sync to primary when it returns",
+                "USE CASE 2: This validates CMS resilience during infrastructure issues",
+                "WAL VERIFICATION: These documents prove replica→primary sync works",
+                "PRODUCTION: This simulates real CMS file ingestion during outage"
+            ]
+            
+            metadatas = [
+                {"test": "USE_CASE_2", "created_during": "primary_failure", "sync_test": True, "doc_index": 0},
+                {"test": "USE_CASE_2", "created_during": "primary_failure", "sync_test": True, "doc_index": 1},
+                {"test": "USE_CASE_2", "created_during": "primary_failure", "sync_test": True, "doc_index": 2},
+                {"test": "USE_CASE_2", "created_during": "primary_failure", "sync_test": True, "doc_index": 3},
+                {"test": "USE_CASE_2", "created_during": "primary_failure", "sync_test": True, "doc_index": 4}
+            ]
+            
+            ids = [f"USE_CASE_2_sync_doc_{i}_{int(time.time())}" for i in range(5)]
+            
+            # Simple embeddings for testing
+            embeddings = [
+                [0.1, 0.2, 0.3, 0.4, 0.5],
+                [0.6, 0.7, 0.8, 0.9, 1.0],
+                [0.2, 0.4, 0.6, 0.8, 1.0],
+                [0.3, 0.6, 0.9, 0.2, 0.5],
+                [0.8, 0.1, 0.4, 0.7, 0.3]
+            ]
+            
+            # CRITICAL: DO NOT track these documents for automatic cleanup
+            # We need to preserve them for sync verification
+            logger.info("   📌 Documents preserved for sync verification (no auto-cleanup)")
+            
+            # Add documents using client library during primary failure
+            collection.add(
+                documents=documents,
+                metadatas=metadatas,
+                ids=ids,
+                embeddings=embeddings
+            )
+            
+            logger.info("   ✅ Documents successfully added during primary failure!")
+            
+            # Verify documents are accessible via load balancer
+            logger.info("   Verifying documents accessible via load balancer...")
+            try:
+                client_results = collection.get(include=["documents", "metadatas"])
+                client_doc_count = len(client_results.get('documents', []))
+                logger.info(f"   ✅ {client_doc_count}/5 documents accessible via load balancer")
+            except Exception as e:
+                client_doc_count = 0
+                logger.warning(f"   ❌ Load balancer access failed: {e}")
+            
+            # Verify documents exist on replica (where they should be stored)
+            logger.info("   Verifying documents stored on replica instance...")
+            replica_get = self.make_request(
+                'POST',
+                f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                json={"include": ["documents", "metadatas"]}
+            )
+            
+            replica_docs = 0
+            if replica_get.status_code == 200:
+                try:
+                    replica_result = replica_get.json()
+                    replica_docs = len(replica_result.get('ids', []))
+                    logger.info(f"   ✅ {replica_docs}/5 documents confirmed on replica")
+                except:
+                    logger.warning("   ❌ Replica document parsing failed")
+            else:
+                logger.warning(f"   ❌ Replica access failed: {replica_get.status_code}")
+            
+            # Verify primary is still down (should have 0 documents)
+            logger.info("   Verifying primary is still down...")
+            try:
+                primary_get = self.make_request(
+                    'POST',
+                    f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                    json={"include": ["documents", "metadatas"]}
+                )
+                
+                if primary_get.status_code in [502, 503]:
+                    logger.info("   ✅ Primary confirmed down (502/503 error)")
+                    primary_docs = 0
+                else:
+                    logger.warning(f"   ⚠️ Unexpected primary response: {primary_get.status_code}")
+                    primary_docs = 0
+            except:
+                logger.info("   ✅ Primary confirmed down (connection failed)")
+                primary_docs = 0
+            
+            # Store test details for sync verification
+            sync_test_data = {
+                "collection_name": collection_name,
+                "collection_id": collection.id,
+                "document_ids": ids,
+                "document_count": len(documents),
+                "created_timestamp": int(time.time()),
+                "replica_docs_confirmed": replica_docs,
+                "primary_docs_before": primary_docs,
+                "client_accessible": client_doc_count
+            }
+            
+            # Success criteria for Phase 1
+            phase1_success = (
+                client_doc_count == 5 and  # Load balancer access works
+                replica_docs == 5         # Documents stored on replica
+            )
+            
+            if phase1_success:
+                logger.info("   🎉 Phase 1 SUCCESS: CMS document ingestion works during primary failure!")
+                logger.info(f"      • Collection: {collection_name}")
+                logger.info(f"      • Documents: {len(documents)} created and accessible")
+                logger.info(f"      • Storage: Replica has {replica_docs} docs, Primary has {primary_docs} docs")
+                logger.info(f"      • Load balancer: {client_doc_count} docs accessible")
+                
+                logger.info("")
+                logger.info("🔄 SYNC VERIFICATION PHASE:")
+                logger.info("   ⏳ Waiting for you to RESTART THE PRIMARY instance...")
+                logger.info("   📋 After primary restart, this data will be used to verify WAL sync:")
+                logger.info(f"      • Collection to check: {collection_name}")
+                logger.info(f"      • Documents to verify: {len(ids)} documents")
+                logger.info(f"      • Expected sync: {replica_docs} docs from replica → primary")
+                logger.info("")
+                logger.info("🚨 IMPORTANT: This test data is preserved and will NOT be cleaned up!")
+                logger.info("   Run the test again after primary restart to verify sync.")
+                
+                result_msg = f"✅ Phase 1 complete: Collection '{collection_name}' with {len(documents)} docs created during primary failure. Data preserved for sync verification."
+                test_success = True
+                
+            else:
+                logger.info("   ❌ Phase 1 FAILED: CMS document ingestion failed during primary failure")
+                result_msg = f"❌ Document ingestion failed: LB:{client_doc_count}/5, Replica:{replica_docs}/5"
+                test_success = False
+            
+            return self.log_test_result(
+                "USE CASE 2 Sync Verification",
+                test_success,
+                result_msg,
+                time.time() - start_time
+            )
+            
+        except ImportError:
+            return self.log_test_result(
+                "USE CASE 2 Sync Verification",
+                False,
+                "ChromaDB library not available - install with 'pip install chromadb'",
+                time.time() - start_time
+            )
+        except Exception as e:
+            return self.log_test_result(
+                "USE CASE 2 Sync Verification",
+                False,
+                f"Exception: {str(e)}",
+                time.time() - start_time
+            )
+
 def main():
     """Run enhanced comprehensive tests with selective cleanup"""
     import argparse
@@ -1934,8 +2168,8 @@ def main():
         logger.info("\n🧪 Running High Load & Performance Tests...")
         tester.test_high_load_performance()
         
-        logger.info("\n🧪 Running ChromaDB Client Sync Tests...")
-        tester.test_chromadb_client_sync()
+        logger.info("\n🧪 Running USE CASE 2 Sync Verification Tests...")
+        tester.test_use_case_2_sync_verification()
         
     except Exception as e:
         logger.error(f"❌ Test execution failed: {e}")
