@@ -1,5 +1,32 @@
 # ChromaDB Load Balancer - Production Use Cases
 
+## 🚨 **CRITICAL: Production Data Protection**
+
+### **⚠️ NEVER DELETE PRODUCTION COLLECTIONS**
+
+**IMPORTANT**: The `global` collection contains live production data and must **NEVER** be deleted during testing or cleanup operations.
+
+**Protection Guidelines**:
+- ✅ Always filter out `global` from test cleanup scripts
+- ✅ Use test collection prefixes like `AUTOTEST_`, `test_`, `DEBUG_`
+- ✅ Verify cleanup targets before running cleanup scripts
+- ❌ **NEVER** run cleanup on collections without prefixes
+- ❌ **NEVER** delete mappings for `global` collection
+
+**Emergency Recovery**: If production mappings are accidentally deleted:
+```bash
+# Get UUIDs from both instances first:
+curl -s "https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections" | jq '.[] | select(.name == "global")'
+curl -s "https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections" | jq '.[] | select(.name == "global")'
+
+# Restore mapping using admin endpoint:
+curl -X POST "https://chroma-load-balancer.onrender.com/admin/create_mapping" \
+     -H "Content-Type: application/json" \
+     -d '{"collection_name": "global", "primary_id": "PRIMARY_UUID", "replica_id": "REPLICA_UUID"}'
+```
+
+---
+
 This document outlines the main production use cases supported by the ChromaDB load balancer system, the tests that validate each scenario, and instructions for manual validation.
 
 ## 🎯 **Core Architecture**
