@@ -1939,28 +1939,34 @@ class UnifiedWALLoadBalancer:
             primary = self.get_primary_instance()
             
             # Use read replica ratio to determine routing
-            if replica and primary and random.random() < self.read_replica_ratio:
+            if replica and replica.is_healthy and primary and primary.is_healthy and random.random() < self.read_replica_ratio:
                 return replica
-            elif primary:
+            elif primary and primary.is_healthy:
                 return primary
-            else:
+            elif replica and replica.is_healthy:
                 return replica
+            else:
+                return None
         
-        # 🔧 CRITICAL FIX: Write operations MUST use primary first
-        # For write operations, strongly prefer primary instance
+        # 🔧 CRITICAL FIX: Write operations with HEALTH-BASED failover
+        # For write operations, prefer primary but failover to replica if primary unhealthy
         primary = self.get_primary_instance()
         replica = self.get_replica_instance()
         
-        # CRITICAL: Always try primary first for writes
-        if primary:
-            logger.info(f"🔄 WRITE OPERATION: Selecting primary instance (healthy: {primary.is_healthy})")
+        # CRITICAL FIX: Check instance HEALTH, not just existence
+        if primary and primary.is_healthy:
+            logger.info(f"🔄 WRITE OPERATION: Using healthy primary instance")
             return primary
-        elif replica:
-            # Only use replica if primary doesn't exist at all
-            logger.warning(f"⚠️ WRITE FAILOVER: No primary instance available, using replica")
+        elif replica and replica.is_healthy:
+            # WRITE FAILOVER: Use replica when primary is down/unhealthy
+            logger.warning(f"⚠️ WRITE FAILOVER: Primary unhealthy, failing over to replica")
             return replica
+        elif primary:
+            # Primary exists but unhealthy, and no healthy replica
+            logger.error(f"❌ WRITE OPERATION: Primary unhealthy, no healthy replica available")
+            return None
         else:
-            logger.error(f"❌ WRITE OPERATION: No instances available")
+            logger.error(f"❌ WRITE OPERATION: No instances configured")
             return None
 
     def forward_request(self, method: str, path: str, headers: Dict[str, str], 
@@ -2747,6 +2753,102 @@ if __name__ == '__main__':
                 "traceback": traceback.format_exc()
             }), 500
     
+    @app.route('/admin/instances/<instance_name>/health', methods=['POST'])
+    def set_instance_health(instance_name):
+        """Admin endpoint to control instance health for testing purposes"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not initialized"}), 503
+                
+            request_data = request.get_json() or {}
+            target_health = request_data.get('healthy', True)
+            duration = request_data.get('duration_seconds', 0)  # 0 = permanent
+            
+            # Find the target instance
+            target_instance = None
+            for instance in enhanced_wal.instances:
+                if instance.name == instance_name:
+                    target_instance = instance
+                    break
+            
+            if not target_instance:
+                return jsonify({
+                    "error": f"Instance '{instance_name}' not found",
+                    "available_instances": [inst.name for inst in enhanced_wal.instances]
+                }), 404
+            
+            # Store original health state
+            original_health = target_instance.is_healthy
+            
+            # Set new health state
+            target_instance.is_healthy = target_health
+            
+            logger.warning(f"🔧 ADMIN: Set {instance_name} health to {target_health} (was {original_health})")
+            
+            # If duration specified, schedule restoration
+            if duration > 0 and target_health != original_health:
+                def restore_health():
+                    time.sleep(duration)
+                    target_instance.is_healthy = original_health
+                    logger.warning(f"🔧 ADMIN: Restored {instance_name} health to {original_health} after {duration}s")
+                
+                import threading
+                restore_thread = threading.Thread(target=restore_health, daemon=True)
+                restore_thread.start()
+                
+                return jsonify({
+                    "success": True,
+                    "instance": instance_name,
+                    "health_set_to": target_health,
+                    "original_health": original_health,
+                    "will_restore_in_seconds": duration,
+                    "message": f"Health temporarily set for testing - will auto-restore"
+                })
+            else:
+                return jsonify({
+                    "success": True,
+                    "instance": instance_name, 
+                    "health_set_to": target_health,
+                    "original_health": original_health,
+                    "permanent": True,
+                    "message": f"Health permanently set for testing"
+                })
+                
+        except Exception as e:
+            logger.error(f"Admin health control error: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route('/admin/instances', methods=['GET'])
+    def get_instances_admin():
+        """Admin endpoint to get detailed instance information"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not initialized"}), 503
+                
+            instances_info = []
+            for instance in enhanced_wal.instances:
+                instances_info.append({
+                    "name": instance.name,
+                    "url": instance.url,
+                    "healthy": instance.is_healthy,
+                    "priority": instance.priority,
+                    "consecutive_failures": instance.consecutive_failures,
+                    "total_requests": instance.total_requests,
+                    "successful_requests": instance.successful_requests,
+                    "success_rate": instance.get_success_rate(),
+                    "last_health_check": instance.last_health_check.isoformat() if instance.last_health_check else None
+                })
+            
+            return jsonify({
+                "instances": instances_info,
+                "healthy_count": len([i for i in enhanced_wal.instances if i.is_healthy]),
+                "total_count": len(enhanced_wal.instances)
+            })
+            
+        except Exception as e:
+            logger.error(f"Admin instances info error: {e}")
+            return jsonify({"error": str(e)}), 500
+
     @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
         """Proxy all other requests through the load balancer"""

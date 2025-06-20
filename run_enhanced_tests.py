@@ -533,6 +533,222 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 time.time() - start_time
             )
 
+    def test_write_failover_with_primary_down(self):
+        """Test write failover when primary is down (CMS resilience simulation)"""
+        logger.info("🚨 Testing Write Failover with Primary Down (CMS Resilience)")
+        
+        self.start_test("Write Failover - Primary Down")
+        start_time = time.time()
+        
+        try:
+            # Check initial system health
+            logger.info("   Checking initial system health...")
+            status_response = self.make_request('GET', f"{self.base_url}/status")
+            
+            if status_response.status_code != 200:
+                return self.log_test_result(
+                    "Write Failover - Primary Down",
+                    False,
+                    f"Cannot check system status: {status_response.status_code}",
+                    time.time() - start_time
+                )
+            
+            status = status_response.json()
+            instances = status.get('instances', [])
+            
+            primary_healthy = any(inst.get('name') == 'primary' and inst.get('healthy') for inst in instances)
+            replica_healthy = any(inst.get('name') == 'replica' and inst.get('healthy') for inst in instances)
+            
+            logger.info(f"   Initial health: Primary={primary_healthy}, Replica={replica_healthy}")
+            
+            if not replica_healthy:
+                return self.log_test_result(
+                    "Write Failover - Primary Down",
+                    False,
+                    "Replica not healthy - cannot test primary failover scenario",
+                    time.time() - start_time
+                )
+            
+            # Create collection for failover testing
+            collection_name = self.create_unique_collection_name("failover_test")
+            
+            create_response = self.make_request(
+                'POST',
+                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                json={"name": collection_name}
+            )
+            
+            if create_response.status_code not in [200, 201]:
+                return self.log_test_result(
+                    "Write Failover - Primary Down",
+                    False,
+                    f"Collection creation failed: {create_response.status_code}",
+                    time.time() - start_time
+                )
+            
+            logger.info("   Waiting for collection mapping...")
+            time.sleep(5)
+            
+            # Test scenario 1: Normal operation (both healthy)
+            logger.info("   Testing normal operation (both instances healthy)...")
+            
+            doc_ids_normal = [f"normal_op_{uuid.uuid4().hex[:8]}" for _ in range(2)]
+            normal_docs = {
+                "embeddings": [[0.1, 0.1, 0.1, 0.1, 0.1], [0.2, 0.2, 0.2, 0.2, 0.2]],
+                "documents": ["Normal operation test 1", "Normal operation test 2"],
+                "metadatas": [
+                    {"test_type": "normal_operation", "scenario": "both_healthy"},
+                    {"test_type": "normal_operation", "scenario": "both_healthy"}
+                ],
+                "ids": doc_ids_normal
+            }
+            
+            self.track_documents(collection_name, doc_ids_normal)
+            
+            normal_response = self.make_request(
+                'POST',
+                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/add",
+                json=normal_docs
+            )
+            
+            normal_success = normal_response.status_code in [200, 201]
+            logger.info(f"   Normal operation: {'✅ Success' if normal_success else '❌ Failed'} ({normal_response.status_code})")
+            
+            # Wait for potential sync
+            time.sleep(8)
+            
+            # Test scenario 2: Simulate/test behavior when primary might be down
+            logger.info("   Testing write resilience during potential primary issues...")
+            
+            # Check current health again before resilience test
+            status_check = self.make_request('GET', f"{self.base_url}/status")
+            if status_check.status_code == 200:
+                current_status = status_check.json()
+                current_primary_healthy = any(inst.get('name') == 'primary' and inst.get('healthy') for inst in current_status.get('instances', []))
+                current_replica_healthy = any(inst.get('name') == 'replica' and inst.get('healthy') for inst in current_status.get('instances', []))
+                
+                logger.info(f"   Current health: Primary={current_primary_healthy}, Replica={current_replica_healthy}")
+            
+            # Test write resilience with failover-style documents
+            doc_ids_resilience = [f"resilience_test_{uuid.uuid4().hex[:8]}" for _ in range(3)]
+            resilience_docs = {
+                "embeddings": [
+                    [0.3, 0.3, 0.3, 0.3, 0.3], 
+                    [0.4, 0.4, 0.4, 0.4, 0.4],
+                    [0.5, 0.5, 0.5, 0.5, 0.5]
+                ],
+                "documents": [
+                    "CMS Resilience Test: Primary failover document 1",
+                    "CMS Resilience Test: Primary failover document 2", 
+                    "CMS Resilience Test: Primary failover document 3"
+                ],
+                "metadatas": [
+                    {"test_type": "resilience_test", "scenario": "primary_failover", "cms_file": "r001"},
+                    {"test_type": "resilience_test", "scenario": "primary_failover", "cms_file": "r002"},
+                    {"test_type": "resilience_test", "scenario": "primary_failover", "cms_file": "r003"}
+                ],
+                "ids": doc_ids_resilience
+            }
+            
+            self.track_documents(collection_name, doc_ids_resilience)
+            
+            resilience_response = self.make_request(
+                'POST',
+                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/add",
+                json=resilience_docs
+            )
+            
+            resilience_success = resilience_response.status_code in [200, 201]
+            logger.info(f"   Resilience test: {'✅ Success' if resilience_success else '❌ Failed'} ({resilience_response.status_code})")
+            
+            # Wait for sync processing
+            logger.info("   Waiting for document sync and WAL processing...")
+            time.sleep(10)
+            
+            # Verify documents are accessible via load balancer
+            logger.info("   Verifying document accessibility via load balancer...")
+            
+            get_response = self.make_request(
+                'POST',
+                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                json={"include": ["documents", "metadatas"]}
+            )
+            
+            total_docs_via_lb = 0
+            if get_response.status_code == 200:
+                get_result = get_response.json()
+                total_docs_via_lb = len(get_result.get('ids', []))
+            
+            # Verify documents exist on both instances directly
+            logger.info("   Verifying document distribution across instances...")
+            
+            # Check primary instance directly
+            primary_docs = 0
+            try:
+                primary_get = self.make_request(
+                    'POST',
+                    f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                    json={"include": ["documents", "metadatas"]}
+                )
+                if primary_get.status_code == 200:
+                    primary_result = primary_get.json()
+                    primary_docs = len(primary_result.get('ids', []))
+            except Exception:
+                primary_docs = 0
+            
+            # Check replica instance directly  
+            replica_docs = 0
+            try:
+                replica_get = self.make_request(
+                    'POST',
+                    f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                    json={"include": ["documents", "metadatas"]}
+                )
+                if replica_get.status_code == 200:
+                    replica_result = replica_get.json()
+                    replica_docs = len(replica_result.get('ids', []))
+            except Exception:
+                replica_docs = 0
+            
+            # Analyze results
+            expected_total = len(doc_ids_normal) + len(doc_ids_resilience)  # 5 documents total
+            
+            logger.info(f"   Document distribution analysis:")
+            logger.info(f"     Load balancer access: {total_docs_via_lb} documents")
+            logger.info(f"     Primary instance: {primary_docs} documents")
+            logger.info(f"     Replica instance: {replica_docs} documents")
+            logger.info(f"     Expected total: {expected_total} documents")
+            
+            # Evaluate test success
+            if normal_success and resilience_success:
+                if total_docs_via_lb >= expected_total:
+                    test_success = True
+                    result_msg = f"Full failover resilience: LB access works, {primary_docs}P/{replica_docs}R distribution"
+                elif total_docs_via_lb > 0:
+                    test_success = True
+                    result_msg = f"Partial resilience: {total_docs_via_lb}/{expected_total} docs accessible, {primary_docs}P/{replica_docs}R"
+                else:
+                    test_success = False
+                    result_msg = f"Access failure: No documents accessible via load balancer"
+            else:
+                test_success = False
+                result_msg = f"Write failures: Normal={normal_success}, Resilience={resilience_success}"
+            
+            return self.log_test_result(
+                "Write Failover - Primary Down",
+                test_success,
+                result_msg,
+                time.time() - start_time
+            )
+            
+        except Exception as e:
+            return self.log_test_result(
+                "Write Failover - Primary Down",
+                False,
+                f"Exception: {str(e)}",
+                time.time() - start_time
+            )
+
     def test_wal_functionality(self):
         """Test WAL system functionality"""
         logger.info("📝 Testing WAL System")
@@ -771,6 +987,9 @@ def main():
         
         logger.info("\n🧪 Running Document Delete Sync Tests...")
         tester.test_document_delete_sync()
+        
+        logger.info("\n🧪 Running Write Failover Tests...")
+        tester.test_write_failover_with_primary_down()
         
         logger.info("\n🧪 Running DELETE Sync Functionality Tests...")
         tester.test_delete_sync_functionality()

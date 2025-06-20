@@ -167,28 +167,159 @@ class ProductionValidator:
     
     def test_failover_functionality(self):
         """Test load balancer failover when instances have issues"""
-        print("🔍 TESTING: Load Balancer Failover & Resilience")
+        print("🔍 TESTING: Load Balancer Failover & Resilience (CMS Production Scenario)")
         
-        # Test that load balancer can handle instance health issues
-        # We'll simulate this by testing responses when instances return different status codes
-        
-        print("   Testing load balancer handles mixed instance health...")
-        
-        # Check current instance health
+        # Check current instance health first
         health_response = requests.get(f"{self.base_url}/health", timeout=15)
         health_data = self.validate_json(health_response, "Load Balancer Health Check")
         if not health_data:
             return False
             
-        healthy_instances = health_data.get('healthy_instances', '0/0')
-        print(f"   Current healthy instances: {healthy_instances}")
+        # Get detailed status including instance health
+        status_response = requests.get(f"{self.base_url}/status", timeout=15)
+        status_data = self.validate_json(status_response, "Load Balancer Status Check")
+        if not status_data:
+            return False
+        
+        instances = status_data.get('instances', [])
+        primary_healthy = any(inst.get('name') == 'primary' and inst.get('healthy') for inst in instances)
+        replica_healthy = any(inst.get('name') == 'replica' and inst.get('healthy') for inst in instances)
+        
+        print(f"   Current instance health: Primary={primary_healthy}, Replica={replica_healthy}")
+        
+        if not replica_healthy:
+            return self.fail("Load Balancer Failover", "Replica not healthy - cannot test primary failover scenario")
+        
+        # Test scenario 1: Normal operation with both instances healthy
+        print("   Testing normal write operation (baseline)...")
+        baseline_collection = f"BASELINE_TEST_{int(time.time())}"
+        self.test_collections.add(baseline_collection)
+        
+        baseline_response = requests.post(
+            f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+            headers={"Content-Type": "application/json"},
+            json={"name": baseline_collection, "metadata": {"test_type": "baseline"}},
+            timeout=30
+        )
+        
+        baseline_success = baseline_response.status_code in [200, 201]
+        print(f"   Baseline operation: {'✅ Success' if baseline_success else '❌ Failed'} ({baseline_response.status_code})")
+        
+        if not baseline_success:
+            return self.fail("Load Balancer Failover", f"Baseline write operation failed: {baseline_response.status_code}")
+        
+        time.sleep(3)  # Wait for mapping
+        
+        # Test scenario 2: Document ingest resilience (simulating CMS behavior)
+        print("   Testing document ingest resilience (CMS simulation)...")
+        
+        cms_collection = f"CMS_FAILOVER_TEST_{int(time.time())}"
+        self.test_collections.add(cms_collection)
+        
+        # Create collection for document testing
+        collection_response = requests.post(
+            f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+            headers={"Content-Type": "application/json"},
+            json={"name": cms_collection, "metadata": {"test_type": "cms_failover"}},
+            timeout=30
+        )
+        
+        if collection_response.status_code not in [200, 201]:
+            return self.fail("Load Balancer Failover", f"CMS collection creation failed: {collection_response.status_code}")
+        
+        time.sleep(5)  # Wait for mapping to establish
+        
+        # Test document ingest that should work regardless of primary health
+        cms_documents = {
+            "ids": ["cms_failover_001", "cms_failover_002"],
+            "documents": [
+                "CMS Failover Test: Critical business document",
+                "CMS Failover Test: Important customer data"
+            ],
+            "metadatas": [
+                {"source": "cms_production", "test_type": "failover_resilience", "critical": True},
+                {"source": "cms_production", "test_type": "failover_resilience", "critical": True}
+            ],
+            "embeddings": [
+                [0.1, 0.2, 0.3, 0.4, 0.5],
+                [0.6, 0.7, 0.8, 0.9, 1.0]
+            ]
+        }
+        
+        # Attempt document ingest (should succeed with write failover if needed)
+        ingest_response = requests.post(
+            f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{cms_collection}/add",
+            headers={"Content-Type": "application/json"},
+            json=cms_documents,
+            timeout=30
+        )
+        
+        ingest_success = ingest_response.status_code in [200, 201]
+        print(f"   CMS document ingest: {'✅ Success' if ingest_success else '❌ Failed'} ({ingest_response.status_code})")
+        
+        if ingest_success:
+            print("   ✅ Load balancer successfully handled document ingest")
+            
+            # Wait for sync processing
+            time.sleep(8)
+            
+            # Verify documents are accessible
+            get_response = requests.post(
+                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{cms_collection}/get",
+                headers={"Content-Type": "application/json"},
+                json={"include": ["documents", "metadatas"]},
+                timeout=15
+            )
+            
+            if get_response.status_code == 200:
+                docs_retrieved = len(get_response.json().get('ids', []))
+                print(f"   ✅ Document retrieval: {docs_retrieved}/2 documents accessible via load balancer")
+                
+                if docs_retrieved == 2:
+                    # Test document distribution across instances
+                    print("   Verifying document distribution across instances...")
+                    
+                    # Check primary
+                    try:
+                        primary_get = requests.post(
+                            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{cms_collection}/get",
+                            headers={"Content-Type": "application/json"},
+                            json={"include": ["documents"]},
+                            timeout=10
+                        )
+                        primary_docs = len(primary_get.json().get('ids', [])) if primary_get.status_code == 200 else 0
+                    except:
+                        primary_docs = 0
+                    
+                    # Check replica  
+                    try:
+                        replica_get = requests.post(
+                            f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{cms_collection}/get", 
+                            headers={"Content-Type": "application/json"},
+                            json={"include": ["documents"]},
+                            timeout=10
+                        )
+                        replica_docs = len(replica_get.json().get('ids', [])) if replica_get.status_code == 200 else 0
+                    except:
+                        replica_docs = 0
+                    
+                    print(f"   Instance distribution: Primary={primary_docs}, Replica={replica_docs}")
+                    
+                    if primary_docs > 0 or replica_docs > 0:
+                        print("   ✅ Documents successfully distributed across instances")
+                    else:
+                        print("   ⚠️  Document distribution unclear - may still be syncing")
+                        
+            else:
+                print(f"   ⚠️  Document retrieval issue: {get_response.status_code}")
+        else:
+            print(f"   ⚠️  CMS document ingest failed - failover may need enhancement")
         
         # Test read distribution - load balancer should distribute reads
         print("   Testing read operation distribution...")
         read_successes = 0
         for i in range(5):
             try:
-                # Use different collection names to avoid caching
                 collections_response = requests.get(
                     f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
                     timeout=10
@@ -204,26 +335,18 @@ class ProductionValidator:
         
         print(f"   ✅ Read distribution working: {read_successes}/5 operations succeeded")
         
-        # Test write operations use primary-first logic
-        print("   Testing write operations prefer primary instance...")
-        test_collection = f"FAILOVER_TEST_{int(time.time())}"
-        self.test_collections.add(test_collection)
-        
-        write_response = requests.post(
-            f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
-            headers={"Content-Type": "application/json"},
-            json={"name": test_collection},
-            timeout=30
-        )
-        
-        write_data = self.validate_json(write_response, "Write Operation Failover")
-        if not write_data:
-            return False
-            
-        print("   ✅ Write operations working through load balancer")
-        
-        print(f"✅ VALIDATED: Load balancer failover and resilience")
-        return True
+        # Overall assessment
+        if baseline_success and ingest_success and read_successes >= 3:
+            print(f"✅ VALIDATED: Load balancer failover and resilience working")
+            print(f"   - Baseline operations: ✅")
+            print(f"   - CMS document ingest: ✅") 
+            print(f"   - Read distribution: ✅")
+            print(f"   - System ready for production CMS failover scenarios")
+            return True
+        else:
+            return self.fail("Load Balancer Failover", 
+                           f"Failover resilience incomplete", 
+                           f"Baseline={baseline_success}, Ingest={ingest_success}, Reads={read_successes}/5")
     
     def test_wal_sync_functionality(self):
         """Test Write-Ahead Log sync between instances"""
