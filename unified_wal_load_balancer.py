@@ -1012,7 +1012,7 @@ class UnifiedWALLoadBalancer:
             with self.get_db_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     # Get writes that need to be synced to this instance
-                    # Include both PENDING (DELETEs) and EXECUTED (other operations) statuses
+                    # FIXED: Proper logic for document sync from replica to primary and vice versa
                     cur.execute("""
                         SELECT write_id, method, path, data, headers, collection_id, 
                                timestamp, retry_count, data_size_bytes, priority, executed_on
@@ -1022,17 +1022,19 @@ class UnifiedWALLoadBalancer:
                             -- For PENDING operations (DELETEs), sync to target_instance if it's BOTH or matches
                             (status = 'pending' AND (target_instance = 'both' OR target_instance = %s))
                             OR
-                            -- For EXECUTED operations, use original logic
+                            -- CRITICAL FIX: For EXECUTED operations, sync from source to target
                             (status = 'executed' AND (
                                 target_instance = 'both' OR 
-                                (target_instance = %s AND executed_on != %s) OR
-                                (target_instance != %s AND executed_on != %s)
+                                -- Sync replica→primary: executed on replica, targeting primary
+                                (executed_on = 'replica' AND %s = 'primary') OR
+                                -- Sync primary→replica: executed on primary, targeting replica  
+                                (executed_on = 'primary' AND %s = 'replica')
                             ))
                         )
                         AND retry_count < 3
                         ORDER BY priority DESC, timestamp ASC
                         LIMIT %s
-                    """, (target_instance, target_instance, target_instance, target_instance, target_instance, batch_size * 3))
+                    """, (target_instance, target_instance, target_instance, batch_size * 3))
                     
                     all_writes = cur.fetchall()
                     
@@ -1374,6 +1376,13 @@ class UnifiedWALLoadBalancer:
                 return
             
             logger.info(f"🚀 High-volume sync: {len(all_batches)} batches, {sum(b.batch_size for b in all_batches)} total writes")
+            
+            # Debug: Show what's being synced where
+            for batch in all_batches:
+                executed_writes = [w for w in batch.writes if w.get('executed_on')]
+                if executed_writes:
+                    source_instances = set(w.get('executed_on') for w in executed_writes)
+                    logger.info(f"📋 Syncing {len(executed_writes)} writes from {source_instances} → {batch.target_instance}")
             
             total_success = 0
             total_failed = 0
