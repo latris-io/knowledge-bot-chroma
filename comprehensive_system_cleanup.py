@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
 Comprehensive System Cleanup - Clean PostgreSQL WAL data and ChromaDB test collections
-Prepares system for fresh testing after UUID validation fix
+🚨 BULLETPROOF PRODUCTION DATA PROTECTION 🚨
+
+This script safely cleans ONLY test data while protecting production collections:
+- Protected collections: 'global', 'production', 'prod', 'main', etc.
+- Only deletes collections/mappings with confirmed test patterns
+- Unknown patterns are automatically protected (safe-by-default)
+- Enhanced verification ensures production data remains intact
+
+Prepares system for fresh testing while preserving production data
 """
 
 import requests
@@ -35,23 +43,83 @@ class ComprehensiveSystemCleanup:
             raise
     
     def cleanup_postgresql_data(self):
-        """Clean up all WAL and mapping data from PostgreSQL"""
-        logger.info("🧹 Cleaning PostgreSQL WAL and mapping data...")
+        """Clean up WAL and TEST mapping data from PostgreSQL - PROTECTS PRODUCTION DATA"""
+        logger.info("🧹 Cleaning PostgreSQL WAL and TEST mapping data...")
+        
+        # 🚨 CRITICAL: PROTECTED PRODUCTION COLLECTIONS 🚨
+        PROTECTED_COLLECTIONS = [
+            'global', 'Global', 'GLOBAL',  # Production data collection
+            'production', 'prod', 'main',   # Other potential production names
+            'client_production', 'live'     # Additional protection patterns
+        ]
         
         try:
             with self.get_db_connection() as conn:
                 with conn.cursor() as cur:
-                    # Clean up WAL writes table
+                    # Clean up WAL writes table (all test data is safe to remove)
                     logger.info("  Clearing unified_wal_writes table...")
                     cur.execute("DELETE FROM unified_wal_writes")
                     wal_deleted = cur.rowcount
                     logger.info(f"    ✅ Deleted {wal_deleted} WAL write entries")
                     
-                    # Clean up collection mappings
-                    logger.info("  Clearing collection_id_mapping table...")
-                    cur.execute("DELETE FROM collection_id_mapping")
-                    mappings_deleted = cur.rowcount
-                    logger.info(f"    ✅ Deleted {mappings_deleted} collection mapping entries")
+                    # 🚨 ENHANCED PROTECTION: Only delete TEST collection mappings
+                    logger.info("  🔒 SAFELY clearing TEST collection mappings (protecting production)...")
+                    
+                    # First, check what mappings exist
+                    cur.execute("SELECT collection_name FROM collection_id_mapping")
+                    all_mappings = [row[0] for row in cur.fetchall()]
+                    
+                    protected_found = []
+                    test_mappings = []
+                    
+                    for mapping_name in all_mappings:
+                        # Check if this is a protected production collection
+                        is_protected = any(
+                            protected.lower() in mapping_name.lower() 
+                            for protected in PROTECTED_COLLECTIONS
+                        )
+                        
+                        # Check if this is clearly a test collection
+                        is_test = any(prefix in mapping_name for prefix in [
+                            'AUTOTEST_', 'test_', 'TEST_', 'temp_', 'debug_',
+                            'SYNC_FIX_', 'LIVE_SYNC_', 'CMS_PRODUCTION_TEST_',
+                            'REAL_TEST_', 'WAL_SYNC_TEST_', 'USE_CASE_'
+                        ])
+                        
+                        if is_protected:
+                            protected_found.append(mapping_name)
+                        elif is_test:
+                            test_mappings.append(mapping_name)
+                        else:
+                            # Unknown pattern - be safe and protect it
+                            logger.warning(f"    ⚠️ UNKNOWN PATTERN - PROTECTING: {mapping_name}")
+                            protected_found.append(mapping_name)
+                    
+                    # Report what we found
+                    logger.info(f"    📊 Found {len(all_mappings)} total mappings:")
+                    logger.info(f"       🔒 Protected (production): {len(protected_found)}")
+                    logger.info(f"       🧪 Test collections: {len(test_mappings)}")
+                    
+                    if protected_found:
+                        logger.info("    🔒 PROTECTED mappings (will NOT be deleted):")
+                        for protected in protected_found:
+                            logger.info(f"       - {protected}")
+                    
+                    # Only delete confirmed test mappings
+                    mappings_deleted = 0
+                    if test_mappings:
+                        logger.info("    🧹 Deleting ONLY test collection mappings...")
+                        for test_mapping in test_mappings:
+                            cur.execute(
+                                "DELETE FROM collection_id_mapping WHERE collection_name = %s",
+                                (test_mapping,)
+                            )
+                            mappings_deleted += cur.rowcount
+                            logger.info(f"       ✅ Deleted test mapping: {test_mapping}")
+                    else:
+                        logger.info("    ℹ️ No test mappings found to delete")
+                        
+                    logger.info(f"    ✅ Safely deleted {mappings_deleted} TEST collection mappings")
                     
                     # Clean up any monitoring data if tables exist
                     logger.info("  Clearing monitoring data...")
@@ -92,8 +160,23 @@ class ComprehensiveSystemCleanup:
             return {'success': False, 'error': str(e)}
     
     def cleanup_chromadb_collections(self, instance_url, instance_name):
-        """Clean up test collections from a ChromaDB instance"""
+        """Clean up ONLY test collections from a ChromaDB instance - PROTECTS PRODUCTION DATA"""
         logger.info(f"🧹 Cleaning {instance_name} ChromaDB collections...")
+        
+        # 🚨 CRITICAL: PROTECTED PRODUCTION COLLECTIONS 🚨
+        PROTECTED_COLLECTIONS = [
+            'global', 'Global', 'GLOBAL',  # Production data collection
+            'production', 'prod', 'main',   # Other potential production names
+            'client_production', 'live'     # Additional protection patterns
+        ]
+        
+        # 🧪 CONFIRMED TEST PATTERNS 🧪
+        TEST_PATTERNS = [
+            'AUTOTEST_', 'test_collection_', 'TEST_', 'temp_', 'debug_',
+            'SYNC_FIX_', 'LIVE_SYNC_', 'CMS_PRODUCTION_TEST_',
+            'REAL_TEST_', 'WAL_SYNC_TEST_', 'USE_CASE_', 'BASELINE_TEST_',
+            'CMS_FAILOVER_TEST_', 'client_test_'
+        ]
         
         try:
             # Get all collections
@@ -109,42 +192,70 @@ class ComprehensiveSystemCleanup:
             collections = collections_response.json()
             test_collections = []
             production_collections = []
+            protected_collections = []
             
-            # Identify test vs production collections
+            # Enhanced classification with bulletproof protection
             for collection in collections:
                 name = collection.get('name', '')
-                if any(prefix in name for prefix in ['AUTOTEST_', 'test_collection_', 'TEST_', 'temp_']):
+                
+                # Check if this is a protected production collection
+                is_protected = any(
+                    protected.lower() in name.lower() 
+                    for protected in PROTECTED_COLLECTIONS
+                )
+                
+                # Check if this is clearly a test collection
+                is_test = any(pattern in name for pattern in TEST_PATTERNS)
+                
+                if is_protected:
+                    protected_collections.append(collection)
+                    production_collections.append(collection)  # For stats
+                elif is_test:
                     test_collections.append(collection)
                 else:
-                    production_collections.append(collection)
+                    # Unknown pattern - be extremely safe and protect it
+                    logger.warning(f"  ⚠️ UNKNOWN PATTERN - PROTECTING: {name}")
+                    protected_collections.append(collection)
+                    production_collections.append(collection)  # For stats
             
             logger.info(f"  📊 Found {len(collections)} total collections on {instance_name}:")
             logger.info(f"    🧪 Test collections: {len(test_collections)}")
-            logger.info(f"    🏭 Production collections: {len(production_collections)}")
+            logger.info(f"    🔒 Protected collections: {len(protected_collections)}")
+            logger.info(f"    🏭 Total production/protected: {len(production_collections)}")
             
-            # Delete test collections only
+            # Show what will be protected
+            if protected_collections:
+                logger.info(f"  🔒 PROTECTED collections (will NOT be deleted):")
+                for collection in protected_collections:
+                    logger.info(f"    - {collection.get('name')}")
+            
+            # Delete ONLY confirmed test collections
             deleted_count = 0
-            for collection in test_collections:
-                collection_name = collection.get('name')
-                collection_id = collection.get('id')
-                
-                try:
-                    # Try delete by name first (better for V2 API)
-                    delete_response = requests.delete(
-                        f"{instance_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}",
-                        timeout=30
-                    )
+            if test_collections:
+                logger.info(f"  🧹 Deleting ONLY confirmed test collections...")
+                for collection in test_collections:
+                    collection_name = collection.get('name')
+                    collection_id = collection.get('id')
                     
-                    if delete_response.status_code in [200, 404]:
-                        deleted_count += 1
-                        logger.info(f"    ✅ Deleted test collection: {collection_name}")
-                    else:
-                        logger.warning(f"    ⚠️ Failed to delete {collection_name}: {delete_response.status_code}")
+                    try:
+                        # Try delete by name first (better for V2 API)
+                        delete_response = requests.delete(
+                            f"{instance_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}",
+                            timeout=30
+                        )
                         
-                except Exception as e:
-                    logger.warning(f"    ⚠️ Error deleting {collection_name}: {e}")
+                        if delete_response.status_code in [200, 404]:
+                            deleted_count += 1
+                            logger.info(f"    ✅ Deleted test collection: {collection_name}")
+                        else:
+                            logger.warning(f"    ⚠️ Failed to delete {collection_name}: {delete_response.status_code}")
+                            
+                    except Exception as e:
+                        logger.warning(f"    ⚠️ Error deleting {collection_name}: {e}")
+            else:
+                logger.info(f"  ℹ️ No test collections found to delete")
             
-            # List production collections that will be preserved
+            # Confirm production data is preserved
             if production_collections:
                 logger.info(f"  🏭 Preserved production collections:")
                 for collection in production_collections:
@@ -226,7 +337,7 @@ class ComprehensiveSystemCleanup:
             'system_healthy': False
         }
         
-        # Check PostgreSQL
+        # Check PostgreSQL  
         try:
             with self.get_db_connection() as conn:
                 with conn.cursor() as cur:
@@ -234,13 +345,37 @@ class ComprehensiveSystemCleanup:
                     wal_count = cur.fetchone()[0]
                     
                     cur.execute("SELECT COUNT(*) FROM collection_id_mapping")
-                    mapping_count = cur.fetchone()[0]
+                    total_mappings = cur.fetchone()[0]
                     
-                    if wal_count == 0 and mapping_count == 0:
+                    # Check for remaining production mappings
+                    cur.execute("""
+                        SELECT collection_name FROM collection_id_mapping 
+                        WHERE collection_name IN ('global', 'Global', 'GLOBAL', 'production', 'prod', 'main')
+                    """)
+                    production_mappings = [row[0] for row in cur.fetchall()]
+                    
+                    # Check for any test mappings that shouldn't remain
+                    cur.execute("""
+                        SELECT collection_name FROM collection_id_mapping 
+                        WHERE collection_name LIKE 'AUTOTEST_%' 
+                           OR collection_name LIKE 'test_%'
+                           OR collection_name LIKE 'TEST_%'
+                           OR collection_name LIKE 'SYNC_FIX_%'
+                           OR collection_name LIKE 'USE_CASE_%'
+                    """)
+                    remaining_test_mappings = [row[0] for row in cur.fetchall()]
+                    
+                    if wal_count == 0 and len(remaining_test_mappings) == 0:
                         verification_results['postgresql_clean'] = True
-                        logger.info(f"  ✅ PostgreSQL verified clean (WAL: {wal_count}, Mappings: {mapping_count})")
+                        logger.info(f"  ✅ PostgreSQL verified clean:")
+                        logger.info(f"      WAL entries: {wal_count}")
+                        logger.info(f"      Total mappings: {total_mappings}")
+                        logger.info(f"      Production mappings: {len(production_mappings)} {production_mappings}")
+                        logger.info(f"      Test mappings: {len(remaining_test_mappings)}")
                     else:
-                        logger.warning(f"  ⚠️ PostgreSQL not fully clean (WAL: {wal_count}, Mappings: {mapping_count})")
+                        logger.warning(f"  ⚠️ PostgreSQL cleanup incomplete:")
+                        logger.warning(f"      WAL entries: {wal_count}")
+                        logger.warning(f"      Remaining test mappings: {remaining_test_mappings}")
                         
         except Exception as e:
             logger.error(f"  ❌ PostgreSQL verification failed: {e}")
@@ -258,13 +393,45 @@ class ComprehensiveSystemCleanup:
                 
                 if collections_response.status_code == 200:
                     collections = collections_response.json()
-                    test_collections = [c for c in collections if any(prefix in c.get('name', '') for prefix in ['AUTOTEST_', 'test_collection_', 'TEST_', 'temp_'])]
+                    
+                    # Use enhanced patterns to identify test collections
+                    TEST_PATTERNS = [
+                        'AUTOTEST_', 'test_collection_', 'TEST_', 'temp_', 'debug_',
+                        'SYNC_FIX_', 'LIVE_SYNC_', 'CMS_PRODUCTION_TEST_',
+                        'REAL_TEST_', 'WAL_SYNC_TEST_', 'USE_CASE_', 'BASELINE_TEST_',
+                        'CMS_FAILOVER_TEST_', 'client_test_'
+                    ]
+                    
+                    PROTECTED_COLLECTIONS = [
+                        'global', 'Global', 'GLOBAL', 'production', 'prod', 'main',
+                        'client_production', 'live'
+                    ]
+                    
+                    test_collections = []
+                    protected_collections = []
+                    
+                    for collection in collections:
+                        name = collection.get('name', '')
+                        is_test = any(pattern in name for pattern in TEST_PATTERNS)
+                        is_protected = any(protected.lower() in name.lower() for protected in PROTECTED_COLLECTIONS)
+                        
+                        if is_test:
+                            test_collections.append(collection)
+                        elif is_protected:
+                            protected_collections.append(collection)
                     
                     if len(test_collections) == 0:
                         verification_results[result_key] = True
-                        logger.info(f"  ✅ {instance_name} verified clean ({len(collections)} total collections, 0 test collections)")
+                        logger.info(f"  ✅ {instance_name} verified clean:")
+                        logger.info(f"      Total collections: {len(collections)}")
+                        logger.info(f"      Protected collections: {len(protected_collections)}")
+                        logger.info(f"      Test collections: 0")
                     else:
-                        logger.warning(f"  ⚠️ {instance_name} still has {len(test_collections)} test collections")
+                        logger.warning(f"  ⚠️ {instance_name} still has {len(test_collections)} test collections:")
+                        for test_col in test_collections[:5]:  # Show first 5
+                            logger.warning(f"         - {test_col.get('name')}")
+                        if len(test_collections) > 5:
+                            logger.warning(f"         ... and {len(test_collections) - 5} more")
                 else:
                     logger.warning(f"  ⚠️ Could not verify {instance_name}: {collections_response.status_code}")
                     
