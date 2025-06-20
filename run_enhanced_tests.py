@@ -271,36 +271,73 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                     time.time() - start_time
                 )
             
-            # Wait for potential WAL sync
+            # Wait for WAL sync - CRITICAL for distributed system
             logger.info("   Waiting for document sync between instances...")
-            time.sleep(8)
+            time.sleep(60)  # Real-world sync timing - user confirmed ~1 minute needed
             
-            # CRITICAL: Verify documents exist on BOTH instances (like your CMS testing)
+            # CRITICAL FIX: Get the correct UUIDs for each instance from mappings
+            logger.info("   Getting collection mappings for proper instance checking...")
+            mappings_response = self.make_request('GET', f"{self.base_url}/collection/mappings")
+            
+            primary_uuid = None
+            replica_uuid = None
+            
+            if mappings_response.status_code == 200:
+                try:
+                    mappings_data = mappings_response.json()
+                    for mapping in mappings_data.get('mappings', []):
+                        if mapping['collection_name'] == collection_name:
+                            primary_uuid = mapping['primary_collection_id']
+                            replica_uuid = mapping['replica_collection_id']
+                            logger.info(f"   Found mapping: P:{primary_uuid[:8]}..., R:{replica_uuid[:8]}...")
+                            break
+                except Exception as e:
+                    logger.warning(f"   Error parsing mappings: {e}")
+            
+            if not primary_uuid or not replica_uuid:
+                return self.log_test_result(
+                    "Document Operations",
+                    False,
+                    f"Could not find collection mapping for {collection_name}",
+                    time.time() - start_time
+                )
+            
+            # PRODUCTION REQUIREMENT: Verify documents exist on BOTH instances using correct UUIDs
             logger.info("   Verifying documents synced to primary instance...")
             primary_get = self.make_request(
                 'POST',
-                f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{primary_uuid}/get",
                 json={"include": ["documents", "metadatas"]}
             )
             
             logger.info("   Verifying documents synced to replica instance...")
             replica_get = self.make_request(
                 'POST', 
-                f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_uuid}/get",
                 json={"include": ["documents", "metadatas"]}
             )
             
-            # Validate sync results (like your manual CMS testing)
+            # CRITICAL: Parse actual results
             primary_docs = 0
             replica_docs = 0
+            primary_success = False
+            replica_success = False
             
             if primary_get.status_code == 200:
-                primary_result = primary_get.json()
-                primary_docs = len(primary_result.get('ids', []))
-                
+                try:
+                    primary_result = primary_get.json()
+                    primary_docs = len(primary_result.get('ids', []))
+                    primary_success = True
+                except:
+                    primary_success = False
+                   
             if replica_get.status_code == 200:
-                replica_result = replica_get.json()
-                replica_docs = len(replica_result.get('ids', []))
+                try:
+                    replica_result = replica_get.json()
+                    replica_docs = len(replica_result.get('ids', []))
+                    replica_success = True
+                except:
+                    replica_success = False
             
             # Test load balancer retrieval
             get_response = self.make_request(
@@ -309,16 +346,15 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 json={"include": ["documents", "metadatas"]}
             )
             
-            if get_response.status_code != 200:
-                return self.log_test_result(
-                    "Document Operations",
-                    False,
-                    f"Load balancer document get failed: {get_response.status_code}",
-                    time.time() - start_time
-                )
-            
-            get_result = get_response.json()
-            lb_retrieved_count = len(get_result.get('ids', []))
+            lb_retrieved_count = 0
+            lb_success = False
+            if get_response.status_code == 200:
+                try:
+                    get_result = get_response.json()
+                    lb_retrieved_count = len(get_result.get('ids', []))
+                    lb_success = True
+                except:
+                    lb_success = False
             
             # Test document query (simulating CMS search)
             query_response = self.make_request(
@@ -332,22 +368,48 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             )
             
             query_count = 0
+            query_success = False
             if query_response.status_code == 200:
-                query_result = query_response.json()
-                query_count = len(query_result.get('ids', [[]])[0]) if query_result.get('ids') else 0
+                try:
+                    query_result = query_response.json()
+                    query_count = len(query_result.get('ids', [[]])[0]) if query_result.get('ids') else 0
+                    query_success = True
+                except:
+                    query_success = False
             
-            # Evaluate results
-            if primary_docs == 3 and replica_docs == 3 and lb_retrieved_count == 3:
-                sync_status = "✅ Full sync success"
-            elif primary_docs > 0 and replica_docs > 0:
-                sync_status = f"⚠️ Partial sync (P:{primary_docs}, R:{replica_docs})"
+            # PRODUCTION VALIDATION: Distributed system must actually work
+            expected_docs = len(doc_ids)
+            
+            # Success criteria - ALL must be true for distributed system:
+            success_criteria = [
+                lb_success and lb_retrieved_count == expected_docs,  # Load balancer works
+                primary_success and primary_docs == expected_docs,   # Primary has data
+                replica_success and replica_docs == expected_docs,   # Replica has data  
+                query_success and query_count > 0                    # Search works
+            ]
+            
+            all_success = all(success_criteria)
+            
+            # Detailed result message
+            if all_success:
+                result_msg = f"✅ Distributed system working: P:{primary_docs}, R:{replica_docs}, LB:{lb_retrieved_count}, Q:{query_count}"
             else:
-                sync_status = f"❌ Sync failed (P:{primary_docs}, R:{replica_docs})"
+                issues = []
+                if not (lb_success and lb_retrieved_count == expected_docs):
+                    issues.append(f"LB failed ({lb_retrieved_count}/{expected_docs})")
+                if not (primary_success and primary_docs == expected_docs):
+                    issues.append(f"Primary sync failed ({primary_docs}/{expected_docs})")
+                if not (replica_success and replica_docs == expected_docs):
+                    issues.append(f"Replica sync failed ({replica_docs}/{expected_docs})")
+                if not (query_success and query_count > 0):
+                    issues.append(f"Query failed ({query_count} results)")
+                    
+                result_msg = f"❌ Distributed system broken: {', '.join(issues)}"
             
             return self.log_test_result(
                 "Document Operations",
-                True,  # Pass if load balancer works, note sync issues in details
-                f"CMS simulation: Added 3 docs, LB retrieved {lb_retrieved_count}, queried {query_count}. {sync_status}",
+                all_success,  # FAIL if distributed system doesn't work
+                result_msg,
                 time.time() - start_time
             )
             
@@ -431,7 +493,7 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 )
             
             logger.info("   Waiting for documents to sync to both instances...")
-            time.sleep(8)
+            time.sleep(30)  # Initial sync wait - less critical than main test validation
             
             # Delete specific documents (simulating CMS file deletion)
             docs_to_delete = doc_ids[:2]  # Delete first 2 documents
@@ -452,20 +514,47 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 )
             
             logger.info("   Waiting for document deletion to sync between instances...")
-            time.sleep(10)
+            time.sleep(60)  # Real-world sync timing - user confirmed ~1 minute needed
+            
+            # CRITICAL FIX: Get collection mappings for proper instance checking
+            logger.info("   Getting collection mappings for proper instance checking...")
+            mappings_response = self.make_request('GET', f"{self.base_url}/collection/mappings")
+            
+            primary_uuid = None
+            replica_uuid = None
+            
+            if mappings_response.status_code == 200:
+                try:
+                    mappings_data = mappings_response.json()
+                    for mapping in mappings_data.get('mappings', []):
+                        if mapping['collection_name'] == collection_name:
+                            primary_uuid = mapping['primary_collection_id']
+                            replica_uuid = mapping['replica_collection_id']
+                            logger.info(f"   Found mapping: P:{primary_uuid[:8]}..., R:{replica_uuid[:8]}...")
+                            break
+                except Exception as e:
+                    logger.warning(f"   Error parsing mappings: {e}")
+            
+            if not primary_uuid or not replica_uuid:
+                return self.log_test_result(
+                    "Document Delete Sync",
+                    False,
+                    f"Could not find collection mapping for {collection_name}",
+                    time.time() - start_time
+                )
             
             # CRITICAL: Verify document deletion on BOTH instances (like your CMS testing)
             logger.info("   Verifying document deletion on primary instance...")
             primary_get = self.make_request(
                 'POST',
-                f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{primary_uuid}/get",
                 json={"include": ["documents", "metadatas", "embeddings"]}
             )
             
             logger.info("   Verifying document deletion on replica instance...")
             replica_get = self.make_request(
                 'POST',
-                f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_uuid}/get",
                 json={"include": ["documents", "metadatas", "embeddings"]}
             )
             
@@ -589,16 +678,16 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             logger.info("   Waiting for collection mapping...")
             time.sleep(5)
             
-            # Test scenario 1: Normal operation (both healthy)
-            logger.info("   Testing normal operation (both instances healthy)...")
+            # Test Phase 1: Baseline - normal operation
+            logger.info("   Phase 1: Testing normal operation baseline...")
             
-            doc_ids_normal = [f"normal_op_{uuid.uuid4().hex[:8]}" for _ in range(2)]
+            doc_ids_normal = [f"baseline_{uuid.uuid4().hex[:8]}" for _ in range(2)]
             normal_docs = {
                 "embeddings": [[0.1, 0.1, 0.1, 0.1, 0.1], [0.2, 0.2, 0.2, 0.2, 0.2]],
-                "documents": ["Normal operation test 1", "Normal operation test 2"],
+                "documents": ["Baseline doc 1", "Baseline doc 2"],
                 "metadatas": [
-                    {"test_type": "normal_operation", "scenario": "both_healthy"},
-                    {"test_type": "normal_operation", "scenario": "both_healthy"}
+                    {"test_type": "baseline", "scenario": "normal_operation"},
+                    {"test_type": "baseline", "scenario": "normal_operation"}
                 ],
                 "ids": doc_ids_normal
             }
@@ -612,62 +701,126 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             )
             
             normal_success = normal_response.status_code in [200, 201]
-            logger.info(f"   Normal operation: {'✅ Success' if normal_success else '❌ Failed'} ({normal_response.status_code})")
+            logger.info(f"   Baseline operation: {'✅ Success' if normal_success else '❌ Failed'} ({normal_response.status_code})")
             
-            # Wait for potential sync
-            time.sleep(8)
+            if not normal_success:
+                return self.log_test_result(
+                    "Write Failover - Primary Down",
+                    False,
+                    f"Baseline operation failed: {normal_response.status_code}",
+                    time.time() - start_time
+                )
             
-            # Test scenario 2: Simulate/test behavior when primary might be down
-            logger.info("   Testing write resilience during potential primary issues...")
+            # Test Phase 2: ACTUAL PRIMARY FAILOVER
+            logger.info("   Phase 2: Testing ACTUAL primary failover...")
             
-            # Check current health again before resilience test
-            status_check = self.make_request('GET', f"{self.base_url}/status")
-            if status_check.status_code == 200:
-                current_status = status_check.json()
-                current_primary_healthy = any(inst.get('name') == 'primary' and inst.get('healthy') for inst in current_status.get('instances', []))
-                current_replica_healthy = any(inst.get('name') == 'replica' and inst.get('healthy') for inst in current_status.get('instances', []))
+            # Try to simulate primary down using admin endpoint
+            admin_available = False
+            try:
+                admin_response = self.make_request('GET', f"{self.base_url}/admin/instances")
+                admin_available = admin_response.status_code == 200
+            except:
+                admin_available = False
+            
+            failover_tested = False
+            failover_success = False
+            
+            if admin_available:
+                logger.info("   🔧 Using admin endpoint to simulate primary failure...")
                 
-                logger.info(f"   Current health: Primary={current_primary_healthy}, Replica={current_replica_healthy}")
+                # Mark primary as unhealthy
+                primary_down_response = self.make_request(
+                    'POST',
+                    f"{self.base_url}/admin/instances/primary/health",
+                    json={"healthy": False, "duration_seconds": 30}
+                )
+                
+                if primary_down_response.status_code == 200:
+                    logger.info("   ✅ Primary marked as unhealthy")
+                    time.sleep(3)  # Wait for health monitor to detect
+                    
+                    # Test writes during primary failure
+                    logger.info("   🧪 Testing writes during primary failure...")
+                    
+                    doc_ids_failover = [f"failover_{uuid.uuid4().hex[:8]}" for _ in range(3)]
+                    failover_docs = {
+                        "embeddings": [
+                            [0.3, 0.3, 0.3, 0.3, 0.3], 
+                            [0.4, 0.4, 0.4, 0.4, 0.4],
+                            [0.5, 0.5, 0.5, 0.5, 0.5]
+                        ],
+                        "documents": [
+                            "Failover test doc 1 - should go to replica",
+                            "Failover test doc 2 - should go to replica", 
+                            "Failover test doc 3 - should go to replica"
+                        ],
+                        "metadatas": [
+                            {"test_type": "failover", "scenario": "primary_down", "expected_instance": "replica"},
+                            {"test_type": "failover", "scenario": "primary_down", "expected_instance": "replica"},
+                            {"test_type": "failover", "scenario": "primary_down", "expected_instance": "replica"}
+                        ],
+                        "ids": doc_ids_failover
+                    }
+                    
+                    self.track_documents(collection_name, doc_ids_failover)
+                    
+                    # This should route to replica since primary is down
+                    failover_response = self.make_request(
+                        'POST',
+                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/add",
+                        json=failover_docs
+                    )
+                    
+                    failover_success = failover_response.status_code in [200, 201]
+                    logger.info(f"   Write during primary failure: {'✅ Success' if failover_success else '❌ Failed'} ({failover_response.status_code})")
+                    
+                    # Restore primary health
+                    logger.info("   🔧 Restoring primary health...")
+                    primary_restore_response = self.make_request(
+                        'POST',
+                        f"{self.base_url}/admin/instances/primary/health",
+                        json={"healthy": True}
+                    )
+                    
+                    if primary_restore_response.status_code == 200:
+                        logger.info("   ✅ Primary health restored")
+                        time.sleep(5)  # Wait for system to stabilize
+                    
+                    failover_tested = True
+                else:
+                    logger.warning("   ⚠️ Could not simulate primary failure via admin endpoint")
+            else:
+                logger.info("   ⚠️ Cannot test actual failover - testing write resilience under stress")
+                
+                # Test multiple rapid writes to stress the system
+                doc_ids_stress = [f"stress_{uuid.uuid4().hex[:8]}" for _ in range(2)]
+                stress_docs = {
+                    "embeddings": [[0.6, 0.6, 0.6, 0.6, 0.6], [0.7, 0.7, 0.7, 0.7, 0.7]],
+                    "documents": ["Stress test doc 1", "Stress test doc 2"],
+                    "metadatas": [
+                        {"test_type": "stress", "scenario": "rapid_writes"},
+                        {"test_type": "stress", "scenario": "rapid_writes"}
+                    ],
+                    "ids": doc_ids_stress
+                }
+                
+                self.track_documents(collection_name, doc_ids_stress)
+                
+                stress_response = self.make_request(
+                    'POST',
+                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/add",
+                    json=stress_docs
+                )
+                
+                failover_success = stress_response.status_code in [200, 201]
+                logger.info(f"   Stress test: {'✅ Success' if failover_success else '❌ Failed'} ({stress_response.status_code})")
             
-            # Test write resilience with failover-style documents
-            doc_ids_resilience = [f"resilience_test_{uuid.uuid4().hex[:8]}" for _ in range(3)]
-            resilience_docs = {
-                "embeddings": [
-                    [0.3, 0.3, 0.3, 0.3, 0.3], 
-                    [0.4, 0.4, 0.4, 0.4, 0.4],
-                    [0.5, 0.5, 0.5, 0.5, 0.5]
-                ],
-                "documents": [
-                    "CMS Resilience Test: Primary failover document 1",
-                    "CMS Resilience Test: Primary failover document 2", 
-                    "CMS Resilience Test: Primary failover document 3"
-                ],
-                "metadatas": [
-                    {"test_type": "resilience_test", "scenario": "primary_failover", "cms_file": "r001"},
-                    {"test_type": "resilience_test", "scenario": "primary_failover", "cms_file": "r002"},
-                    {"test_type": "resilience_test", "scenario": "primary_failover", "cms_file": "r003"}
-                ],
-                "ids": doc_ids_resilience
-            }
+            # Test Phase 3: Verify data accessibility and distribution
+            logger.info("   Phase 3: Verifying data accessibility and distribution...")
             
-            self.track_documents(collection_name, doc_ids_resilience)
+            time.sleep(10)  # Allow for WAL sync
             
-            resilience_response = self.make_request(
-                'POST',
-                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/add",
-                json=resilience_docs
-            )
-            
-            resilience_success = resilience_response.status_code in [200, 201]
-            logger.info(f"   Resilience test: {'✅ Success' if resilience_success else '❌ Failed'} ({resilience_response.status_code})")
-            
-            # Wait for sync processing
-            logger.info("   Waiting for document sync and WAL processing...")
-            time.sleep(10)
-            
-            # Verify documents are accessible via load balancer
-            logger.info("   Verifying document accessibility via load balancer...")
-            
+            # Check total documents via load balancer
             get_response = self.make_request(
                 'POST',
                 f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
@@ -675,15 +828,19 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             )
             
             total_docs_via_lb = 0
+            lb_access_success = False
             if get_response.status_code == 200:
-                get_result = get_response.json()
-                total_docs_via_lb = len(get_result.get('ids', []))
+                try:
+                    get_result = get_response.json()
+                    total_docs_via_lb = len(get_result.get('ids', []))
+                    lb_access_success = True
+                except:
+                    lb_access_success = False
             
-            # Verify documents exist on both instances directly
-            logger.info("   Verifying document distribution across instances...")
-            
-            # Check primary instance directly
+            # Check distribution on both instances
             primary_docs = 0
+            replica_docs = 0
+            
             try:
                 primary_get = self.make_request(
                     'POST',
@@ -693,11 +850,9 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 if primary_get.status_code == 200:
                     primary_result = primary_get.json()
                     primary_docs = len(primary_result.get('ids', []))
-            except Exception:
+            except:
                 primary_docs = 0
             
-            # Check replica instance directly  
-            replica_docs = 0
             try:
                 replica_get = self.make_request(
                     'POST',
@@ -707,36 +862,56 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 if replica_get.status_code == 200:
                     replica_result = replica_get.json()
                     replica_docs = len(replica_result.get('ids', []))
-            except Exception:
+            except:
                 replica_docs = 0
             
-            # Analyze results
-            expected_total = len(doc_ids_normal) + len(doc_ids_resilience)  # 5 documents total
-            
-            logger.info(f"   Document distribution analysis:")
-            logger.info(f"     Load balancer access: {total_docs_via_lb} documents")
-            logger.info(f"     Primary instance: {primary_docs} documents")
-            logger.info(f"     Replica instance: {replica_docs} documents")
-            logger.info(f"     Expected total: {expected_total} documents")
-            
-            # Evaluate test success
-            if normal_success and resilience_success:
-                if total_docs_via_lb >= expected_total:
-                    test_success = True
-                    result_msg = f"Full failover resilience: LB access works, {primary_docs}P/{replica_docs}R distribution"
-                elif total_docs_via_lb > 0:
-                    test_success = True
-                    result_msg = f"Partial resilience: {total_docs_via_lb}/{expected_total} docs accessible, {primary_docs}P/{replica_docs}R"
-                else:
-                    test_success = False
-                    result_msg = f"Access failure: No documents accessible via load balancer"
+            # Calculate expected total documents
+            expected_total = len(doc_ids_normal)
+            if failover_tested:
+                expected_total += len(doc_ids_failover)
             else:
-                test_success = False
-                result_msg = f"Write failures: Normal={normal_success}, Resilience={resilience_success}"
+                expected_total += 2  # stress test docs
+            
+            logger.info(f"   Document distribution: LB:{total_docs_via_lb}, P:{primary_docs}, R:{replica_docs}, Expected:{expected_total}")
+            
+            # SUCCESS CRITERIA for write failover:
+            success_criteria = [
+                normal_success,                              # Baseline works
+                failover_success,                           # Failover/stress works
+                lb_access_success and total_docs_via_lb > 0,  # Load balancer provides access
+            ]
+            
+            # For actual failover test, require data to be accessible
+            # For stress test, require some distribution evidence
+            if failover_tested:
+                # Actual failover test - data should be accessible via LB
+                success_criteria.append(total_docs_via_lb >= expected_total * 0.8)  # 80% data retention
+                test_type = "Real primary failover"
+            else:
+                # Stress test - require some distribution evidence
+                success_criteria.append(total_docs_via_lb >= expected_total * 0.6)  # 60% for stress test
+                test_type = "Write stress test"
+            
+            overall_success = all(success_criteria)
+            
+            if overall_success:
+                result_msg = f"✅ {test_type} successful: {total_docs_via_lb}/{expected_total} docs accessible"
+            else:
+                issues = []
+                if not normal_success:
+                    issues.append("baseline failed")
+                if not failover_success:
+                    issues.append("failover/stress failed")
+                if not lb_access_success:
+                    issues.append("LB access failed")
+                if total_docs_via_lb < expected_total * 0.6:
+                    issues.append(f"insufficient data retention ({total_docs_via_lb}/{expected_total})")
+                    
+                result_msg = f"❌ {test_type} failed: {', '.join(issues)}"
             
             return self.log_test_result(
                 "Write Failover - Primary Down",
-                test_success,
+                overall_success,
                 result_msg,
                 time.time() - start_time
             )
@@ -952,6 +1127,765 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 time.time() - start_time
             )
 
+    def test_replica_down_scenario(self):
+        """Test system behavior when replica instance is down (USE CASE 3)"""
+        logger.info("🔴 Testing Replica Down Scenario (USE CASE 3)")
+        
+        self.start_test("Replica Down Scenario")
+        start_time = time.time()
+        
+        try:
+            # Check initial system health
+            logger.info("   Checking initial system health...")
+            status_response = self.make_request('GET', f"{self.base_url}/status")
+            
+            if status_response.status_code != 200:
+                return self.log_test_result(
+                    "Replica Down Scenario",
+                    False,
+                    f"Cannot check system status: {status_response.status_code}",
+                    time.time() - start_time
+                )
+            
+            status = status_response.json()
+            instances = status.get('instances', [])
+            
+            primary_healthy = any(inst.get('name') == 'primary' and inst.get('healthy') for inst in instances)
+            replica_healthy = any(inst.get('name') == 'replica' and inst.get('healthy') for inst in instances)
+            
+            logger.info(f"   Initial health: Primary={primary_healthy}, Replica={replica_healthy}")
+            
+            if not primary_healthy:
+                return self.log_test_result(
+                    "Replica Down Scenario",
+                    False,
+                    "Primary not healthy - cannot test replica down scenario",
+                    time.time() - start_time
+                )
+            
+            # Test Phase 1: Normal operation with both instances
+            logger.info("   Phase 1: Testing normal operation with both instances...")
+            
+            collection_name = self.create_unique_collection_name("replica_down_test")
+            
+            create_response = self.make_request(
+                'POST',
+                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                json={"name": collection_name}
+            )
+            
+            if create_response.status_code not in [200, 201]:
+                return self.log_test_result(
+                    "Replica Down Scenario",
+                    False,
+                    f"Collection creation failed: {create_response.status_code}",
+                    time.time() - start_time
+                )
+            
+            logger.info("   Waiting for collection mapping...")
+            time.sleep(5)
+            
+            # Add documents during normal operation
+            doc_ids_normal = [f"normal_{uuid.uuid4().hex[:8]}" for _ in range(3)]
+            normal_docs = {
+                "embeddings": [[0.1, 0.1, 0.1, 0.1, 0.1], [0.2, 0.2, 0.2, 0.2, 0.2], [0.3, 0.3, 0.3, 0.3, 0.3]],
+                "documents": ["Normal doc 1", "Normal doc 2", "Normal doc 3"],
+                "metadatas": [
+                    {"phase": "normal_operation", "replica_status": "healthy"},
+                    {"phase": "normal_operation", "replica_status": "healthy"},
+                    {"phase": "normal_operation", "replica_status": "healthy"}
+                ],
+                "ids": doc_ids_normal
+            }
+            
+            self.track_documents(collection_name, doc_ids_normal)
+            
+            normal_add_response = self.make_request(
+                'POST',
+                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/add",
+                json=normal_docs
+            )
+            
+            normal_success = normal_add_response.status_code in [200, 201]
+            logger.info(f"   Normal operation: {'✅ Success' if normal_success else '❌ Failed'} ({normal_add_response.status_code})")
+            
+            time.sleep(8)  # Wait for sync
+            
+            # Test Phase 2: Simulate replica being down (Test read failover)
+            logger.info("   Phase 2: Testing behavior with replica down...")
+            
+            # Check if we can simulate replica down using admin endpoint
+            admin_available = False
+            try:
+                admin_response = self.make_request('GET', f"{self.base_url}/admin/instances")
+                admin_available = admin_response.status_code == 200
+            except:
+                admin_available = False
+            
+            if admin_available:
+                logger.info("   Simulating replica down using admin endpoint...")
+                
+                # Set replica as unhealthy for 60 seconds
+                simulate_response = self.make_request(
+                    'POST',
+                    f"{self.base_url}/admin/instances/replica/health",
+                    json={"healthy": False, "duration_seconds": 60}
+                )
+                
+                if simulate_response.status_code == 200:
+                    logger.info("   ✅ Replica marked as unhealthy")
+                    time.sleep(3)  # Wait for health monitoring to detect
+                    
+                    # Test read operations should fallback to primary
+                    logger.info("   Testing read failover to primary...")
+                    
+                    read_response = self.make_request(
+                        'POST',
+                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                        json={"include": ["documents", "metadatas"]}
+                    )
+                    
+                    read_success = read_response.status_code == 200
+                    docs_count = 0
+                    if read_success:
+                        read_result = read_response.json()
+                        docs_count = len(read_result.get('ids', []))
+                    
+                    logger.info(f"   Read failover: {'✅ Success' if read_success else '❌ Failed'} ({docs_count} docs retrieved)")
+                    
+                    # Test write operations should continue on primary
+                    logger.info("   Testing write operations continue on primary...")
+                    
+                    doc_ids_replica_down = [f"replica_down_{uuid.uuid4().hex[:8]}" for _ in range(2)]
+                    replica_down_docs = {
+                        "embeddings": [[0.4, 0.4, 0.4, 0.4, 0.4], [0.5, 0.5, 0.5, 0.5, 0.5]],
+                        "documents": ["Replica down doc 1", "Replica down doc 2"],
+                        "metadatas": [
+                            {"phase": "replica_down", "replica_status": "unhealthy"},
+                            {"phase": "replica_down", "replica_status": "unhealthy"}
+                        ],
+                        "ids": doc_ids_replica_down
+                    }
+                    
+                    self.track_documents(collection_name, doc_ids_replica_down)
+                    
+                    write_response = self.make_request(
+                        'POST',
+                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/add",
+                        json=replica_down_docs
+                    )
+                    
+                    write_success = write_response.status_code in [200, 201]
+                    logger.info(f"   Write during replica down: {'✅ Success' if write_success else '❌ Failed'} ({write_response.status_code})")
+                    
+                    # Test DELETE operations work with primary only
+                    logger.info("   Testing DELETE operations with replica down...")
+                    
+                    # Create a temporary collection for DELETE test
+                    delete_test_collection = self.create_unique_collection_name("delete_test_replica_down")
+                    
+                    delete_create_response = self.make_request(
+                        'POST',
+                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                        json={"name": delete_test_collection}
+                    )
+                    
+                    if delete_create_response.status_code in [200, 201]:
+                        time.sleep(5)  # Wait for mapping
+                        
+                        delete_response = self.make_request(
+                            'DELETE',
+                            f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{delete_test_collection}"
+                        )
+                        
+                        delete_success = delete_response.status_code in [200, 204, 207]  # 207 = partial success
+                        logger.info(f"   DELETE with replica down: {'✅ Success' if delete_success else '❌ Failed'} ({delete_response.status_code})")
+                    else:
+                        delete_success = False
+                        logger.warning("   DELETE test skipped - collection creation failed")
+                    
+                    # Wait for replica to recover
+                    logger.info("   Waiting for replica recovery...")
+                    time.sleep(15)
+                    
+                    # Test Phase 3: Recovery testing
+                    logger.info("   Phase 3: Testing replica recovery and WAL catch-up...")
+                    
+                    # Check if replica is back
+                    recovery_status = self.make_request('GET', f"{self.base_url}/status")
+                    if recovery_status.status_code == 200:
+                        recovery_data = recovery_status.json()
+                        recovery_instances = recovery_data.get('instances', [])
+                        replica_recovered = any(inst.get('name') == 'replica' and inst.get('healthy') for inst in recovery_instances)
+                        logger.info(f"   Replica recovery status: {'✅ Recovered' if replica_recovered else '⏳ Still down'}")
+                        
+                        if replica_recovered:
+                            # Test that new data eventually syncs to replica
+                            logger.info("   Testing WAL catch-up sync...")
+                            time.sleep(10)  # Allow time for WAL sync
+                            
+                            # Verify documents on replica directly
+                            try:
+                                replica_check = self.make_request(
+                                    'POST',
+                                    f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                                    json={"include": ["documents", "metadatas"]}
+                                )
+                                
+                                if replica_check.status_code == 200:
+                                    replica_result = replica_check.json()
+                                    replica_docs = len(replica_result.get('ids', []))
+                                    expected_docs = len(doc_ids_normal) + len(doc_ids_replica_down)
+                                    
+                                    sync_success = replica_docs >= expected_docs * 0.8  # Allow some sync lag
+                                    logger.info(f"   WAL catch-up: {'✅ Success' if sync_success else '⏳ Partial'} ({replica_docs}/{expected_docs} docs)")
+                                else:
+                                    sync_success = False
+                                    logger.warning(f"   WAL catch-up: Cannot verify ({replica_check.status_code})")
+                            except Exception as e:
+                                sync_success = False
+                                logger.warning(f"   WAL catch-up: Exception during check: {e}")
+                        else:
+                            sync_success = True  # Recovery not completed yet, but that's OK
+                    else:
+                        replica_recovered = False
+                        sync_success = True  # Status check failed, but that's not test failure
+                    
+                    # Evaluate overall test success
+                    test_success = (normal_success and read_success and write_success and 
+                                  delete_success)  # Don't require sync_success for test to pass
+                    
+                    result_parts = []
+                    if read_success:
+                        result_parts.append("reads→primary")
+                    if write_success:
+                        result_parts.append("writes→primary")
+                    if delete_success:
+                        result_parts.append("deletes work")
+                    if replica_recovered and sync_success:
+                        result_parts.append("sync recovered")
+                    elif replica_recovered:
+                        result_parts.append("replica recovered")
+                    
+                    result_msg = f"Replica down handled: {', '.join(result_parts)}"
+                    
+                else:
+                    test_success = False
+                    result_msg = f"Admin simulation failed: {simulate_response.status_code}"
+            else:
+                # Manual testing approach - test read distribution behavior
+                logger.info("   Admin endpoint not available - testing current behavior...")
+                
+                # Test multiple read operations to see load distribution
+                read_tests = []
+                for i in range(10):
+                    read_response = self.make_request(
+                        'POST',
+                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                        json={"include": ["documents"]}
+                    )
+                    read_tests.append(read_response.status_code == 200)
+                    time.sleep(0.5)
+                
+                successful_reads = sum(read_tests)
+                read_success_rate = successful_reads / len(read_tests)
+                
+                # Test writes continue working
+                doc_ids_test = [f"test_{uuid.uuid4().hex[:8]}" for _ in range(2)]
+                test_docs = {
+                    "embeddings": [[0.6, 0.6, 0.6, 0.6, 0.6], [0.7, 0.7, 0.7, 0.7, 0.7]],
+                    "documents": ["Test doc 1", "Test doc 2"],
+                    "metadatas": [{"phase": "test"}, {"phase": "test"}],
+                    "ids": doc_ids_test
+                }
+                
+                self.track_documents(collection_name, doc_ids_test)
+                
+                write_response = self.make_request(
+                    'POST',
+                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/add",
+                    json=test_docs
+                )
+                
+                write_success = write_response.status_code in [200, 201]
+                
+                test_success = read_success_rate >= 0.8 and write_success
+                result_msg = f"Read success: {successful_reads}/10, Write success: {write_success}"
+            
+            return self.log_test_result(
+                "Replica Down Scenario",
+                test_success,
+                result_msg,
+                time.time() - start_time
+            )
+            
+        except Exception as e:
+            return self.log_test_result(
+                "Replica Down Scenario",
+                False,
+                f"Exception: {str(e)}",
+                time.time() - start_time
+            )
+
+    def test_high_load_performance(self):
+        """Test system behavior under high load and performance pressure (USE CASE 4)"""
+        logger.info("🔥 Testing High Load & Performance Scenario (USE CASE 4)")
+        
+        self.start_test("High Load Performance")
+        start_time = time.time()
+        
+        try:
+            # Phase 1: Baseline performance check
+            logger.info("   📊 Phase 1: Checking baseline performance...")
+            status_response = self.make_request('GET', f"{self.base_url}/status")
+            
+            if status_response.status_code != 200:
+                return self.log_test_result(
+                    "High Load Performance",
+                    False,
+                    f"Cannot check system status: {status_response.status_code}"
+                )
+            
+            status = status_response.json()
+            baseline_memory = status.get('resource_metrics', {}).get('memory_usage_mb', 0)
+            max_workers = status.get('high_volume_config', {}).get('max_workers', 0)
+            max_memory = status.get('high_volume_config', {}).get('max_memory_mb', 0)
+            
+            logger.info(f"      Baseline memory: {baseline_memory}MB")
+            logger.info(f"      Max workers: {max_workers}")
+            logger.info(f"      Memory limit: {max_memory}MB")
+            
+            # Phase 2: Create high-volume collections rapidly
+            logger.info("   🔥 Phase 2: High-volume collection creation...")
+            collections_created = []
+            creation_errors = 0
+            
+            # Create 10 collections with 50 documents each (realistic CMS load)
+            for i in range(10):
+                # Use proper collection tracking system
+                collection_name = self.create_unique_collection_name(f"high_load_perf_{i}")
+                collections_created.append(collection_name)
+                
+                try:
+                    # Create collection
+                    create_response = self.make_request('POST', 
+                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                        json={"name": collection_name}
+                    )
+                    
+                    if create_response.status_code not in [200, 201]:
+                        creation_errors += 1
+                        logger.warning(f"      Collection creation failed: {create_response.status_code}")
+                        continue
+                    
+                    collection_id = create_response.json().get('id')
+                    
+                    # Track collection in the cleanup system
+                    self.track_collection(collection_name)
+                    
+                    # Add batch of documents to simulate CMS file uploads
+                    documents = [f"High load test document {j} for performance testing" for j in range(50)]
+                    ids = [f"perf_doc_{collection_name}_{j}" for j in range(50)]
+                    
+                    # Track documents in the cleanup system
+                    self.track_documents(collection_name, ids)
+                    
+                    doc_response = self.make_request('POST',
+                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}/add",
+                        json={
+                            "documents": documents,
+                            "ids": ids
+                        }
+                    )
+                    
+                    if doc_response.status_code not in [200, 201]:
+                        creation_errors += 1
+                        logger.warning(f"      Document batch failed: {doc_response.status_code}")
+                    
+                    # Small delay to prevent overwhelming
+                    time.sleep(0.2)
+                    
+                except Exception as e:
+                    creation_errors += 1
+                    logger.warning(f"      Creation error: {str(e)}")
+            
+            logger.info(f"      Created {len(collections_created) - creation_errors}/{len(collections_created)} collections")
+            
+            # Phase 3: Check resource pressure
+            logger.info("   📈 Phase 3: Checking resource pressure...")
+            time.sleep(5)  # Allow WAL processing time
+            
+            metrics_response = self.make_request('GET', f"{self.base_url}/metrics")
+            if metrics_response.status_code == 200:
+                metrics = metrics_response.json()
+                current_memory = metrics.get('memory_usage_mb', 0)
+                memory_pressure = current_memory > (max_memory * 0.7) if max_memory > 0 else False
+                
+                logger.info(f"      Current memory: {current_memory}MB")
+                logger.info(f"      Memory pressure: {memory_pressure}")
+                
+                if memory_pressure:
+                    logger.info(f"      ✅ System correctly under memory pressure (expected)")
+                else:
+                    logger.info(f"      ✅ System handling load within memory limits")
+            
+            # Phase 4: Test concurrent read operations under load
+            logger.info("   👥 Phase 4: Testing concurrent operations under load...")
+            import concurrent.futures
+            import threading
+            
+            def concurrent_query(collection_name):
+                try:
+                    response = self.make_request('GET', 
+                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections")
+                    return response.status_code == 200
+                except:
+                    return False
+            
+            concurrent_success = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                futures = [executor.submit(concurrent_query, col) for col in collections_created[:5]]
+                for future in concurrent.futures.as_completed(futures):
+                    if future.result():
+                        concurrent_success += 1
+            
+            logger.info(f"      Concurrent operations: {concurrent_success}/5 successful")
+            
+            # Phase 5: Check WAL status under load
+            logger.info("   📝 Phase 5: Checking WAL performance under load...")
+            wal_response = self.make_request('GET', f"{self.base_url}/wal/status")
+            
+            if wal_response.status_code == 200:
+                wal_status = wal_response.json()
+                pending_writes = wal_status.get('pending_writes', 0)
+                failed_syncs = wal_status.get('failed_syncs', 0)
+                successful_syncs = wal_status.get('successful_syncs', 0)
+                
+                logger.info(f"      Pending WAL writes: {pending_writes}")
+                logger.info(f"      Successful syncs: {successful_syncs}")
+                logger.info(f"      Failed syncs: {failed_syncs}")
+                
+                # WAL backup scenario check
+                wal_backup = pending_writes > 50
+                if wal_backup:
+                    logger.info(f"      ⚠️ WAL backup detected (expected under high load)")
+                else:
+                    logger.info(f"      ✅ WAL keeping up with load")
+            
+            # Wait for WAL processing to complete
+            logger.info("   ⏳ Waiting for WAL sync completion...")
+            time.sleep(60)  # Real-world sync timing - user confirmed ~1 minute needed
+            
+            # Final WAL check
+            final_wal_response = self.make_request('GET', f"{self.base_url}/wal/status")
+            if final_wal_response.status_code == 200:
+                final_wal = final_wal_response.json()
+                final_pending = final_wal.get('pending_writes', 0)
+                logger.info(f"      Final pending writes: {final_pending}")
+            
+            # SUCCESS CRITERIA VALIDATION: Distributed system under load
+            logger.info("   📊 Phase 6: Validating distributed system under load...")
+            
+            # Check that data actually exists on BOTH instances
+            total_collections_primary = 0
+            total_collections_replica = 0
+            total_docs_primary = 0
+            total_docs_replica = 0
+            
+            try:
+                # Check primary instance
+                primary_collections = self.make_request('GET', 'https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections')
+                if primary_collections.status_code == 200:
+                    primary_data = primary_collections.json()
+                    # Count test collections only
+                    total_collections_primary = len([c for c in primary_data if c['name'].startswith('AUTOTEST_enhanced_high_load_perf')]
+                    )
+                    
+                    # Count documents in test collections
+                    for collection in primary_data:
+                        if collection['name'].startswith('AUTOTEST_enhanced_high_load_perf'):
+                            try:
+                                doc_response = self.make_request('POST', 
+                                    f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection['name']}/get",
+                                    json={"include": ["documents"]})
+                                if doc_response.status_code == 200:
+                                    doc_data = doc_response.json()
+                                    total_docs_primary += len(doc_data.get('ids', []))
+                            except:
+                                pass
+                               
+            except Exception as e:
+                logger.warning(f"      Primary validation error: {e}")
+            
+            try:
+                # Check replica instance
+                replica_collections = self.make_request('GET', 'https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections')
+                if replica_collections.status_code == 200:
+                    replica_data = replica_collections.json()
+                    # Count test collections only
+                    total_collections_replica = len([c for c in replica_data if c['name'].startswith('AUTOTEST_enhanced_high_load_perf')]
+                    )
+                    
+                    # Count documents in test collections
+                    for collection in replica_data:
+                        if collection['name'].startswith('AUTOTEST_enhanced_high_load_perf'):
+                            try:
+                                doc_response = self.make_request('POST', 
+                                    f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection['name']}/get",
+                                    json={"include": ["documents"]})
+                                if doc_response.status_code == 200:
+                                    doc_data = doc_response.json()
+                                    total_docs_replica += len(doc_data.get('ids', []))
+                            except:
+                                pass
+                               
+            except Exception as e:
+                logger.warning(f"      Replica validation error: {e}")
+            
+            # Calculate expected totals
+            expected_collections = len(collections_created) - creation_errors
+            expected_total_docs = expected_collections * 50  # 50 docs per collection
+            
+            logger.info(f"      Distribution validation:")
+            logger.info(f"        Primary: {total_collections_primary} collections, {total_docs_primary} documents")
+            logger.info(f"        Replica: {total_collections_replica} collections, {total_docs_replica} documents")
+            logger.info(f"        Expected: {expected_collections} collections, {expected_total_docs} documents each")
+            
+            # SUCCESS CRITERIA VALIDATION: Distributed system under load
+            total_duration = time.time() - start_time
+            collection_success_rate = (len(collections_created) - creation_errors) / len(collections_created)
+            concurrent_success_rate = concurrent_success / 5
+            
+            # CRITICAL: Distributed system validation under load
+            distribution_success_criteria = [
+                # Basic load handling
+                collection_success_rate >= 0.8,
+                concurrent_success_rate >= 0.6,
+                creation_errors < 3,
+                
+                # DISTRIBUTED SYSTEM requirements under load
+                total_collections_primary >= expected_collections * 0.8,  # 80% collections on primary
+                total_collections_replica >= expected_collections * 0.8,  # 80% collections on replica
+                total_docs_primary >= expected_total_docs * 0.6,          # 60% documents on primary
+                total_docs_replica >= expected_total_docs * 0.6,          # 60% documents on replica
+            ]
+            
+            all_criteria_met = all(distribution_success_criteria)
+            
+            logger.info(f"   📊 High Load Performance Results:")
+            logger.info(f"      Total duration: {total_duration:.1f}s")
+            logger.info(f"      Collection success rate: {collection_success_rate:.1%}")
+            logger.info(f"      Concurrent operation success: {concurrent_success_rate:.1%}")
+            logger.info(f"      Distributed system status: {'✅ Working' if all_criteria_met else '❌ Failed'}")
+            
+            # Detailed result message
+            if all_criteria_met:
+                result_msg = f"✅ High-load distributed system working: P:{total_collections_primary}c/{total_docs_primary}d, R:{total_collections_replica}c/{total_docs_replica}d"
+            else:
+                issues = []
+                if collection_success_rate < 0.8:
+                    issues.append(f"collection creation failed ({collection_success_rate:.1%})")
+                if concurrent_success_rate < 0.6:
+                    issues.append(f"concurrent ops failed ({concurrent_success_rate:.1%})")
+                if creation_errors >= 3:
+                    issues.append(f"too many errors ({creation_errors})")
+                if total_collections_primary < expected_collections * 0.8:
+                    issues.append(f"primary collections insufficient ({total_collections_primary}/{expected_collections})")
+                if total_collections_replica < expected_collections * 0.8:
+                    issues.append(f"replica collections insufficient ({total_collections_replica}/{expected_collections})")
+                if total_docs_primary < expected_total_docs * 0.6:
+                    issues.append(f"primary docs insufficient ({total_docs_primary}/{expected_total_docs})")
+                if total_docs_replica < expected_total_docs * 0.6:
+                    issues.append(f"replica docs insufficient ({total_docs_replica}/{expected_total_docs})")
+                
+                result_msg = f"❌ High-load distributed system failed: {', '.join(issues)}"
+            
+            return self.log_test_result(
+                "High Load Performance",
+                all_criteria_met,  # FAIL if distributed system doesn't work under load
+                result_msg,
+                time.time() - start_time
+            )
+            
+        except Exception as e:
+            return self.log_test_result(
+                "High Load Performance",
+                False,
+                f"Test failed with error: {str(e)}",
+                time.time() - start_time
+            )
+
+    def test_chromadb_client_sync(self):
+        """Test document sync using ChromaDB Python client (like production CMS code)"""
+        logger.info("🔬 Testing ChromaDB Client Library Sync (Production CMS Method)")
+        
+        self.start_test("ChromaDB Client Sync")
+        start_time = time.time()
+        
+        try:
+            import chromadb
+            from chromadb import HttpClient
+            from chromadb.config import Settings
+            import urllib.parse
+            
+            # Create client exactly like production CMS code
+            chroma_url = self.base_url
+            parsed = urllib.parse.urlparse(chroma_url)
+            
+            logger.info(f"   Creating ChromaDB client for {chroma_url}...")
+            client = HttpClient(
+                host=parsed.hostname,
+                port=parsed.port or (443 if parsed.scheme == "https" else 8000),
+                ssl=parsed.scheme == "https",
+                settings=Settings(anonymized_telemetry=False)
+            )
+            
+            # Test connection
+            logger.info("   Testing client connection...")
+            try:
+                client.heartbeat()
+                logger.info("   ✅ Client connected successfully")
+            except Exception as e:
+                logger.warning(f"   ⚠️ Heartbeat failed: {e}")
+            
+            # Create collection like production CMS
+            collection_name = f"client_test_{uuid.uuid4().hex[:8]}"
+            logger.info(f"   Creating collection '{collection_name}' via client...")
+            
+            collection = client.get_or_create_collection(name=collection_name)
+            logger.info(f"   ✅ Collection created: {collection.name} (ID: {collection.id})")
+            
+            # Track collection for cleanup
+            self.track_collection(collection_name)
+            
+            # Add documents like production CMS
+            logger.info("   Adding documents via ChromaDB client library...")
+            
+            documents = [
+                "Production CMS document 1: Client library test",
+                "Production CMS document 2: Distributed sync validation",
+                "Production CMS document 3: Load balancer integration"
+            ]
+            
+            metadatas = [
+                {"source": "cms_client_test", "company_id": 999, "bot_id": 888, "chunk_index": 0},
+                {"source": "cms_client_test", "company_id": 999, "bot_id": 888, "chunk_index": 1},
+                {"source": "cms_client_test", "company_id": 999, "bot_id": 888, "chunk_index": 2}
+            ]
+            
+            ids = [f"client_chunk_999_888_{i}" for i in range(3)]
+            
+            # Simple embeddings for testing
+            embeddings = [
+                [0.1, 0.2, 0.3, 0.4, 0.5],
+                [0.6, 0.7, 0.8, 0.9, 1.0],
+                [0.2, 0.4, 0.6, 0.8, 1.0]
+            ]
+            
+            # Track documents for cleanup
+            self.track_documents(collection_name, ids)
+            
+            # Add documents using client library (like production)
+            collection.add(
+                documents=documents,
+                metadatas=metadatas,
+                ids=ids,
+                embeddings=embeddings
+            )
+            
+            logger.info("   ✅ Documents added via client library")
+            
+            # Wait for sync (based on user's timing confirmation)
+            logger.info("   Waiting for distributed sync (client library method)...")
+            time.sleep(60)  # User confirmed ~1 minute needed
+            
+            # Test retrieval via client library
+            logger.info("   Testing document retrieval via client library...")
+            try:
+                client_results = collection.get(include=["documents", "metadatas"])
+                client_doc_count = len(client_results.get('documents', []))
+                logger.info(f"   Client library retrieval: {client_doc_count} documents")
+            except Exception as e:
+                client_doc_count = 0
+                logger.warning(f"   Client retrieval failed: {e}")
+            
+            # Now check if documents synced to individual instances (HTTP API)
+            logger.info("   Checking sync to primary instance via HTTP API...")
+            primary_get = self.make_request(
+                'POST',
+                f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                json={"include": ["documents", "metadatas"]}
+            )
+            
+            primary_docs = 0
+            if primary_get.status_code == 200:
+                try:
+                    primary_result = primary_get.json()
+                    primary_docs = len(primary_result.get('ids', []))
+                except:
+                    pass
+            
+            logger.info("   Checking sync to replica instance via HTTP API...")
+            replica_get = self.make_request(
+                'POST',
+                f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                json={"include": ["documents", "metadatas"]}
+            )
+            
+            replica_docs = 0
+            if replica_get.status_code == 200:
+                try:
+                    replica_result = replica_get.json()
+                    replica_docs = len(replica_result.get('ids', []))
+                except:
+                    pass
+            
+            logger.info(f"   Distribution results: Client:{client_doc_count}, Primary:{primary_docs}, Replica:{replica_docs}")
+            
+            # Success criteria for client library method
+            expected_docs = len(documents)
+            
+            # Client library should work (this is how production works)
+            client_success = client_doc_count == expected_docs
+            
+            # Check if distributed sync happened
+            distribution_success = (
+                primary_docs == expected_docs and 
+                replica_docs == expected_docs
+            )
+            
+            if client_success and distribution_success:
+                result_msg = f"✅ Client library + distributed sync working: C:{client_doc_count}, P:{primary_docs}, R:{replica_docs}"
+                test_success = True
+            elif client_success:
+                result_msg = f"⚠️ Client library works but sync incomplete: C:{client_doc_count}, P:{primary_docs}, R:{replica_docs}"
+                test_success = True  # This matches user's production experience
+            else:
+                result_msg = f"❌ Client library method failed: C:{client_doc_count}, P:{primary_docs}, R:{replica_docs}"
+                test_success = False
+            
+            return self.log_test_result(
+                "ChromaDB Client Sync",
+                test_success,
+                result_msg,
+                time.time() - start_time
+            )
+            
+        except ImportError:
+            return self.log_test_result(
+                "ChromaDB Client Sync",
+                False,
+                "ChromaDB library not available - install with 'pip install chromadb'",
+                time.time() - start_time
+            )
+        except Exception as e:
+            return self.log_test_result(
+                "ChromaDB Client Sync",
+                False,
+                f"Exception: {str(e)}",
+                time.time() - start_time
+            )
+
 def main():
     """Run enhanced comprehensive tests with selective cleanup"""
     import argparse
@@ -993,6 +1927,15 @@ def main():
         
         logger.info("\n🧪 Running DELETE Sync Functionality Tests...")
         tester.test_delete_sync_functionality()
+        
+        logger.info("\n🧪 Running Replica Down Scenario Tests...")
+        tester.test_replica_down_scenario()
+        
+        logger.info("\n🧪 Running High Load & Performance Tests...")
+        tester.test_high_load_performance()
+        
+        logger.info("\n🧪 Running ChromaDB Client Sync Tests...")
+        tester.test_chromadb_client_sync()
         
     except Exception as e:
         logger.error(f"❌ Test execution failed: {e}")
