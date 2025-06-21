@@ -672,12 +672,28 @@ class UnifiedWALLoadBalancer:
                         else:
                             headers = write_record['headers']
                     
+                    # CRITICAL: Map collection ID for proper sync (UUID resolution for document operations)
+                    if collection_id and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
+                        # This is a document operation - need to map collection UUID from source to target instance
+                        logger.debug(f"🔍 Document operation detected: {method} {final_path}")
+                        logger.debug(f"   Source collection ID: {collection_id}")
+                        logger.debug(f"   Target instance: {instance.name}")
+                        
+                        # Get the correct UUID for the target instance
+                        mapped_uuid = self.resolve_collection_name_to_uuid_by_source_id(collection_id, instance.name)
+                        if mapped_uuid and mapped_uuid != collection_id:
+                            # Replace source UUID with target UUID in path
+                            final_path = final_path.replace(collection_id, mapped_uuid)
+                            logger.debug(f"✅ UUID mapped for {instance.name}: {collection_id[:8]} -> {mapped_uuid[:8]}")
+                        else:
+                            logger.warning(f"⚠️ Could not map UUID {collection_id[:8]} for {instance.name}")
+                    
                     # Make the sync request with normalized path
                     response = self.make_direct_request(instance, method, final_path, data=data, headers=headers)
                     
                     # CRITICAL: Update collection mapping for successful collection creation on replica
                     if (method == 'POST' and 
-                        '/collections' in final_path and 
+                        ('/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete'])) and
                         response.status_code == 200 and 
                         instance.name == 'replica'):
                         try:
@@ -687,6 +703,7 @@ class UnifiedWALLoadBalancer:
                             collection_name = collection_info.get('name')
                             
                             if replica_uuid and collection_name:
+                                logger.info(f"🎯 REPLICA COLLECTION CREATED: {collection_name} -> {replica_uuid[:8]}")
                                 # Update mapping with replica UUID
                                 with self.db_lock:
                                     with self.get_db_connection() as conn:
