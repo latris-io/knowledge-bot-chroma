@@ -1188,6 +1188,78 @@ class UnifiedWALLoadBalancer:
         # If already V2 format or unknown format, return as-is
         return path
 
+    def resolve_collection_name_to_uuid(self, collection_name: str, target_instance_name: str) -> Optional[str]:
+        """Resolve collection name to UUID for the specified instance"""
+        try:
+            # First try to get UUID from collection mapping database
+            with self.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    if target_instance_name == "primary":
+                        cur.execute("""
+                            SELECT primary_collection_id FROM collection_id_mapping 
+                            WHERE collection_name = %s AND primary_collection_id IS NOT NULL
+                        """, (collection_name,))
+                    else:  # replica
+                        cur.execute("""
+                            SELECT replica_collection_id FROM collection_id_mapping 
+                            WHERE collection_name = %s AND replica_collection_id IS NOT NULL
+                        """, (collection_name,))
+                    
+                    result = cur.fetchone()
+                    if result and result[0]:
+                        logger.info(f"✅ Resolved {collection_name} -> {result[0][:8]}... via mapping for {target_instance_name}")
+                        return result[0]
+            
+            # Fallback: Query the instance directly to get UUID by name
+            instance = next((inst for inst in self.instances if inst.name == target_instance_name and inst.is_healthy), None)
+            if not instance:
+                logger.warning(f"❌ No healthy {target_instance_name} instance for UUID resolution")
+                return None
+            
+            logger.info(f"🔍 Fallback: Querying {target_instance_name} instance directly for {collection_name}")
+            response = self.make_direct_request(
+                instance, 
+                "GET", 
+                "/api/v2/tenants/default_tenant/databases/default_database/collections"
+            )
+            
+            if response.status_code == 200:
+                collections = response.json()
+                for collection in collections:
+                    if collection.get('name') == collection_name:
+                        uuid = collection.get('id')
+                        logger.info(f"✅ Resolved {collection_name} -> {uuid[:8]}... via direct query on {target_instance_name}")
+                        
+                        # Update mapping database for future use
+                        try:
+                            with self.get_db_connection() as conn:
+                                with conn.cursor() as cur:
+                                    if target_instance_name == "primary":
+                                        cur.execute("""
+                                            UPDATE collection_id_mapping 
+                                            SET primary_collection_id = %s, updated_at = NOW()
+                                            WHERE collection_name = %s
+                                        """, (uuid, collection_name))
+                                    else:  # replica
+                                        cur.execute("""
+                                            UPDATE collection_id_mapping 
+                                            SET replica_collection_id = %s, updated_at = NOW()
+                                            WHERE collection_name = %s
+                                        """, (uuid, collection_name))
+                                    conn.commit()
+                                    logger.info(f"✅ Updated mapping database with {target_instance_name} UUID")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to update mapping: {e}")
+                        
+                        return uuid
+            
+            logger.warning(f"❌ Collection {collection_name} not found on {target_instance_name}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ UUID resolution failed for {collection_name} on {target_instance_name}: {e}")
+            return None
+
 # Main execution for web service  
 if __name__ == '__main__':
     logger.info("🚀 Starting Enhanced Unified WAL Load Balancer with High-Volume Support")
@@ -1394,6 +1466,29 @@ if __name__ == '__main__':
             
             # Convert API path for ChromaDB compatibility
             normalized_path = enhanced_wal.normalize_api_path_to_v2(f"/{path}")
+            
+            # CRITICAL: Collection name-to-UUID resolution for document operations
+            original_path = normalized_path
+            if '/collections/' in normalized_path and any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
+                # Extract collection name from path
+                path_parts = normalized_path.split('/collections/')
+                if len(path_parts) > 1:
+                    collection_part = path_parts[1].split('/')[0]
+                    # Check if it's a name (not UUID) - UUIDs have specific format
+                    import re
+                    if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_part):
+                        logger.info(f"🔍 PROXY_REQUEST: Detected collection name '{collection_part}' in document operation")
+                        
+                        # Resolve collection name to UUID for target instance
+                        resolved_uuid = enhanced_wal.resolve_collection_name_to_uuid(collection_part, target_instance.name)
+                        if resolved_uuid:
+                            # Replace collection name with UUID in path
+                            normalized_path = normalized_path.replace(f'/collections/{collection_part}/', f'/collections/{resolved_uuid}/')
+                            logger.info(f"✅ PROXY_REQUEST: Resolved path: {original_path} -> {normalized_path}")
+                        else:
+                            logger.warning(f"⚠️ PROXY_REQUEST: Could not resolve collection name '{collection_part}' to UUID")
+                            return jsonify({"error": f"Collection '{collection_part}' not found"}), 404
+            
             url = f"{target_instance.url}{normalized_path}"
             logger.info(f"✅ PROXY_REQUEST: URL constructed: {url}")
             
