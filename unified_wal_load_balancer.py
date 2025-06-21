@@ -1132,113 +1132,6 @@ class UnifiedWALLoadBalancer:
         # For write operations, always use primary
         return self.get_primary_instance()
 
-    def forward_request(self, method: str, path: str, headers: Dict[str, str], 
-                       data: bytes = b'', target_instance: Optional[ChromaInstance] = None, 
-                       retry_count: int = 0, max_retries: int = 1, **kwargs) -> requests.Response:
-        """Forward request to appropriate instance with WAL logging for deletions"""
-        
-        # Prevent infinite retry loops
-        if retry_count >= max_retries:
-            raise Exception(f"All instances failed after {max_retries} retries")
-        
-        # Choose target instance if not specified
-        if not target_instance:
-            target_instance = self.choose_read_instance(path, method, headers)
-        
-        if not target_instance:
-            raise Exception("No healthy instances available")
-        
-        # For write operations (including DELETE), log to WAL first
-        if method in ['POST', 'PUT', 'PATCH', 'DELETE']:
-            # Determine sync target
-            if target_instance.name == "primary":
-                sync_target = TargetInstance.REPLICA
-            else:
-                sync_target = TargetInstance.PRIMARY
-            
-            # Special handling for DELETE operations from ingestion service
-            if method == "DELETE":
-                # Log deletion to WAL for bidirectional sync
-                logger.info(f"🗑️ DELETE request received: {path}")
-                self.add_wal_write(
-                    method=method,
-                    path=path,
-                    data=data,
-                    headers=headers,
-                    target_instance=TargetInstance.BOTH,  # Delete from both instances
-                    executed_on=target_instance.name
-                )
-            else:
-                # Regular write operations
-                self.add_wal_write(
-                    method=method,
-                    path=path,
-                    data=data,
-                    headers=headers,
-                    target_instance=sync_target,
-                    executed_on=target_instance.name
-                )
-        
-        # Execute the request using proven working pattern from old load balancer
-        try:
-            # CRITICAL FIX: Convert V1→V2 API path before making request
-            normalized_path = self.normalize_api_path_to_v2(path)
-            url = f"{target_instance.url}{normalized_path}"
-            
-            # Create session with proper headers (like old load balancer)
-            session = requests.Session()
-            
-            # Set base headers
-            session_headers = {
-                'Accept-Encoding': '',  # No compression for compatibility
-                'Accept': 'application/json'
-            }
-            
-            # Only set Content-Type for requests that have data
-            if data or kwargs.get('json') or method in ['POST', 'PUT', 'PATCH']:
-                session_headers['Content-Type'] = 'application/json'
-            
-            session.headers.update(session_headers)
-            
-            # Prepare request parameters
-            request_params = {'timeout': self.request_timeout}
-            if data:
-                request_params['data'] = data
-            request_params.update(kwargs)  # Add json, params, etc.
-            
-            # Use session to make request (like old load balancer)
-            response = session.request(method, url, **request_params)
-            response.raise_for_status()
-            
-            # Debug logging to see response content
-            logger.info(f"Response status: {response.status_code}, Content length: {len(response.content)}, Content preview: {response.content[:100]}")
-            
-            target_instance.update_stats(True)
-            self.stats["successful_requests"] += 1
-            
-            # Log successful deletion
-            if method == "DELETE":
-                logger.info(f"✅ DELETE executed successfully on {target_instance.name}: {path}")
-            
-            return response
-            
-        except Exception as e:
-            target_instance.update_stats(False)
-            self.stats["failed_requests"] += 1
-            
-            # Log failed deletion
-            if method == "DELETE":
-                logger.warning(f"❌ DELETE failed on {target_instance.name}: {e}")
-            
-            # For critical failures, try other instances (with retry limit)
-            if target_instance.consecutive_failures > 2 and retry_count < max_retries:
-                other_instances = [inst for inst in self.get_healthy_instances() if inst != target_instance]
-                if other_instances:
-                    logger.warning(f"Retrying request on {other_instances[0].name} due to {target_instance.name} failures (attempt {retry_count + 1}/{max_retries})")
-                    return self.forward_request(method, path, headers, data, other_instances[0], retry_count + 1, max_retries)
-            
-            raise e
-
     def normalize_api_path_to_v2(self, path: str) -> str:
         """Convert V1-style API paths to proper V2 format for ChromaDB compatibility"""
         
@@ -1272,6 +1165,7 @@ class UnifiedWALLoadBalancer:
 # Main execution for web service  
 if __name__ == '__main__':
     logger.info("🚀 Starting Enhanced Unified WAL Load Balancer with High-Volume Support")
+    logger.info("🔧 DEPLOYMENT TRIGGER: Debug logging enabled - v2.1")  # Force redeploy
     
     # Initialize Flask app first
     app = Flask(__name__)
@@ -1353,30 +1247,183 @@ if __name__ == '__main__':
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
-    @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-    def proxy_request(path):
-        """Proxy all other requests through the load balancer"""
+    @app.route('/admin/test_wal', methods=['POST'])
+    def test_wal():
+        """Admin endpoint to test WAL logging directly"""
         try:
             if enhanced_wal is None:
-                logger.error("Proxy request failed: WAL system not ready")
+                return jsonify({"error": "WAL system not ready"}), 503
+            
+            # Test WAL logging
+            test_data = request.get_json() or {"test": "data"}
+            
+            # Use string-to-enum pattern like proxy_request
+            sync_target_enum = TargetInstance.REPLICA
+            
+            write_id = enhanced_wal.add_wal_write(
+                method="POST",
+                path="/test/path",
+                data=json.dumps(test_data).encode(),
+                headers={'Content-Type': 'application/json'},
+                target_instance=sync_target_enum,
+                executed_on="primary"
+            )
+            
+            return jsonify({
+                "success": True,
+                "write_id": write_id,
+                "message": "WAL write created successfully"
+            }), 200
+            
+        except Exception as e:
+            import traceback
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+    
+    @app.route('/admin/wal_count', methods=['GET'])
+    def wal_count():
+        """Admin endpoint to check WAL count directly"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not ready"}), 503
+            
+            count = enhanced_wal.get_pending_writes_count()
+            
+            return jsonify({
+                "pending_writes": count,
+                "wal_system_ready": True
+            }), 200
+            
+        except Exception as e:
+            import traceback
+            return jsonify({
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+    
+    @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+    def proxy_request(path):
+        """Streamlined proxy with essential WAL logging for distributed system"""
+        try:
+            logger.info(f"🚀 PROXY_REQUEST START: {request.method} /{path}")
+            
+            if enhanced_wal is None:
+                logger.error("❌ PROXY_REQUEST FAILED: WAL system not ready")
                 return jsonify({"error": "WAL system not ready"}), 503
                 
+            logger.info(f"✅ PROXY_REQUEST: enhanced_wal object exists")
             logger.info(f"Forwarding {request.method} request to /{path}")
             
-            # EMERGENCY FIX: Use direct forwarding instead of complex forward_request
-            # Get target instance
+            # Get target instance using existing health-based routing
+            logger.info(f"🔍 PROXY_REQUEST: Getting target instance...")
             target_instance = enhanced_wal.choose_read_instance(f"/{path}", request.method, {})
             if not target_instance:
+                logger.error(f"❌ PROXY_REQUEST: No healthy instances available")
                 return jsonify({"error": "No healthy instances available"}), 503
             
-            # Convert API path
+            logger.info(f"✅ PROXY_REQUEST: Target instance selected: {target_instance.name}")
+            
+            # Convert API path for ChromaDB compatibility
             normalized_path = enhanced_wal.normalize_api_path_to_v2(f"/{path}")
             url = f"{target_instance.url}{normalized_path}"
+            logger.info(f"✅ PROXY_REQUEST: URL constructed: {url}")
             
             # Get request data
             data = request.get_data() if request.method in ['POST', 'PUT', 'PATCH'] else None
+            logger.info(f"✅ PROXY_REQUEST: Request data size: {len(data) if data else 0} bytes")
             
-            # Make direct request
+            # CRITICAL: WAL logging for write operations (restores auto-mapping)
+            logger.info(f"🔍 PROXY_REQUEST: Checking if write operation: {request.method}")
+            if request.method in ['POST', 'PUT', 'PATCH', 'DELETE']:
+                logger.info(f"🎯 PROXY_REQUEST: WRITE OPERATION DETECTED - Starting WAL logging")
+                try:
+                    logger.info(f"🔍 WAL logging check: method={request.method}, target={target_instance.name}")
+                    
+                    # Determine sync target for distributed system (using string values)
+                    logger.info(f"🔍 PROXY_REQUEST: Determining sync target...")
+                    if target_instance.name == "primary":
+                        sync_target_value = "replica"  # Sync to replica
+                        logger.info(f"✅ PROXY_REQUEST: Primary target -> sync to replica")
+                    else:
+                        sync_target_value = "primary"  # Sync to primary
+                        logger.info(f"✅ PROXY_REQUEST: Replica target -> sync to primary")
+                    
+                    # Special handling for DELETE operations (bidirectional sync)
+                    if request.method == "DELETE":
+                        sync_target_value = "both"  # Sync to both instances
+                        logger.info(f"✅ PROXY_REQUEST: DELETE operation -> sync to both")
+                    
+                    logger.info(f"🎯 Sync target determined: {sync_target_value}")
+                    
+                    # SIMPLIFIED WAL LOGGING - bypassing complex add_wal_write method
+                    logger.info(f"🔍 PROXY_REQUEST: Starting SIMPLIFIED WAL logging...")
+                    try:
+                        import uuid
+                        write_id = str(uuid.uuid4())
+                        logger.info(f"✅ PROXY_REQUEST: Generated write_id: {write_id[:8]}")
+                        
+                        logger.info(f"🔍 PROXY_REQUEST: Extracting collection identifier...")
+                        collection_id = enhanced_wal.extract_collection_identifier(normalized_path)
+                        logger.info(f"✅ PROXY_REQUEST: Collection ID: {collection_id}")
+                        
+                        # Direct database insert without complex logic
+                        logger.info(f"🔍 PROXY_REQUEST: Acquiring database lock...")
+                        with enhanced_wal.db_lock:
+                            logger.info(f"✅ PROXY_REQUEST: Database lock acquired")
+                            
+                            logger.info(f"🔍 PROXY_REQUEST: Getting database connection...")
+                            with enhanced_wal.get_db_connection() as conn:
+                                logger.info(f"✅ PROXY_REQUEST: Database connection established")
+                                
+                                logger.info(f"🔍 PROXY_REQUEST: Creating cursor...")
+                                with conn.cursor() as cur:
+                                    logger.info(f"✅ PROXY_REQUEST: Cursor created")
+                                    
+                                    logger.info(f"🔍 PROXY_REQUEST: Executing WAL insert SQL...")
+                                    cur.execute("""
+                                        INSERT INTO unified_wal_writes 
+                                        (write_id, method, path, data, headers, target_instance, 
+                                         collection_id, timestamp, executed_on, status, data_size_bytes, priority)
+                                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s)
+                                    """, (
+                                        write_id,
+                                        request.method,
+                                        normalized_path,
+                                        data or b'',
+                                        '{"Content-Type": "application/json"}',
+                                        sync_target_value,
+                                        collection_id,
+                                        target_instance.name,
+                                        'executed',
+                                        len(data) if data else 0,
+                                        1 if request.method == 'DELETE' else 0
+                                    ))
+                                    logger.info(f"✅ PROXY_REQUEST: SQL executed successfully")
+                                    
+                                    logger.info(f"🔍 PROXY_REQUEST: Committing transaction...")
+                                    conn.commit()
+                                    logger.info(f"✅ PROXY_REQUEST: Transaction committed")
+                        
+                        logger.info(f"✅ SIMPLIFIED WAL logged: write_id={write_id[:8]}, method={request.method}, target={sync_target_value}")
+                        
+                    except Exception as simple_wal_error:
+                        logger.error(f"❌ SIMPLIFIED WAL logging failed: {simple_wal_error}")
+                        import traceback
+                        logger.error(f"Simplified WAL traceback: {traceback.format_exc()}")
+                    
+                except Exception as wal_error:
+                    import traceback
+                    logger.error(f"❌ WAL logging failed: {wal_error}")
+                    logger.error(f"WAL error traceback: {traceback.format_exc()}")
+                    # Continue anyway - don't fail request for WAL issues
+            else:
+                logger.info(f"ℹ️ PROXY_REQUEST: READ OPERATION - No WAL logging needed")
+            
+            # Make request with proven working approach
+            logger.info(f"🔍 PROXY_REQUEST: Making HTTP request to target...")
             import requests
             response = requests.request(
                 method=request.method,
@@ -1386,9 +1433,11 @@ if __name__ == '__main__':
                 timeout=10
             )
             
-            logger.info(f"Direct response: {response.status_code}, Content: {response.text[:100]}")
+            logger.info(f"✅ PROXY_REQUEST: HTTP response received: {response.status_code}")
+            logger.info(f"Response: {response.status_code}, Content: {response.text[:100]}")
             
-            # Return simple response
+            # Return response with working JSON handling
+            logger.info(f"✅ PROXY_REQUEST: Returning response to client")
             return Response(
                 response.text,
                 status=response.status_code,
@@ -1397,7 +1446,7 @@ if __name__ == '__main__':
             
         except Exception as e:
             import traceback
-            logger.error(f"Request forwarding failed for {request.method} /{path}: {e}")
+            logger.error(f"❌ PROXY_REQUEST FAILED for {request.method} /{path}: {e}")
             logger.error(f"Full traceback: {traceback.format_exc()}")
             return jsonify({"error": f"Service temporarily unavailable: {str(e)}"}), 503
     
