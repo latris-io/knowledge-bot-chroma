@@ -1029,9 +1029,9 @@ class UnifiedWALLoadBalancer:
         """Get replica instance if healthy"""
         return next((inst for inst in self.instances if inst.name == "replica" and inst.is_healthy), None)
 
-    def get_healthy_instances(self) -> List[ChromaInstance]:
-        """Get all healthy instances"""
-        return [inst for inst in self.instances if inst.is_healthy]
+    def get_healthy_instances(self):
+        """Get list of currently healthy instances"""
+        return [instance for instance in self.instances if instance.is_healthy]
 
     def health_monitor_loop(self):
         """Health monitoring for instances"""
@@ -1181,7 +1181,9 @@ class UnifiedWALLoadBalancer:
         
         # Execute the request using proven working pattern from old load balancer
         try:
-            url = f"{target_instance.url}{path}"
+            # CRITICAL FIX: Convert V1→V2 API path before making request
+            normalized_path = self.normalize_api_path_to_v2(path)
+            url = f"{target_instance.url}{normalized_path}"
             
             # Create session with proper headers (like old load balancer)
             session = requests.Session()
@@ -1236,6 +1238,36 @@ class UnifiedWALLoadBalancer:
                     return self.forward_request(method, path, headers, data, other_instances[0], retry_count + 1, max_retries)
             
             raise e
+
+    def normalize_api_path_to_v2(self, path: str) -> str:
+        """Convert V1-style API paths to proper V2 format for ChromaDB compatibility"""
+        
+        # V1 to V2 path conversions
+        v1_to_v2_mappings = {
+            # Collections endpoints
+            "/api/v2/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
+            "/api/v1/collections": "/api/v2/tenants/default_tenant/databases/default_database/collections",
+            
+            # Collection-specific endpoints (with dynamic collection ID/name)
+            "/api/v2/collections/": "/api/v2/tenants/default_tenant/databases/default_database/collections/",
+            "/api/v1/collections/": "/api/v2/tenants/default_tenant/databases/default_database/collections/",
+        }
+        
+        # Direct mapping for exact matches
+        if path in v1_to_v2_mappings:
+            logger.info(f"🔧 V1→V2 PATH CONVERSION: {path} → {v1_to_v2_mappings[path]}")
+            return v1_to_v2_mappings[path]
+        
+        # Pattern-based conversion for paths with collection IDs/names
+        for v1_pattern, v2_pattern in v1_to_v2_mappings.items():
+            if path.startswith(v1_pattern) and v1_pattern.endswith("/"):
+                # Replace the V1 prefix with V2 prefix, keeping the rest of the path
+                converted_path = path.replace(v1_pattern, v2_pattern, 1)
+                logger.info(f"🔧 V1→V2 PATH CONVERSION: {path} → {converted_path}")
+                return converted_path
+        
+        # If already V2 format or unknown format, return as-is
+        return path
 
 # Main execution for web service  
 if __name__ == '__main__':
