@@ -1516,6 +1516,38 @@ if __name__ == '__main__':
                 "traceback": traceback.format_exc()
             }), 500
     
+    @app.route('/admin/wal_errors', methods=['GET'])
+    def wal_errors():
+        """Get recent WAL sync errors for debugging"""
+        try:
+            with enhanced_wal.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT write_id, method, path, error_message, updated_at, retry_count
+                        FROM unified_wal_writes 
+                        WHERE status = 'failed' 
+                        ORDER BY updated_at DESC 
+                        LIMIT 10
+                    """)
+                    
+                    errors = []
+                    for row in cur.fetchall():
+                        errors.append({
+                            'write_id': row[0][:8],
+                            'method': row[1],
+                            'path': row[2],
+                            'error': row[3],
+                            'timestamp': row[4].isoformat() if row[4] else None,
+                            'retry_count': row[5]
+                        })
+                    
+                    return jsonify({
+                        'recent_errors': errors,
+                        'error_count': len(errors)
+                    })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
     @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
         """Streamlined proxy with essential WAL logging for distributed system"""
