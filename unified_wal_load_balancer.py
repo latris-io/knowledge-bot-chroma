@@ -635,6 +635,11 @@ class UnifiedWALLoadBalancer:
                     path = write_record['path']
                     data = write_record['data'] or b''
                     
+                    # CRITICAL: Normalize API path for WAL sync (fixes 502 errors)
+                    normalized_path = self.normalize_api_path_to_v2(path)
+                    if normalized_path != path:
+                        logger.info(f"🔧 WAL SYNC PATH CONVERSION: {path} → {normalized_path}")
+                    
                     # Fix headers parsing
                     headers = {}
                     if write_record['headers']:
@@ -643,12 +648,12 @@ class UnifiedWALLoadBalancer:
                         else:
                             headers = write_record['headers']
                     
-                    # Make the sync request
-                    response = self.make_direct_request(instance, method, path, data=data, headers=headers)
+                    # Make the sync request with normalized path
+                    response = self.make_direct_request(instance, method, normalized_path, data=data, headers=headers)
                     
                     # CRITICAL: Update collection mapping for successful collection creation on replica
                     if (method == 'POST' and 
-                        '/collections' in path and 
+                        '/collections' in normalized_path and 
                         response.status_code == 200 and 
                         instance.name == 'replica'):
                         try:

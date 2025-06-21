@@ -32,18 +32,18 @@ class CMSDeleteMonitor:
     def check_instances_health(self):
         """Check health of both instances"""
         try:
-            primary_health = requests.get(f'{self.primary_url}/api/v1/heartbeat', timeout=5)
-            primary_online = primary_health.status_code == 200
+            # Check primary instance health using V2 API
+            primary_health = requests.get(f'{self.primary_url}/api/v2/heartbeat', timeout=5)
+            primary_healthy = primary_health.status_code == 200
+            
+            # Check replica instance health using V2 API  
+            replica_health = requests.get(f'{self.replica_url}/api/v2/heartbeat', timeout=5)
+            replica_healthy = replica_health.status_code == 200
         except:
-            primary_online = False
+            primary_healthy = False
+            replica_healthy = False
         
-        try:
-            replica_health = requests.get(f'{self.replica_url}/api/v1/heartbeat', timeout=5)
-            replica_online = replica_health.status_code == 200
-        except:
-            replica_online = False
-        
-        return primary_online, replica_online
+        return primary_healthy, replica_healthy
     
     def get_collections_from_instance(self, instance_url):
         """Get all collections from an instance"""
@@ -63,10 +63,10 @@ class CMSDeleteMonitor:
     
     def detect_inconsistencies(self):
         """Detect collections that exist on one instance but not the other"""
-        primary_online, replica_online = self.check_instances_health()
+        primary_healthy, replica_healthy = self.check_instances_health()
         
-        if not primary_online or not replica_online:
-            logger.warning(f"Cannot check consistency - Primary: {'online' if primary_online else 'offline'}, Replica: {'online' if replica_online else 'offline'}")
+        if not primary_healthy or not replica_healthy:
+            logger.warning(f"Cannot check consistency - Primary: {'healthy' if primary_healthy else 'unhealthy'}, Replica: {'healthy' if replica_healthy else 'unhealthy'}")
             return []
         
         primary_collections = self.get_collections_from_instance(self.primary_url)
@@ -236,10 +236,10 @@ class CMSDeleteMonitor:
         logger.info(f"🗑️ Enhanced DELETE with verification: {collection_name}")
         
         # Check initial state
-        primary_online, replica_online = self.check_instances_health()
+        primary_healthy, replica_healthy = self.check_instances_health()
         
-        if not primary_online and not replica_online:
-            return {'success': False, 'error': 'Both instances offline'}
+        if not primary_healthy and not replica_healthy:
+            return {'success': False, 'error': 'Both instances unhealthy'}
         
         result = {
             'success': False,
@@ -262,19 +262,19 @@ class CMSDeleteMonitor:
                 time.sleep(8)
                 
                 # Verify on both instances
-                if primary_online:
+                if primary_healthy:
                     primary_collections = self.get_collections_from_instance(self.primary_url)
                     result['primary_deleted'] = collection_name not in primary_collections
                 
-                if replica_online:
+                if replica_healthy:
                     replica_collections = self.get_collections_from_instance(self.replica_url)
                     result['replica_deleted'] = collection_name not in replica_collections
                 
                 # Check if verification passed
                 verification_passed = True
-                if primary_online and not result['primary_deleted']:
+                if primary_healthy and not result['primary_deleted']:
                     verification_passed = False
-                if replica_online and not result['replica_deleted']:
+                if replica_healthy and not result['replica_deleted']:
                     verification_passed = False
                 
                 result['verification_passed'] = verification_passed
@@ -290,13 +290,13 @@ class CMSDeleteMonitor:
             logger.error(f"Load balancer DELETE failed: {e}")
         
         # Direct deletion if load balancer failed or verification failed
-        if primary_online and not result['primary_deleted']:
+        if primary_healthy and not result['primary_deleted']:
             success = self.delete_from_instance(self.primary_url, collection_name)
             result['primary_deleted'] = success
             if success:
                 logger.info("✅ Direct primary deletion successful")
         
-        if replica_online and not result['replica_deleted']:
+        if replica_healthy and not result['replica_deleted']:
             success = self.delete_from_instance(self.replica_url, collection_name)
             result['replica_deleted'] = success
             if success:
@@ -304,9 +304,9 @@ class CMSDeleteMonitor:
         
         # Final verification
         online_deletions_successful = True
-        if primary_online and not result['primary_deleted']:
+        if primary_healthy and not result['primary_deleted']:
             online_deletions_successful = False
-        if replica_online and not result['replica_deleted']:
+        if replica_healthy and not result['replica_deleted']:
             online_deletions_successful = False
         
         result['success'] = online_deletions_successful
