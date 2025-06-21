@@ -672,6 +672,9 @@ class UnifiedWALLoadBalancer:
                         else:
                             headers = write_record['headers']
                     
+                    # Extract collection ID from path for UUID mapping
+                    collection_id = self.extract_collection_identifier(final_path)
+                    
                     # CRITICAL: Map collection ID for proper sync (UUID resolution for document operations)
                     if collection_id and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
                         # This is a document operation - need to map collection UUID from source to target instance
