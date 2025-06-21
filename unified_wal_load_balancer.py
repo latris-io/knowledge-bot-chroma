@@ -1334,6 +1334,41 @@ class UnifiedWALLoadBalancer:
             logger.error(f"❌ UUID resolution failed for {collection_name} on {target_instance_name}: {e}")
             return None
 
+    def resolve_collection_name_to_uuid_by_source_id(self, source_collection_id: str, target_instance_name: str) -> Optional[str]:
+        """Map collection UUID from source instance to target instance UUID"""
+        try:
+            # Query mapping database to find the collection name and get target UUID
+            with self.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Find collection name by source UUID
+                    cur.execute("""
+                        SELECT collection_name, primary_collection_id, replica_collection_id 
+                        FROM collection_id_mapping 
+                        WHERE primary_collection_id = %s OR replica_collection_id = %s
+                    """, (source_collection_id, source_collection_id))
+                    
+                    result = cur.fetchone()
+                    if result:
+                        collection_name, primary_uuid, replica_uuid = result
+                        
+                        # Return the target instance UUID
+                        if target_instance_name == "primary" and primary_uuid:
+                            logger.debug(f"✅ Mapped {source_collection_id[:8]} -> {primary_uuid[:8]} (primary)")
+                            return primary_uuid
+                        elif target_instance_name == "replica" and replica_uuid:
+                            logger.debug(f"✅ Mapped {source_collection_id[:8]} -> {replica_uuid[:8]} (replica)")
+                            return replica_uuid
+                        else:
+                            logger.warning(f"⚠️ Missing {target_instance_name} UUID for collection {collection_name}")
+                            return None
+                    else:
+                        logger.warning(f"⚠️ No mapping found for UUID {source_collection_id[:8]}")
+                        return source_collection_id  # Return as-is if no mapping found
+                        
+        except Exception as e:
+            logger.error(f"❌ UUID mapping failed for {source_collection_id[:8]} -> {target_instance_name}: {e}")
+            return source_collection_id  # Return as-is on error
+
 # Main execution for web service  
 if __name__ == '__main__':
     logger.info("🚀 Starting Enhanced Unified WAL Load Balancer with High-Volume Support")
