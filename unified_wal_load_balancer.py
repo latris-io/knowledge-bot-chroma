@@ -675,18 +675,24 @@ class UnifiedWALLoadBalancer:
                     # CRITICAL: Map collection ID for proper sync (UUID resolution for document operations)
                     if collection_id and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
                         # This is a document operation - need to map collection UUID from source to target instance
-                        logger.debug(f"🔍 Document operation detected: {method} {final_path}")
-                        logger.debug(f"   Source collection ID: {collection_id}")
-                        logger.debug(f"   Target instance: {instance.name}")
+                        logger.info(f"🔍 DOCUMENT OPERATION DETECTED: {method} {final_path}")
+                        logger.info(f"   Source collection ID: {collection_id}")
+                        logger.info(f"   Target instance: {instance.name}")
                         
                         # Get the correct UUID for the target instance
                         mapped_uuid = self.resolve_collection_name_to_uuid_by_source_id(collection_id, instance.name)
+                        logger.info(f"   Mapping result: {mapped_uuid}")
+                        
                         if mapped_uuid and mapped_uuid != collection_id:
                             # Replace source UUID with target UUID in path
+                            old_path = final_path
                             final_path = final_path.replace(collection_id, mapped_uuid)
-                            logger.debug(f"✅ UUID mapped for {instance.name}: {collection_id[:8]} -> {mapped_uuid[:8]}")
+                            logger.info(f"✅ UUID MAPPED for {instance.name}: {collection_id[:8]} -> {mapped_uuid[:8]}")
+                            logger.info(f"   Path changed: {old_path} -> {final_path}")
                         else:
-                            logger.warning(f"⚠️ Could not map UUID {collection_id[:8]} for {instance.name}")
+                            logger.error(f"❌ CRITICAL: Could not map UUID {collection_id[:8]} for {instance.name}")
+                            logger.error(f"   This will cause 404 error on target instance")
+                            # Continue anyway to see the error in logs
                     
                     # Make the sync request with normalized path
                     response = self.make_direct_request(instance, method, final_path, data=data, headers=headers)
@@ -1365,6 +1371,8 @@ class UnifiedWALLoadBalancer:
     def resolve_collection_name_to_uuid_by_source_id(self, source_collection_id: str, target_instance_name: str) -> Optional[str]:
         """Map collection UUID from source instance to target instance UUID"""
         try:
+            logger.info(f"🔍 UUID MAPPING: Resolving {source_collection_id[:8]} for {target_instance_name}")
+            
             # Query mapping database to find the collection name and get target UUID
             with self.get_db_connection() as conn:
                 with conn.cursor() as cur:
@@ -1378,19 +1386,25 @@ class UnifiedWALLoadBalancer:
                     result = cur.fetchone()
                     if result:
                         collection_name, primary_uuid, replica_uuid = result
+                        logger.info(f"   Found mapping: {collection_name} -> primary:{primary_uuid[:8] if primary_uuid else 'None'}, replica:{replica_uuid[:8] if replica_uuid else 'None'}")
                         
                         # Return the target instance UUID
                         if target_instance_name == "primary" and primary_uuid:
-                            logger.debug(f"✅ Mapped {source_collection_id[:8]} -> {primary_uuid[:8]} (primary)")
+                            logger.info(f"✅ Mapped {source_collection_id[:8]} -> {primary_uuid[:8]} (primary)")
                             return primary_uuid
                         elif target_instance_name == "replica" and replica_uuid:
-                            logger.debug(f"✅ Mapped {source_collection_id[:8]} -> {replica_uuid[:8]} (replica)")
+                            logger.info(f"✅ Mapped {source_collection_id[:8]} -> {replica_uuid[:8]} (replica)")
                             return replica_uuid
                         else:
-                            logger.warning(f"⚠️ Missing {target_instance_name} UUID for collection {collection_name}")
+                            logger.error(f"❌ Missing {target_instance_name} UUID for collection {collection_name}")
+                            logger.error(f"   Available: primary={primary_uuid is not None}, replica={replica_uuid is not None}")
                             return None
                     else:
-                        logger.warning(f"⚠️ No mapping found for UUID {source_collection_id[:8]}")
+                        logger.error(f"❌ No mapping found for UUID {source_collection_id[:8]}")
+                        # Check if any mappings exist at all
+                        cur.execute("SELECT COUNT(*) FROM collection_id_mapping")
+                        total_mappings = cur.fetchone()[0]
+                        logger.error(f"   Total mappings in database: {total_mappings}")
                         return source_collection_id  # Return as-is if no mapping found
                         
         except Exception as e:
