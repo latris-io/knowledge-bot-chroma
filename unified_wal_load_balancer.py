@@ -713,10 +713,16 @@ class UnifiedWALLoadBalancer:
                     self.stats["successful_syncs"] += 1
                     
                 except Exception as e:
-                    # Mark as failed with retry increment
-                    self.mark_write_failed(write_record['write_id'], str(e))
+                    # Enhanced error logging for debugging WAL sync failures
+                    error_msg = str(e)
+                    logger.error(f"❌ WAL SYNC FAILED: {write_record['write_id'][:8]} - {method} {final_path}")
+                    logger.error(f"   Error: {error_msg}")
+                    logger.error(f"   Instance: {instance.name}")
+                    logger.error(f"   Data size: {len(data) if data else 0} bytes")
+                    
+                    # Mark as failed with detailed error information
+                    self.mark_write_failed(write_record['write_id'], f"{method} {final_path}: {error_msg}")
                     self.stats["failed_syncs"] += 1
-                    logger.debug(f"❌ Failed to sync write {write_record['write_id'][:8]}: {e}")
             
             end_memory = psutil.virtual_memory().used / 1024 / 1024
             memory_delta = end_memory - start_memory
