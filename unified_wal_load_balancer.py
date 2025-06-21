@@ -1363,25 +1363,38 @@ if __name__ == '__main__':
                 
             logger.info(f"Forwarding {request.method} request to /{path}")
             
-            # Use simpler approach like old load balancer - get Flask request data and forward directly
-            data = b''
-            if request.method in ['POST', 'PUT', 'PATCH'] and request.content_length:
-                data = request.get_data()
+            # EMERGENCY FIX: Use direct forwarding instead of complex forward_request
+            # Get target instance
+            target_instance = enhanced_wal.choose_read_instance(f"/{path}", request.method, {})
+            if not target_instance:
+                return jsonify({"error": "No healthy instances available"}), 503
             
-            response = enhanced_wal.forward_request(
+            # Convert API path
+            normalized_path = enhanced_wal.normalize_api_path_to_v2(f"/{path}")
+            url = f"{target_instance.url}{normalized_path}"
+            
+            # Get request data
+            data = request.get_data() if request.method in ['POST', 'PUT', 'PATCH'] else None
+            
+            # Make direct request
+            import requests
+            response = requests.request(
                 method=request.method,
-                path=f"/{path}",
-                headers={},  # Let session handle headers
-                data=data
+                url=url,
+                headers={'Content-Type': 'application/json'} if data else {},
+                data=data,
+                timeout=10
             )
             
-            logger.info(f"Successfully forwarded {request.method} /{path} -> {response.status_code}")
+            logger.info(f"Direct response: {response.status_code}, Content: {response.text[:100]}")
             
+            # Return simple response
             return Response(
-                response.content,
+                response.text,
                 status=response.status_code,
-                headers=dict(response.headers)
+                mimetype='application/json'
             )
+            
         except Exception as e:
             import traceback
             logger.error(f"Request forwarding failed for {request.method} /{path}: {e}")
