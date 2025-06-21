@@ -691,18 +691,29 @@ class UnifiedWALLoadBalancer:
                                 with self.db_lock:
                                     with self.get_db_connection() as conn:
                                         with conn.cursor() as cur:
+                                            # First try to update existing mapping
                                             cur.execute("""
                                                 UPDATE collection_id_mapping 
                                                 SET replica_collection_id = %s, updated_at = NOW()
-                                                WHERE collection_name = %s AND replica_collection_id IS NULL
+                                                WHERE collection_name = %s
                                             """, (replica_uuid, collection_name))
                                             
                                             if cur.rowcount > 0:
                                                 conn.commit()
                                                 logger.info(f"✅ Updated collection mapping: {collection_name} -> replica UUID: {replica_uuid[:8]}")
                                             else:
-                                                logger.info(f"ℹ️ Collection mapping already exists for {collection_name}")
-                                
+                                                # Create new mapping if none exists
+                                                cur.execute("""
+                                                    INSERT INTO collection_id_mapping 
+                                                    (collection_name, primary_collection_id, replica_collection_id, created_at)
+                                                    VALUES (%s, NULL, %s, NOW())
+                                                    ON CONFLICT (collection_name) DO UPDATE SET
+                                                    replica_collection_id = EXCLUDED.replica_collection_id,
+                                                    updated_at = NOW()
+                                                """, (collection_name, replica_uuid))
+                                                conn.commit()
+                                                logger.info(f"✅ Created collection mapping: {collection_name} -> replica UUID: {replica_uuid[:8]}")
+                                        
                         except Exception as mapping_error:
                             logger.error(f"❌ Failed to update collection mapping: {mapping_error}")
                             # Don't fail sync for mapping issues
