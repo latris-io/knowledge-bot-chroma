@@ -1066,14 +1066,38 @@ class UnifiedWALLoadBalancer:
         """Make direct request without WAL logging (used for sync operations)"""
         kwargs['timeout'] = self.request_timeout
         
+        # CRITICAL FIX: Ensure proper JSON handling for document operations
+        if 'data' in kwargs and kwargs['data']:
+            # If data is bytes, decode it for JSON operations
+            if isinstance(kwargs['data'], bytes):
+                try:
+                    # Decode bytes to string, then parse as JSON to ensure it's valid
+                    data_str = kwargs['data'].decode('utf-8')
+                    json.loads(data_str)  # Validate JSON
+                    kwargs['data'] = data_str
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    logger.warning(f"Invalid JSON data for {method} {path}: {e}")
+                    # Keep as bytes if it's not valid JSON
+            
+            # Ensure Content-Type header is set for JSON data
+            if 'headers' not in kwargs:
+                kwargs['headers'] = {}
+            if 'Content-Type' not in kwargs['headers']:
+                kwargs['headers']['Content-Type'] = 'application/json'
+        
         try:
             url = f"{instance.url}{path}"
+            logger.debug(f"🔧 WAL SYNC REQUEST: {method} {url}")
             response = requests.request(method, url, **kwargs)
+            
+            # Log response for debugging WAL sync issues
+            logger.debug(f"🔧 WAL SYNC RESPONSE: {response.status_code} - {response.text[:100]}")
+            
             response.raise_for_status()
             return response
             
         except Exception as e:
-            logger.warning(f"Direct request to {instance.name} failed: {e}")
+            logger.warning(f"Direct request to {instance.name} failed: {method} {path} - {e}")
             raise e
 
     def get_primary_instance(self) -> Optional[ChromaInstance]:
