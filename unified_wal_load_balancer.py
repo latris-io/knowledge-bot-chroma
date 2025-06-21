@@ -711,6 +711,21 @@ class UnifiedWALLoadBalancer:
                     self.mark_write_synced(write_id)
                     success_count += 1
                     self.stats["successful_syncs"] += 1
+                    logger.debug(f"✅ WAL SYNC SUCCESS: {write_record['write_id'][:8]} - {method} {final_path}")
+                    
+                except requests.exceptions.HTTPError as http_err:
+                    # Handle HTTP errors specifically
+                    status_code = getattr(http_err.response, 'status_code', 'unknown')
+                    response_text = getattr(http_err.response, 'text', 'no response text')[:200]
+                    error_msg = f"HTTP {status_code}: {response_text}"
+                    
+                    logger.error(f"❌ WAL SYNC HTTP ERROR: {write_record['write_id'][:8]} - {method} {final_path}")
+                    logger.error(f"   HTTP Status: {status_code}")
+                    logger.error(f"   Response: {response_text}")
+                    logger.error(f"   Instance: {instance.name}")
+                    
+                    self.mark_write_failed(write_record['write_id'], f"{method} {final_path}: {error_msg}")
+                    self.stats["failed_syncs"] += 1
                     
                 except Exception as e:
                     # Enhanced error logging for debugging WAL sync failures
