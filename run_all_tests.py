@@ -97,9 +97,9 @@ class ProductionValidator:
             
         print(f"   Collection created successfully via load balancer")
         
-        # Wait for auto-mapping to complete
+        # Wait for auto-mapping to complete (WAL sync takes ~30 seconds in production)
         print("   Waiting for auto-mapping system to create collection on both instances...")
-        time.sleep(5)
+        time.sleep(35)  # Increased from 5 to 35 seconds for real WAL sync timing
         
         # Verify collection exists BY NAME on primary instance (with different UUID)
         print("   Verifying collection exists on primary instance by name...")
@@ -147,16 +147,16 @@ class ProductionValidator:
         
         # Verify collection mapping exists in load balancer
         print("   Verifying collection mapping exists in load balancer...")
-        mapping_response = requests.get(f"{self.base_url}/collection/mappings", timeout=15)
+        mapping_response = requests.get(f"{self.base_url}/admin/collection_mappings", timeout=15)
         mapping_data = self.validate_json(mapping_response, "Collection Mapping Check")
         if not mapping_data:
             return False
             
-        test_mapping = next((m for m in mapping_data['mappings'] if m['collection_name'] == test_collection), None)
+        test_mapping = next((m for m in mapping_data['collection_mappings'] if m['collection_name'] == test_collection), None)
         if not test_mapping:
             return self.fail("Collection Mapping", "No mapping found in load balancer for test collection")
             
-        print(f"   ✅ Mapping exists: {test_collection} -> Primary: {test_mapping['primary_collection_id'][:8]}..., Replica: {test_mapping['replica_collection_id'][:8]}...")
+        print(f"   ✅ Mapping exists: {test_collection} -> Primary: {test_mapping['primary_uuid']}, Replica: {test_mapping['replica_uuid']}")
         
         print(f"✅ VALIDATED: Distributed collection creation working correctly")
         print(f"   - Collection created via load balancer: ✅")
