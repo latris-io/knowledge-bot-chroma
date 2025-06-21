@@ -640,6 +640,30 @@ class UnifiedWALLoadBalancer:
                     if normalized_path != path:
                         logger.info(f"🔧 WAL SYNC PATH CONVERSION: {path} → {normalized_path}")
                     
+                    # CRITICAL: Resolve collection names to UUIDs for document operations in WAL sync
+                    final_path = normalized_path
+                    if '/collections/' in normalized_path and any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
+                        # Extract collection name from path
+                        path_parts = normalized_path.split('/collections/')
+                        if len(path_parts) > 1:
+                            collection_part = path_parts[1].split('/')[0]
+                            # Check if it's a name (not UUID) - UUIDs have specific format
+                            import re
+                            if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_part):
+                                logger.info(f"🔍 WAL SYNC: Detected collection name '{collection_part}' in document operation for {instance.name}")
+                                
+                                # Resolve collection name to UUID for target instance
+                                resolved_uuid = self.resolve_collection_name_to_uuid(collection_part, instance.name)
+                                if resolved_uuid:
+                                    # Replace collection name with UUID in path
+                                    final_path = normalized_path.replace(f'/collections/{collection_part}/', f'/collections/{resolved_uuid}/')
+                                    logger.info(f"✅ WAL SYNC: Resolved path for {instance.name}: {normalized_path} -> {final_path}")
+                                else:
+                                    logger.warning(f"⚠️ WAL SYNC: Could not resolve collection name '{collection_part}' to UUID for {instance.name}")
+                                    # Skip this sync operation - collection doesn't exist on target
+                                    self.mark_write_failed(write_id, f"Collection '{collection_part}' not found on {instance.name}")
+                                    continue
+                    
                     # Fix headers parsing
                     headers = {}
                     if write_record['headers']:
@@ -649,11 +673,11 @@ class UnifiedWALLoadBalancer:
                             headers = write_record['headers']
                     
                     # Make the sync request with normalized path
-                    response = self.make_direct_request(instance, method, normalized_path, data=data, headers=headers)
+                    response = self.make_direct_request(instance, method, final_path, data=data, headers=headers)
                     
                     # CRITICAL: Update collection mapping for successful collection creation on replica
                     if (method == 'POST' and 
-                        '/collections' in normalized_path and 
+                        '/collections' in final_path and 
                         response.status_code == 200 and 
                         instance.name == 'replica'):
                         try:
@@ -1472,8 +1496,8 @@ if __name__ == '__main__':
             # Convert API path for ChromaDB compatibility
             normalized_path = enhanced_wal.normalize_api_path_to_v2(f"/{path}")
             
-            # CRITICAL: Collection name-to-UUID resolution for document operations
-            original_path = normalized_path
+            # CRITICAL: Resolve collection names to UUIDs for document operations in WAL sync
+            final_path = normalized_path
             if '/collections/' in normalized_path and any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
                 # Extract collection name from path
                 path_parts = normalized_path.split('/collections/')
@@ -1482,19 +1506,19 @@ if __name__ == '__main__':
                     # Check if it's a name (not UUID) - UUIDs have specific format
                     import re
                     if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_part):
-                        logger.info(f"🔍 PROXY_REQUEST: Detected collection name '{collection_part}' in document operation")
+                        logger.info(f"🔍 PROXY_REQUEST: Detected collection name '{collection_part}' in document operation for {target_instance.name}")
                         
                         # Resolve collection name to UUID for target instance
                         resolved_uuid = enhanced_wal.resolve_collection_name_to_uuid(collection_part, target_instance.name)
                         if resolved_uuid:
                             # Replace collection name with UUID in path
-                            normalized_path = normalized_path.replace(f'/collections/{collection_part}/', f'/collections/{resolved_uuid}/')
-                            logger.info(f"✅ PROXY_REQUEST: Resolved path: {original_path} -> {normalized_path}")
+                            final_path = normalized_path.replace(f'/collections/{collection_part}/', f'/collections/{resolved_uuid}/')
+                            logger.info(f"✅ PROXY_REQUEST: Resolved path for {target_instance.name}: {normalized_path} -> {final_path}")
                         else:
-                            logger.warning(f"⚠️ PROXY_REQUEST: Could not resolve collection name '{collection_part}' to UUID")
+                            logger.warning(f"⚠️ PROXY_REQUEST: Could not resolve collection name '{collection_part}' to UUID for {target_instance.name}")
                             return jsonify({"error": f"Collection '{collection_part}' not found"}), 404
             
-            url = f"{target_instance.url}{normalized_path}"
+            url = f"{target_instance.url}{final_path}"
             logger.info(f"✅ PROXY_REQUEST: URL constructed: {url}")
             
             # Get request data
@@ -1532,7 +1556,7 @@ if __name__ == '__main__':
                         logger.info(f"✅ PROXY_REQUEST: Generated write_id: {write_id[:8]}")
                         
                         logger.info(f"🔍 PROXY_REQUEST: Extracting collection identifier...")
-                        collection_id = enhanced_wal.extract_collection_identifier(normalized_path)
+                        collection_id = enhanced_wal.extract_collection_identifier(final_path)
                         logger.info(f"✅ PROXY_REQUEST: Collection ID: {collection_id}")
                         
                         # Direct database insert without complex logic
@@ -1557,7 +1581,7 @@ if __name__ == '__main__':
                                     """, (
                                         write_id,
                                         request.method,
-                                        normalized_path,
+                                        final_path,
                                         data or b'',
                                         '{"Content-Type": "application/json"}',
                                         sync_target_value,
@@ -1604,7 +1628,7 @@ if __name__ == '__main__':
             
             # CRITICAL: Create collection mapping for distributed UUID tracking
             if (request.method == 'POST' and 
-                '/collections' in normalized_path and 
+                '/collections' in final_path and 
                 response.status_code == 200 and 
                 data):
                 try:

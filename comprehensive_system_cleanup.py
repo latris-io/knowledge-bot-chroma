@@ -18,6 +18,9 @@ import os
 import time
 import logging
 from urllib.parse import urlparse
+import json
+import re
+from typing import List, Dict, Set
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -33,6 +36,33 @@ class ComprehensiveSystemCleanup:
         # Database connection string from environment or default
         self.database_url = os.getenv('DATABASE_URL', 
             'postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha')
+        
+        # Test collection patterns (bulletproof protection for production)
+        self.test_patterns = [
+            r".*TEST.*",
+            r".*DEBUG.*", 
+            r".*AUTO_MAP.*",
+            r".*WAL_FIX.*",
+            r".*PATH_NORM.*",
+            r".*UUID_RES.*",
+            r".*ENHANCED_MAPPING.*",
+            r".*CMS_PRODUCTION_TEST.*",
+            r".*CMS_FAILOVER_TEST.*",
+            r".*WAL_SYNC_TEST.*",
+            r".*BASELINE_TEST.*",
+            r".*REAL_TEST.*",
+            r".*REPLICA_FIX.*",
+            r".*SIMPLIFIED_WAL.*",
+            r".*POST_DEPLOY.*",
+            r".*SCOPE_FIX.*"
+        ]
+        
+        # BULLETPROOF PROTECTION: Never delete these collections
+        self.protected_collections = {
+            'global', 'Global', 'GLOBAL', 
+            'production', 'prod', 'main',
+            'Production', 'Prod', 'Main'
+        }
     
     def get_db_connection(self):
         """Get PostgreSQL database connection"""
@@ -466,6 +496,187 @@ class ComprehensiveSystemCleanup:
             logger.warning(f"⚠️ Cleanup verification PARTIAL - Failed: {failed_checks}")
         
         return verification_results
+
+class DistributedTestCleanup:
+    def __init__(self, load_balancer_url: str = "https://chroma-load-balancer.onrender.com"):
+        self.load_balancer_url = load_balancer_url
+        self.primary_url = "https://chroma-primary.onrender.com"
+        self.replica_url = "https://chroma-replica.onrender.com"
+        
+        # Test collection patterns (bulletproof protection for production)
+        self.test_patterns = [
+            r".*TEST.*",
+            r".*DEBUG.*", 
+            r".*AUTO_MAP.*",
+            r".*WAL_FIX.*",
+            r".*PATH_NORM.*",
+            r".*UUID_RES.*",
+            r".*ENHANCED_MAPPING.*",
+            r".*CMS_PRODUCTION_TEST.*",
+            r".*CMS_FAILOVER_TEST.*",
+            r".*WAL_SYNC_TEST.*",
+            r".*BASELINE_TEST.*",
+            r".*REAL_TEST.*",
+            r".*REPLICA_FIX.*",
+            r".*SIMPLIFIED_WAL.*",
+            r".*POST_DEPLOY.*",
+            r".*SCOPE_FIX.*"
+        ]
+        
+        # BULLETPROOF PROTECTION: Never delete these collections
+        self.protected_collections = {
+            'global', 'Global', 'GLOBAL', 
+            'production', 'prod', 'main',
+            'Production', 'Prod', 'Main'
+        }
+        
+    def is_test_collection(self, name: str) -> bool:
+        """Check if collection is a test collection (safe to delete)"""
+        # Bulletproof protection for production collections
+        if name in self.protected_collections:
+            print(f"🛡️  PROTECTED: {name} (production collection)")
+            return False
+            
+        # Check test patterns
+        for pattern in self.test_patterns:
+            if re.match(pattern, name, re.IGNORECASE):
+                return True
+        return False
+    
+    def get_collections_from_instance(self, instance_url: str, instance_name: str) -> List[Dict]:
+        """Get all collections from a specific instance"""
+        try:
+            response = requests.get(
+                f"{instance_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                timeout=15
+            )
+            if response.status_code == 200:
+                collections = response.json()
+                test_collections = [c for c in collections if self.is_test_collection(c['name'])]
+                print(f"📊 {instance_name}: {len(test_collections)}/{len(collections)} test collections found")
+                return test_collections
+            else:
+                print(f"❌ Failed to get collections from {instance_name}: {response.status_code}")
+                return []
+        except Exception as e:
+            print(f"❌ Error getting collections from {instance_name}: {e}")
+            return []
+    
+    def delete_collection_by_uuid(self, instance_url: str, instance_name: str, collection_uuid: str, collection_name: str) -> bool:
+        """Delete collection by UUID from specific instance"""
+        try:
+            response = requests.delete(
+                f"{instance_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_uuid}",
+                timeout=30
+            )
+            if response.status_code in [200, 204, 404]:
+                print(f"   ✅ {instance_name}: Deleted {collection_name} ({collection_uuid[:8]}...)")
+                return True
+            else:
+                print(f"   ❌ {instance_name}: Failed to delete {collection_name} - HTTP {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"   ❌ {instance_name}: Error deleting {collection_name} - {e}")
+            return False
+    
+    def cleanup_collection_mappings(self) -> int:
+        """Clean up test collection mappings from load balancer database"""
+        try:
+            # Get current mappings
+            response = requests.get(f"{self.load_balancer_url}/admin/collection_mappings", timeout=15)
+            if response.status_code != 200:
+                print(f"❌ Failed to get collection mappings: {response.status_code}")
+                return 0
+                
+            mappings_data = response.json()
+            mappings = mappings_data.get('collection_mappings', [])
+            
+            test_mappings = [m for m in mappings if self.is_test_collection(m['collection_name'])]
+            print(f"📊 Found {len(test_mappings)} test collection mappings to clean")
+            
+            # Note: There's no direct API to delete mappings, they should be cleaned up
+            # automatically when collections are deleted, or via database cleanup
+            
+            return len(test_mappings)
+            
+        except Exception as e:
+            print(f"❌ Error checking collection mappings: {e}")
+            return 0
+    
+    def cleanup_instance(self, instance_url: str, instance_name: str) -> tuple:
+        """Clean up test collections from a specific instance"""
+        print(f"\n🧹 Cleaning up {instance_name} instance...")
+        
+        collections = self.get_collections_from_instance(instance_url, instance_name)
+        if not collections:
+            print(f"   No test collections found on {instance_name}")
+            return 0, 0
+        
+        cleaned = 0
+        failed = 0
+        
+        for collection in collections:
+            name = collection['name']
+            uuid = collection['id']
+            
+            if self.delete_collection_by_uuid(instance_url, instance_name, uuid, name):
+                cleaned += 1
+            else:
+                failed += 1
+                
+            time.sleep(0.5)  # Rate limiting
+        
+        print(f"   📊 {instance_name} cleanup: {cleaned} deleted, {failed} failed")
+        return cleaned, failed
+    
+    def run_comprehensive_cleanup(self) -> Dict:
+        """Run comprehensive cleanup across all components"""
+        print("🚀 COMPREHENSIVE TEST DATA CLEANUP")
+        print("=" * 60)
+        print(f"Load Balancer: {self.load_balancer_url}")
+        print(f"Primary: {self.primary_url}")
+        print(f"Replica: {self.replica_url}")
+        print("=" * 60)
+        
+        results = {
+            'primary_cleaned': 0,
+            'primary_failed': 0,
+            'replica_cleaned': 0, 
+            'replica_failed': 0,
+            'mappings_found': 0
+        }
+        
+        # Check collection mappings first
+        print("\n🔍 Checking collection mappings...")
+        results['mappings_found'] = self.cleanup_collection_mappings()
+        
+        # Clean up primary instance
+        primary_cleaned, primary_failed = self.cleanup_instance(self.primary_url, "Primary")
+        results['primary_cleaned'] = primary_cleaned
+        results['primary_failed'] = primary_failed
+        
+        # Clean up replica instance  
+        replica_cleaned, replica_failed = self.cleanup_instance(self.replica_url, "Replica")
+        results['replica_cleaned'] = replica_cleaned
+        results['replica_failed'] = replica_failed
+        
+        # Summary
+        total_cleaned = primary_cleaned + replica_cleaned
+        total_failed = primary_failed + replica_failed
+        
+        print(f"\n{'=' * 60}")
+        print("🏁 CLEANUP SUMMARY")
+        print(f"✅ Total Cleaned: {total_cleaned}")
+        print(f"❌ Total Failed: {total_failed}")
+        print(f"📊 Success Rate: {(total_cleaned/(total_cleaned+total_failed)*100) if (total_cleaned+total_failed) > 0 else 100:.1f}%")
+        print(f"🗺️  Test Mappings Found: {results['mappings_found']}")
+        
+        if total_cleaned > 0:
+            print(f"\n🎉 Cleanup completed! {total_cleaned} test collections removed")
+        else:
+            print(f"\n✨ System already clean - no test collections found")
+            
+        return results
 
 def main():
     """Run comprehensive system cleanup"""
