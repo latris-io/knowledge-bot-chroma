@@ -300,26 +300,20 @@ class UnifiedWALLoadBalancer:
                         DELETE FROM upgrade_recommendations WHERE created_at < NOW() - INTERVAL '30 days';
                     """)
                     
-                    # Upgrade recommendations table (for complete scalability)
+                    # Collection ID mapping table for distributed system
                     cur.execute("""
-                        CREATE TABLE IF NOT EXISTS upgrade_recommendations (
+                        CREATE TABLE IF NOT EXISTS collection_id_mapping (
                             id SERIAL PRIMARY KEY,
-                            recommendation_type VARCHAR(50),
-                            current_usage REAL,
-                            recommended_tier VARCHAR(100),
-                            reason TEXT,
-                            urgency VARCHAR(20),
-                            service_component VARCHAR(50) DEFAULT 'unified-wal',
-                            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                            collection_name VARCHAR(255) UNIQUE NOT NULL,
+                            primary_collection_id VARCHAR(255),
+                            replica_collection_id VARCHAR(255),
+                            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                         );
                         
-                        CREATE INDEX IF NOT EXISTS idx_recommendations_urgency ON upgrade_recommendations(urgency, created_at);
-                        CREATE INDEX IF NOT EXISTS idx_recommendations_type ON upgrade_recommendations(recommendation_type, created_at);
-                    """)
-                    
-                    # Cleanup old recommendations (keep for 30 days)
-                    cur.execute("""
-                        DELETE FROM upgrade_recommendations WHERE created_at < NOW() - INTERVAL '30 days';
+                        CREATE INDEX IF NOT EXISTS idx_collection_mapping_name ON collection_id_mapping(collection_name);
+                        CREATE INDEX IF NOT EXISTS idx_collection_mapping_primary ON collection_id_mapping(primary_collection_id);
+                        CREATE INDEX IF NOT EXISTS idx_collection_mapping_replica ON collection_id_mapping(replica_collection_id);
                     """)
                     
                     conn.commit()
@@ -651,6 +645,38 @@ class UnifiedWALLoadBalancer:
                     
                     # Make the sync request
                     response = self.make_direct_request(instance, method, path, data=data, headers=headers)
+                    
+                    # CRITICAL: Update collection mapping for successful collection creation on replica
+                    if (method == 'POST' and 
+                        '/collections' in path and 
+                        response.status_code == 200 and 
+                        instance.name == 'replica'):
+                        try:
+                            # Parse response to get replica collection info
+                            collection_info = response.json()
+                            replica_uuid = collection_info.get('id')
+                            collection_name = collection_info.get('name')
+                            
+                            if replica_uuid and collection_name:
+                                # Update mapping with replica UUID
+                                with self.db_lock:
+                                    with self.get_db_connection() as conn:
+                                        with conn.cursor() as cur:
+                                            cur.execute("""
+                                                UPDATE collection_id_mapping 
+                                                SET replica_collection_id = %s, updated_at = NOW()
+                                                WHERE collection_name = %s AND replica_collection_id IS NULL
+                                            """, (replica_uuid, collection_name))
+                                            
+                                            if cur.rowcount > 0:
+                                                conn.commit()
+                                                logger.info(f"✅ Updated collection mapping: {collection_name} -> replica UUID: {replica_uuid[:8]}")
+                                            else:
+                                                logger.info(f"ℹ️ Collection mapping already exists for {collection_name}")
+                                
+                        except Exception as mapping_error:
+                            logger.error(f"❌ Failed to update collection mapping: {mapping_error}")
+                            # Don't fail sync for mapping issues
                     
                     # Mark as synced
                     self.mark_write_synced(write_id)
@@ -1304,6 +1330,46 @@ if __name__ == '__main__':
                 "traceback": traceback.format_exc()
             }), 500
     
+    @app.route('/admin/collection_mappings', methods=['GET'])
+    def collection_mappings():
+        """Admin endpoint to check collection mappings for distributed system"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not ready"}), 503
+            
+            with enhanced_wal.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT collection_name, primary_collection_id, replica_collection_id, 
+                               created_at, updated_at
+                        FROM collection_id_mapping 
+                        ORDER BY created_at DESC
+                        LIMIT 20
+                    """)
+                    
+                    mappings = []
+                    for row in cur.fetchall():
+                        mappings.append({
+                            "collection_name": row[0],
+                            "primary_uuid": row[1][:8] + "..." if row[1] else None,
+                            "replica_uuid": row[2][:8] + "..." if row[2] else None,
+                            "created_at": row[3].isoformat() if row[3] else None,
+                            "updated_at": row[4].isoformat() if row[4] else None,
+                            "status": "complete" if row[1] and row[2] else "partial"
+                        })
+            
+            return jsonify({
+                "collection_mappings": mappings,
+                "total_mappings": len(mappings)
+            }), 200
+            
+        except Exception as e:
+            import traceback
+            return jsonify({
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+    
     @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
         """Streamlined proxy with essential WAL logging for distributed system"""
@@ -1435,6 +1501,52 @@ if __name__ == '__main__':
             
             logger.info(f"✅ PROXY_REQUEST: HTTP response received: {response.status_code}")
             logger.info(f"Response: {response.status_code}, Content: {response.text[:100]}")
+            
+            # CRITICAL: Create collection mapping for distributed UUID tracking
+            if (request.method == 'POST' and 
+                '/collections' in normalized_path and 
+                response.status_code == 200 and 
+                data):
+                try:
+                    logger.info(f"🔍 PROXY_REQUEST: Creating collection mapping for distributed system...")
+                    
+                    # Parse response to get collection info
+                    collection_info = response.json()
+                    collection_name = collection_info.get('name')
+                    primary_uuid = collection_info.get('id')
+                    
+                    if collection_name and primary_uuid:
+                        logger.info(f"✅ PROXY_REQUEST: Collection created - name: {collection_name}, UUID: {primary_uuid[:8]}")
+                        
+                        # Store collection mapping in database for distributed system
+                        with enhanced_wal.db_lock:
+                            with enhanced_wal.get_db_connection() as conn:
+                                with conn.cursor() as cur:
+                                    # Check if mapping already exists
+                                    cur.execute("""
+                                        SELECT collection_name FROM collection_id_mapping 
+                                        WHERE collection_name = %s
+                                    """, (collection_name,))
+                                    
+                                    if not cur.fetchone():
+                                        # Create new mapping entry (replica UUID will be filled by WAL sync)
+                                        cur.execute("""
+                                            INSERT INTO collection_id_mapping 
+                                            (collection_name, primary_collection_id, replica_collection_id, created_at)
+                                            VALUES (%s, %s, NULL, NOW())
+                                            ON CONFLICT (collection_name) DO UPDATE SET
+                                            primary_collection_id = EXCLUDED.primary_collection_id,
+                                            updated_at = NOW()
+                                        """, (collection_name, primary_uuid))
+                                        conn.commit()
+                                        
+                                        logger.info(f"✅ PROXY_REQUEST: Collection mapping created for {collection_name}")
+                                    else:
+                                        logger.info(f"ℹ️ PROXY_REQUEST: Collection mapping already exists for {collection_name}")
+                        
+                except Exception as mapping_error:
+                    logger.error(f"❌ PROXY_REQUEST: Collection mapping failed: {mapping_error}")
+                    # Don't fail the request for mapping issues
             
             # Return response with working JSON handling
             logger.info(f"✅ PROXY_REQUEST: Returning response to client")
