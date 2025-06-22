@@ -114,8 +114,8 @@ class UnifiedWALLoadBalancer:
             )
         ]
         
-        # Configuration - REDUCED HEALTH CHECK INTERVAL FOR FAST FAILURE DETECTION
-        self.check_interval = int(os.getenv("CHECK_INTERVAL", "5"))  # 5 seconds instead of 30
+        # Configuration - AGGRESSIVE HEALTH CHECK INTERVAL FOR INSTANT FAILURE DETECTION  
+        self.check_interval = int(os.getenv("CHECK_INTERVAL", "2"))  # 2 seconds for faster detection
         self.request_timeout = int(os.getenv("REQUEST_TIMEOUT", "15"))
         self.read_replica_ratio = float(os.getenv("READ_REPLICA_RATIO", "0.8"))
         self.sync_interval = int(os.getenv("WAL_SYNC_INTERVAL", "10"))
@@ -1241,9 +1241,21 @@ class UnifiedWALLoadBalancer:
             try:
                 for instance in self.instances:
                     try:
-                        response = requests.get(f"{instance.url}/api/v2/version", timeout=5)
+                        # Enhanced health check: Test actual functionality, not just connectivity
+                        response = requests.get(f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections", timeout=5)
                         was_healthy = instance.is_healthy
-                        instance.is_healthy = response.status_code == 200
+                        # More stringent health check - require both 200 status AND valid JSON
+                        if response.status_code == 200:
+                            try:
+                                collections = response.json()
+                                instance.is_healthy = isinstance(collections, list)  # Valid collections response
+                                if not instance.is_healthy:
+                                    logger.warning(f"❌ {instance.name} health check failed: Invalid collections response")
+                            except:
+                                instance.is_healthy = False
+                                logger.warning(f"❌ {instance.name} health check failed: Non-JSON response")
+                        else:
+                            instance.is_healthy = False
                         instance.last_health_check = datetime.now()
                         instance.update_stats(instance.is_healthy)
                         
