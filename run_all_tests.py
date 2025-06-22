@@ -76,6 +76,51 @@ class ProductionValidator(EnhancedTestBase):
         """Test collections are properly created and mapped between instances"""
         print("🔍 TESTING: Collection Creation & Distributed Mapping (Real Production Logic)")
         
+        # PRODUCTION VALIDATION: Verify we're hitting real endpoints, not mocks
+        print("   🔍 PRODUCTION VALIDATION: Confirming real endpoint access...")
+        try:
+            lb_version = requests.get(f"{self.base_url}/api/v2/version", timeout=10)
+            primary_version = requests.get(f"https://chroma-primary.onrender.com/api/v2/version", timeout=10) 
+            replica_version = requests.get(f"https://chroma-replica.onrender.com/api/v2/version", timeout=10)
+            
+            lb_data = {}
+            primary_data = {}
+            replica_data = {}
+            
+            if lb_version.status_code == 200:
+                try:
+                    lb_data = lb_version.json()
+                except:
+                    lb_data = {}
+            
+            if primary_version.status_code == 200:
+                try:
+                    primary_data = primary_version.json()
+                except:
+                    primary_data = {}
+                    
+            if replica_version.status_code == 200:
+                try:
+                    replica_data = replica_version.json()
+                except:
+                    replica_data = {}
+            
+            # Handle both string and object responses
+            lb_version_str = lb_data if isinstance(lb_data, str) else lb_data.get('version', 'unknown')
+            primary_version_str = primary_data if isinstance(primary_data, str) else primary_data.get('version', 'unknown')
+            replica_version_str = replica_data if isinstance(replica_data, str) else replica_data.get('version', 'unknown')
+            
+            print(f"     Load Balancer: {lb_version_str} (Real: {lb_version.status_code == 200})")
+            print(f"     Primary: {primary_version_str} (Real: {primary_version.status_code == 200})")
+            print(f"     Replica: {replica_version_str} (Real: {replica_version.status_code == 200})")
+            
+            if not all([lb_version.status_code == 200, primary_version.status_code == 200, replica_version.status_code == 200]):
+                return self.fail("Production Validation", "Cannot access all production endpoints - may be testing theater")
+        except Exception as e:
+            return self.fail("Production Validation", f"Endpoint validation failed: {e}")
+        
+        print("   ✅ Confirmed: Testing real production endpoints, not mocks")
+        
         test_collection = f"REAL_TEST_{self.session_id}"
         self.track_collection(test_collection)
         
@@ -99,9 +144,26 @@ class ProductionValidator(EnhancedTestBase):
             
         print(f"   Collection created successfully via load balancer")
         
-        # Wait for auto-mapping to complete (WAL sync takes ~30 seconds in production)
+        # Wait for auto-mapping to complete using WAL sync polling (like WAL Sync test)
         print("   Waiting for auto-mapping system to create collection on both instances...")
-        time.sleep(35)  # Increased from 5 to 35 seconds for real WAL sync timing
+        print("   Using WAL sync polling for accurate completion detection...")
+        
+        # Poll WAL system until sync completes (same logic as WAL Sync test)
+        for attempt in range(30):  # 30 attempts × 2 seconds = 60 seconds max
+            time.sleep(2)
+            try:
+                wal_check = requests.get(f"{self.base_url}/wal/status", timeout=10)
+                wal_status = wal_check.json()
+                pending = wal_status.get('wal_system', {}).get('pending_writes', 0)
+                if pending == 0:
+                    print(f"   ✅ Auto-mapping WAL sync completed after {(attempt + 1) * 2} seconds")
+                    break
+                if attempt % 5 == 0:  # Report every 10 seconds
+                    print(f"   Waiting for auto-mapping sync... {pending} pending writes ({(attempt + 1) * 2}s/60s)")
+            except:
+                pass
+        else:
+            print("   ⚠️  Auto-mapping taking longer than 60 seconds, continuing with validation...")
         
         # Verify collection exists BY NAME on primary instance (with different UUID)
         print("   Verifying collection exists on primary instance by name...")
@@ -137,7 +199,18 @@ class ProductionValidator(EnhancedTestBase):
         replica_collection = next((c for c in replica_data if c['name'] == test_collection), None)
         
         if not replica_collection:
-            return self.fail("Replica Mapping", f"Collection not found on replica by name", f"Replica has: {len(replica_names)} collections")
+            # Enhanced debugging for production testing validation
+            print(f"   🔍 DEBUG: Replica collections found: {replica_names[:3]}..." if len(replica_names) > 3 else f"   🔍 DEBUG: All replica collections: {replica_names}")
+            print(f"   🔍 DEBUG: Looking for collection: {test_collection}")
+            print(f"   🔍 DEBUG: WAL system status at failure:")
+            try:
+                debug_wal = requests.get(f"{self.base_url}/wal/status", timeout=5)
+                wal_debug = debug_wal.json()
+                print(f"     Pending writes: {wal_debug.get('wal_system', {}).get('pending_writes', 'unknown')}")
+                print(f"     Is syncing: {wal_debug.get('wal_system', {}).get('is_syncing', 'unknown')}")
+            except:
+                print("     WAL status check failed")
+            return self.fail("Replica Mapping", f"Collection not found on replica by name after WAL sync", f"Replica has: {len(replica_names)} collections, Expected: {test_collection}")
             
         print(f"   ✅ Found on replica: {replica_collection['id'][:8]}... (name: {replica_collection['name']})")
         
