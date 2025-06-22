@@ -375,6 +375,46 @@ class UnifiedWALLoadBalancer:
             # Plenty of memory, use larger batches for efficiency
             return min(self.max_batch_size, max(self.default_batch_size, estimated_total_writes // 3))
 
+    def calculate_retry_delay_seconds(self, retry_count: int = 0) -> int:
+        """Calculate exponential backoff delay for failed operation retries"""
+        # Check if primary instance is healthy - if not, use longer delays
+        primary = self.get_primary_instance()
+        if not primary or not primary.is_healthy:
+            # Primary is down - use longer delays to avoid overwhelming when it recovers
+            base_delay = 60  # 1 minute minimum
+        else:
+            # Primary is healthy - use shorter delays for faster recovery
+            base_delay = 15  # 15 seconds minimum
+        
+        # Calculate exponential backoff: base_delay * 2^retry_count
+        # For retry_count 0: base_delay
+        # For retry_count 1: base_delay * 2 
+        # For retry_count 2: base_delay * 4
+        delay = base_delay * (2 ** retry_count)
+        
+        # Cap maximum delay at 15 minutes to prevent infinite waiting
+        max_delay = 900  # 15 minutes
+        return min(delay, max_delay)
+
+    def calculate_recovery_batch_size(self, instance: ChromaInstance, base_batch_size: int) -> int:
+        """Calculate gradual recovery batch size to prevent overwhelming recently recovered instances"""
+        # Check if instance has recent failures (indicating recent recovery)
+        if instance.consecutive_failures > 0:
+            # Instance has recent failures - use very small batches
+            return max(1, base_batch_size // 8)
+        
+        # Check success rate - if low, it might be struggling
+        success_rate = instance.get_success_rate()
+        if success_rate < 80:
+            # Low success rate - use small batches
+            return max(2, base_batch_size // 4)
+        elif success_rate < 95:
+            # Moderate success rate - use reduced batches
+            return max(5, base_batch_size // 2)
+        
+        # High success rate - use full batch size
+        return base_batch_size
+
     def add_wal_write(self, method: str, path: str, data: bytes, headers: Dict[str, str], 
                      target_instance: TargetInstance, executed_on: Optional[str] = None) -> str:
         """Add write to unified WAL with intelligent deletion handling for ChromaDB ID issues"""
@@ -548,7 +588,7 @@ class UnifiedWALLoadBalancer:
                 with conn.cursor() as cur:
                     cur.execute("""
                         SELECT COUNT(*) FROM unified_wal_writes 
-                        WHERE status = 'executed' AND retry_count < 3
+                        WHERE (status = 'executed' OR status = 'failed') AND retry_count < 3
                     """)
                     return cur.fetchone()[0]
         except Exception as e:
@@ -561,16 +601,21 @@ class UnifiedWALLoadBalancer:
             with self.get_db_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     # Get writes that need to be synced to this instance
+                    # CRITICAL FIX: Include both 'executed' and 'failed' status for retry
                     cur.execute("""
                         SELECT write_id, method, path, data, headers, collection_id, 
                                timestamp, retry_count, data_size_bytes, priority
                         FROM unified_wal_writes 
-                        WHERE status = 'executed' 
+                        WHERE (status = 'executed' OR status = 'failed') 
                         AND (target_instance = 'both' OR 
                              (target_instance = %s AND executed_on != %s) OR
                              (target_instance != %s AND executed_on != %s))
                         AND retry_count < 3
-                        ORDER BY priority DESC, timestamp ASC
+                        AND (
+                            status = 'executed' OR 
+                            (status = 'failed' AND updated_at < NOW() - INTERVAL '1 minute' * POWER(2, retry_count))
+                        )
+                        ORDER BY priority DESC, retry_count ASC, timestamp ASC
                         LIMIT %s
                     """, (target_instance, target_instance, target_instance, target_instance, batch_size * 3))
                     
@@ -830,11 +875,13 @@ class UnifiedWALLoadBalancer:
             
             batch_size = self.calculate_optimal_batch_size(pending_count)
             
-            # Get batches for each healthy instance
+            # Get batches for each healthy instance with gradual recovery
             all_batches = []
             for instance in self.instances:
                 if instance.is_healthy:
-                    batches = self.get_pending_syncs_in_batches(instance.name, batch_size)
+                    # Use smaller batch size for recently recovered instances to prevent overload
+                    instance_batch_size = self.calculate_recovery_batch_size(instance, batch_size)
+                    batches = self.get_pending_syncs_in_batches(instance.name, instance_batch_size)
                     all_batches.extend(batches)
             
             if not all_batches:
