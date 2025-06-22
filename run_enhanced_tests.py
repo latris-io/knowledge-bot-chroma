@@ -31,7 +31,7 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 ("/status", "Status Check"), 
                 ("/wal/status", "WAL Status"),
                 ("/metrics", "Metrics"),
-                ("/collection/mappings", "Collection Mappings")
+                ("/admin/collection_mappings", "Collection Mappings")
             ]
             
             for endpoint, name in endpoints:
@@ -168,7 +168,7 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 )
             
             # Verify collection mapping exists
-            mapping_response = self.make_request('GET', f"{self.base_url}/collection/mappings")
+            mapping_response = self.make_request('GET', f"{self.base_url}/admin/collection_mappings")
             if mapping_response.status_code != 200:
                 return self.log_test_result(
                     "Collection Operations",
@@ -277,7 +277,7 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             
             # CRITICAL FIX: Get the correct UUIDs for each instance from mappings
             logger.info("   Getting collection mappings for proper instance checking...")
-            mappings_response = self.make_request('GET', f"{self.base_url}/collection/mappings")
+            mappings_response = self.make_request('GET', f"{self.base_url}/admin/collection_mappings")
             
             primary_uuid = None
             replica_uuid = None
@@ -285,10 +285,10 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             if mappings_response.status_code == 200:
                 try:
                     mappings_data = mappings_response.json()
-                    for mapping in mappings_data.get('mappings', []):
+                    for mapping in mappings_data.get('collection_mappings', []):
                         if mapping['collection_name'] == collection_name:
-                            primary_uuid = mapping['primary_collection_id']
-                            replica_uuid = mapping['replica_collection_id']
+                            primary_uuid = mapping['primary_uuid']
+                            replica_uuid = mapping['replica_uuid']
                             logger.info(f"   Found mapping: P:{primary_uuid[:8]}..., R:{replica_uuid[:8]}...")
                             break
                 except Exception as e:
@@ -518,7 +518,7 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             
             # CRITICAL FIX: Get collection mappings for proper instance checking
             logger.info("   Getting collection mappings for proper instance checking...")
-            mappings_response = self.make_request('GET', f"{self.base_url}/collection/mappings")
+            mappings_response = self.make_request('GET', f"{self.base_url}/admin/collection_mappings")
             
             primary_uuid = None
             replica_uuid = None
@@ -526,10 +526,10 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             if mappings_response.status_code == 200:
                 try:
                     mappings_data = mappings_response.json()
-                    for mapping in mappings_data.get('mappings', []):
+                    for mapping in mappings_data.get('collection_mappings', []):
                         if mapping['collection_name'] == collection_name:
-                            primary_uuid = mapping['primary_collection_id']
-                            replica_uuid = mapping['replica_collection_id']
+                            primary_uuid = mapping['primary_uuid']
+                            replica_uuid = mapping['replica_uuid']
                             logger.info(f"   Found mapping: P:{primary_uuid[:8]}..., R:{replica_uuid[:8]}...")
                             break
                 except Exception as e:
@@ -1021,7 +1021,7 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             total_instances = len(health_data.get('instances', []))
             
             # Check collection mappings
-            mappings_response = self.make_request('GET', f"{self.base_url}/collection/mappings")
+            mappings_response = self.make_request('GET', f"{self.base_url}/admin/collection_mappings")
             
             if mappings_response.status_code != 200:
                 return self.log_test_result(
@@ -1032,7 +1032,7 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 )
             
             mappings_data = mappings_response.json()
-            mapping_count = mappings_data.get('count', 0)
+            mapping_count = mappings_data.get('total_mappings', 0)
             
             return self.log_test_result(
                 "Load Balancer Features",
@@ -2223,7 +2223,7 @@ def main():
         logger.info("   - Check preserved collections and documents listed above")
         logger.info("   - Use these endpoints to inspect the data:")
         logger.info(f"     • Collection list: {args.url}/api/v2/tenants/default_tenant/databases/default_database/collections")
-        logger.info(f"     • Collection mappings: {args.url}/collection/mappings")
+        logger.info(f"     • Collection mappings: {args.url}/admin/collection_mappings")
         logger.info("   - Run with --force-cleanup to remove all data when done debugging")
     else:
         logger.info("✅ All tests passed - no debugging data needed")

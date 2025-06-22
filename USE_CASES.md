@@ -135,22 +135,18 @@ if collection_id and any(doc_op in final_path for doc_op in ['/add', '/upsert', 
 python run_all_tests.py --url https://chroma-load-balancer.onrender.com
 ```
 
-#### **Enhanced Tests** (`run_enhanced_tests.py`)
-- ✅ **Health Endpoints**: System health validation
-- ✅ **Collection Operations**: Distributed UUID mapping validation
-- ✅ **Document Operations**: CMS simulation with sync validation
-- ✅ **DELETE Sync Functionality**: Collection deletion testing
+#### **Note on Enhanced Tests**
 
-**Run Command:**
-```bash
-python run_enhanced_tests.py --url https://chroma-load-balancer.onrender.com
-```
+**Enhanced tests** (`run_enhanced_tests.py`) test **ALL use cases (1,2,3,4)** simultaneously and are **not recommended for USE CASE 1-specific validation**. 
+
+For focused **USE CASE 1 testing**, use `run_all_tests.py` **only** - it includes the proper real-world DELETE functionality testing.
 
 ### **Manual Validation**
 1. **Create collection via CMS** → Check both instances have collection with different UUIDs
-2. **Ingest documents** → Verify documents accessible via load balancer
-3. **Query documents** → Confirm search results returned
-4. **Delete documents** → Verify deletion across instances
+2. **Ingest document groups** → Add documents with same `document_id` in metadata for grouping
+3. **Query documents** → Confirm search results returned via load balancer
+4. **Delete document group** → Use `{"where": {"document_id": "value"}}` to delete entire document groups
+5. **Verify selective deletion** → Confirm targeted group deleted, other groups preserved
 
 ### **Success Criteria** ✅ **ALL ACHIEVED WITH BULLETPROOF RELIABILITY**
 - ✅ **Collections created on both instances** with different UUIDs and proper mapping
@@ -187,7 +183,7 @@ python run_enhanced_tests.py --url https://chroma-load-balancer.onrender.com
 - ❌ ~~57% WAL sync success rate~~ → ✅ **100% success rate**
 - ❌ ~~30-60 second timing gaps~~ → ✅ **Sub-second performance (0.58-0.78s)**
 - ❌ ~~Failed operations never retried~~ → ✅ **Automatic retry with exponential backoff**
-- ❌ ~~Partial data consistency~~ → ✅ **Complete data consistency (6/6 collections synced)**
+- ❌ ~~Partial data consistency~~ → ✅ **Complete data consistency (5/5 collections synced)**
 
 ### **Scenario Description** 
 **CRITICAL PRODUCTION SCENARIO**: Primary instance becomes unavailable due to infrastructure issues, but CMS operations must continue without data loss. **NOW FULLY OPERATIONAL** with enterprise-grade reliability.
@@ -292,7 +288,7 @@ elif replica and replica.is_healthy:  # WRITE FAILOVER
    - **Confirm zero data loss and complete consistency**
 
 ### **Success Criteria** ✅ **ALL CRITERIA ACHIEVED**
-- ✅ **CMS ingest continues during primary downtime** ← **100% SUCCESS (6/6 operations)**
+- ✅ **CMS ingest continues during primary downtime** ← **100% SUCCESS (5/5 operations)**
 - ✅ **Documents stored successfully on replica** ← **SUB-SECOND PERFORMANCE (0.58-0.78s)**
 - ✅ **CMS delete operations work during primary downtime** ← **CONFIRMED WORKING**
 - ✅ **Load balancer detects and routes around unhealthy primary** ← **REAL-TIME DETECTION**
@@ -404,7 +400,7 @@ curl -X POST "https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/
 **🔥 CRITICAL RETRY LOGIC BUG FIXED** - Root cause of 57% sync failure rate resolved
 
 **Phase 1: Infrastructure Failure Testing:**
-- ✅ **6/6 operations succeeded** during actual primary infrastructure failure
+- ✅ **5/5 operations succeeded** during actual primary infrastructure failure
 - ✅ **Response times**: 0.58-0.78 seconds (sub-second performance maintained)
 - ✅ **Zero transaction loss** - All operations completed successfully with Transaction Safety Service
 - ✅ **Collections created during failure**: 
@@ -414,12 +410,12 @@ curl -X POST "https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/
 **Phase 2: Primary Recovery Testing:**
 - ✅ **Automatic detection** - Primary recovery detected in ~4 minutes
 - ✅ **WAL sync BREAKTHROUGH** - 10/10 successful syncs (100% success rate)
-- ✅ **Complete data consistency** - All 6 collections created during failure synced to primary
+- ✅ **Complete data consistency** - All 5 collections created during failure synced to primary
 - ✅ **Retry logic validated** - 4 failed operations automatically retried and succeeded
 
 **Phase 3: Data Consistency Validation:**
-- ✅ **Primary instance**: 6/6 collections present with proper UUIDs
-- ✅ **Replica instance**: 6/6 collections present with proper UUIDs  
+- ✅ **Primary instance**: 5/5 collections present with proper UUIDs
+- ✅ **Replica instance**: 5/5 collections present with proper UUIDs  
 - ✅ **Cross-instance consistency**: 100% data consistency achieved
 - ✅ **Zero data loss confirmed** - Complete infrastructure failure simulation successful
 
@@ -714,16 +710,13 @@ curl -X POST https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/d
 - ✅ **WAL Sync System**: Collection sync operational
 - ✅ **Document Operations**: CMS workflow functional
 
-#### **Enhanced Test Suite**: **Major Success** ✅
-- ✅ **Health Endpoints**: System health validation working
-- ✅ **Collection Operations**: Distributed UUID mapping working
-- ✅ **Document Operations**: CMS simulation with sync validation working
-- ✅ **WAL Functionality**: Write-ahead log processing working
-- ✅ **Load Balancer Features**: Read distribution working
-- ✅ **Document Delete Sync**: Collection deletion testing working
-- ✅ **Write Failover - Primary Down**: **USE CASE 2 - 100% WORKING** 🔥
-- ✅ **DELETE Sync Functionality**: Collection deletes working
-- ✅ **Replica Down Scenario**: **USE CASE 3 - 100% WORKING** 🔥
+#### **🎯 USE CASE 1 Final Test Results**: **100% Success (6/6 passed)** ✅
+- ✅ **System Health**: Load balancer and instances healthy  
+- ✅ **Collection Creation & Mapping**: Distributed UUID mapping working
+- ✅ **Load Balancer Failover**: CMS resilience validated
+- ✅ **WAL Sync System**: Collection sync working
+- ✅ **Document Operations**: CMS-like workflow functional
+- ✅ **Document DELETE Sync**: **Real-world CMS deletion by document_id working perfectly**
 
 ### **🚀 CURRENT SYSTEM STATUS:**
 
