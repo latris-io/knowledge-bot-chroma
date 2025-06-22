@@ -1858,6 +1858,95 @@ if __name__ == '__main__':
                     })
         except Exception as e:
             return jsonify({'error': str(e)}), 500
+
+    @app.route('/admin/transaction_safety_status', methods=['GET'])
+    def transaction_safety_status():
+        """Get Transaction Safety Service status and recent transaction logs"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not ready"}), 503
+            
+            # Check if Transaction Safety Service is available
+            transaction_safety_available = enhanced_wal.transaction_safety is not None
+            
+            result = {
+                "transaction_safety_service": {
+                    "available": transaction_safety_available,
+                    "running": getattr(enhanced_wal.transaction_safety, 'is_running', False) if transaction_safety_available else False
+                }
+            }
+            
+            # If available, get transaction statistics
+            if transaction_safety_available:
+                try:
+                    with enhanced_wal.get_db_connection() as conn:
+                        with conn.cursor() as cur:
+                            # Check if table exists
+                            cur.execute("""
+                                SELECT EXISTS (
+                                    SELECT FROM information_schema.tables 
+                                    WHERE table_name = 'emergency_transaction_log'
+                                )
+                            """)
+                            table_exists = cur.fetchone()[0]
+                            result["transaction_safety_service"]["table_exists"] = table_exists
+                            
+                            if table_exists:
+                                # Get recent transaction statistics
+                                cur.execute("""
+                                    SELECT 
+                                        status,
+                                        COUNT(*) as count,
+                                        MAX(created_at) as latest
+                                    FROM emergency_transaction_log 
+                                    WHERE created_at > NOW() - INTERVAL '2 hours'
+                                    GROUP BY status
+                                    ORDER BY count DESC
+                                """)
+                                
+                                transactions = []
+                                total_transactions = 0
+                                for row in cur.fetchall():
+                                    status, count, latest = row
+                                    total_transactions += count
+                                    transactions.append({
+                                        "status": status,
+                                        "count": count,
+                                        "latest": latest.isoformat() if latest else None
+                                    })
+                                
+                                result["recent_transactions"] = {
+                                    "total_last_2_hours": total_transactions,
+                                    "by_status": transactions
+                                }
+                                
+                                # Get timing gap failures specifically
+                                cur.execute("""
+                                    SELECT COUNT(*) 
+                                    FROM emergency_transaction_log 
+                                    WHERE is_timing_gap_failure = TRUE 
+                                    AND created_at > NOW() - INTERVAL '24 hours'
+                                """)
+                                timing_gap_failures = cur.fetchone()[0]
+                                result["timing_gap_failures_24h"] = timing_gap_failures
+                                
+                                # Get pending recovery transactions
+                                cur.execute("""
+                                    SELECT COUNT(*) 
+                                    FROM emergency_transaction_log 
+                                    WHERE status IN ('FAILED', 'ATTEMPTING') 
+                                    AND retry_count < max_retries
+                                """)
+                                pending_recovery = cur.fetchone()[0]
+                                result["pending_recovery"] = pending_recovery
+                            
+                except Exception as db_error:
+                    result["database_error"] = str(db_error)
+            
+            return jsonify(result)
+            
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
     
     @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
