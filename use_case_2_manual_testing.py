@@ -197,11 +197,11 @@ class UseCase2ManualTester:
         # Test 2: CMS Query Operations (should route to replica)
         print("\n🧪 Test 2: CMS Query Operations During Primary Failure")
         
-        # Try to query the global collection (should exist)
+        # Try to query the global collection (should exist) - using correct ChromaDB query format
         query_response = self.make_request(
             'POST',
             f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/global/query",
-            json={"query_texts": ["test"], "n_results": 1},
+            json={"query_embeddings": [[0.1] * 3072], "n_results": 1},  # Use proper 3072-dimension embedding
             timeout=15
         )
         
