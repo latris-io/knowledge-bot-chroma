@@ -440,8 +440,12 @@ class TransactionSafetyService:
     
     def process_recovery_queue(self, load_balancer=None):
         """Process the queue of failed transactions for recovery"""
+        # Use injected load balancer reference if available
         if not load_balancer:
-            # Will be injected by load balancer when available
+            load_balancer = getattr(self, 'load_balancer', None)
+        
+        if not load_balancer:
+            # No load balancer available for recovery
             return
             
         pending = self.get_pending_recovery_transactions()

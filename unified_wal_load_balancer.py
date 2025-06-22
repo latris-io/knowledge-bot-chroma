@@ -33,6 +33,14 @@ import gc
 # Flask imports for web service
 from flask import Flask, request, Response, jsonify
 
+# Import Transaction Safety Service for timing gap protection
+try:
+    from transaction_safety_service import TransactionSafetyService
+    TRANSACTION_SAFETY_AVAILABLE = True
+except ImportError:
+    logger.warning("⚠️ Transaction Safety Service not available - timing gaps may cause data loss")
+    TRANSACTION_SAFETY_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -106,8 +114,8 @@ class UnifiedWALLoadBalancer:
             )
         ]
         
-        # Configuration
-        self.check_interval = int(os.getenv("CHECK_INTERVAL", "30"))
+        # Configuration - REDUCED HEALTH CHECK INTERVAL FOR FAST FAILURE DETECTION
+        self.check_interval = int(os.getenv("CHECK_INTERVAL", "5"))  # 5 seconds instead of 30
         self.request_timeout = int(os.getenv("REQUEST_TIMEOUT", "15"))
         self.read_replica_ratio = float(os.getenv("READ_REPLICA_RATIO", "0.8"))
         self.sync_interval = int(os.getenv("WAL_SYNC_INTERVAL", "10"))
@@ -134,6 +142,16 @@ class UnifiedWALLoadBalancer:
         
         # Initialize unified WAL schema
         self._initialize_unified_wal_schema()
+        
+        # Initialize Transaction Safety Service for timing gap protection
+        self.transaction_safety = None
+        if TRANSACTION_SAFETY_AVAILABLE:
+            try:
+                self.transaction_safety = TransactionSafetyService(self.database_url)
+                logger.info("🛡️ Transaction Safety Service enabled - timing gaps protected")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize Transaction Safety Service: {e}")
+                self.transaction_safety = None
         
         # Enhanced statistics
         self.stats = {
@@ -1414,6 +1432,141 @@ class UnifiedWALLoadBalancer:
             logger.error(f"❌ UUID mapping failed for {source_collection_id[:8]} -> {target_instance_name}: {e}")
             return source_collection_id  # Return as-is on error
 
+    def check_instance_health_realtime(self, instance: ChromaInstance, timeout: int = 5) -> bool:
+        """
+        CRITICAL: Real-time health check that bypasses the 30-second cache
+        
+        This method performs immediate health checking for critical operations
+        to prevent transaction loss during infrastructure failures.
+        """
+        try:
+            response = requests.get(f"{instance.url}/api/v2/version", timeout=timeout)
+            is_healthy = response.status_code == 200
+            
+            logger.info(f"🔍 REALTIME HEALTH: {instance.name} = {'✅ Healthy' if is_healthy else '❌ Down'} (bypassed cache)")
+            return is_healthy
+            
+        except Exception as e:
+            logger.warning(f"🔍 REALTIME HEALTH: {instance.name} = ❌ Down ({e})")
+            return False
+
+    def choose_read_instance_with_realtime_health(self, path: str, method: str, headers: Dict[str, str]) -> Optional[ChromaInstance]:
+        """
+        CRITICAL: Choose instance with real-time health checking for write operations
+        
+        This prevents the 30-second timing gap where transactions are lost
+        during infrastructure failures.
+        """
+        healthy_instances = self.get_healthy_instances()
+        if not healthy_instances:
+            logger.warning("⚠️ No cached healthy instances - using real-time health checking")
+            
+            # Real-time fallback when cache shows no healthy instances
+            for instance in self.instances:
+                if self.check_instance_health_realtime(instance):
+                    logger.info(f"✅ REALTIME RECOVERY: Found healthy {instance.name} via real-time check")
+                    return instance
+            
+            logger.error("❌ No healthy instances found via real-time checking")
+            return None
+        
+        # For WRITE operations, use real-time health checking to prevent transaction loss
+        if method in ["POST", "PUT", "DELETE", "PATCH"]:
+            logger.info(f"🔍 WRITE OPERATION: Using real-time health checking for {method} {path}")
+            
+            # Prefer primary for writes, but verify health in real-time
+            primary = self.get_primary_instance()
+            if primary:
+                if self.check_instance_health_realtime(primary):
+                    logger.info("✅ WRITE → PRIMARY (real-time verified)")
+                    return primary
+                else:
+                    logger.warning("⚠️ PRIMARY DOWN (real-time) - Attempting replica failover")
+                    
+                    # Write failover to replica if primary is down
+                    replica = self.get_replica_instance()
+                    if replica and self.check_instance_health_realtime(replica):
+                        logger.warning("🔄 WRITE FAILOVER → REPLICA (real-time verified)")
+                        return replica
+                    else:
+                        logger.error("❌ WRITE FAILOVER FAILED - Both instances down")
+                        return None
+            
+            # No primary available, try replica
+            replica = self.get_replica_instance()
+            if replica and self.check_instance_health_realtime(replica):
+                logger.warning("🔄 WRITE → REPLICA (primary unavailable)")
+                return replica
+            
+            logger.error("❌ NO HEALTHY INSTANCES for write operation")
+            return None
+        
+        # For READ operations, use cached health (less critical)
+        if method == "GET":
+            replica = self.get_replica_instance()
+            primary = self.get_primary_instance()
+            
+            # Use read replica ratio to determine routing
+            if replica and primary and random.random() < self.read_replica_ratio:
+                return replica
+            elif primary:
+                return primary
+            else:
+                return replica
+        
+        # Default fallback
+        return self.get_primary_instance()
+    
+    def forward_request_with_recovery(self, method: str, path: str, headers: Dict[str, str], 
+                                    data: bytes, original_transaction_id: str = None):
+        """
+        🛡️ TRANSACTION SAFETY: Forward request for transaction recovery
+        
+        This method is called by the Transaction Safety Service to retry failed transactions.
+        """
+        try:
+            logger.info(f"🔄 RECOVERY: Retrying {method} {path} (transaction: {original_transaction_id[:8] if original_transaction_id else 'unknown'})")
+            
+            # Use real-time health checking for recovery operations
+            target_instance = self.choose_read_instance_with_realtime_health(path, method, headers)
+            if not target_instance:
+                logger.error(f"❌ RECOVERY: No healthy instances for retry")
+                return None
+            
+            # Normalize path and resolve collections
+            normalized_path = self.normalize_api_path_to_v2(path)
+            final_path = normalized_path
+            
+            # Collection name resolution for document operations
+            if '/collections/' in normalized_path and any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
+                path_parts = normalized_path.split('/collections/')
+                if len(path_parts) > 1:
+                    collection_part = path_parts[1].split('/')[0]
+                    import re
+                    if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_part):
+                        resolved_uuid = self.resolve_collection_name_to_uuid(collection_part, target_instance.name)
+                        if resolved_uuid:
+                            final_path = normalized_path.replace(f'/collections/{collection_part}/', f'/collections/{resolved_uuid}/')
+            
+            url = f"{target_instance.url}{final_path}"
+            
+            # Execute recovery request
+            import requests
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=headers or {'Content-Type': 'application/json'},
+                data=data,
+                timeout=15
+            )
+            
+            logger.info(f"✅ RECOVERY: {method} {path} completed with status {response.status_code}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"❌ RECOVERY: Failed to retry {method} {path}: {e}")
+            return None
+
 # Main execution for web service  
 if __name__ == '__main__':
     logger.info("🚀 Starting Enhanced Unified WAL Load Balancer with High-Volume Support")
@@ -1431,6 +1584,11 @@ if __name__ == '__main__':
         threading.Thread(target=enhanced_wal.enhanced_wal_sync_loop, daemon=True).start()
         threading.Thread(target=enhanced_wal.health_monitor_loop, daemon=True).start()
         threading.Thread(target=enhanced_wal.resource_monitor_loop, daemon=True).start()
+        
+        # 🛡️ TRANSACTION SAFETY: Inject load balancer into recovery service
+        if enhanced_wal.transaction_safety:
+            enhanced_wal.transaction_safety.load_balancer = enhanced_wal
+            logger.info("🛡️ Transaction recovery service linked to load balancer")
         
     except Exception as e:
         logger.error(f"❌ WAL system initialization failed: {e}")
@@ -1630,20 +1788,42 @@ if __name__ == '__main__':
     
     @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
-        """Streamlined proxy with essential WAL logging for distributed system"""
+        """Transaction-safe proxy with pre-execution logging to prevent timing gap data loss"""
+        transaction_id = None
+        
         try:
             logger.info(f"🚀 PROXY_REQUEST START: {request.method} /{path}")
             
             if enhanced_wal is None:
                 logger.error("❌ PROXY_REQUEST FAILED: WAL system not ready")
                 return jsonify({"error": "WAL system not ready"}), 503
+            
+            # 🛡️ TRANSACTION SAFETY: Pre-execution logging for write operations
+            if request.method in ['POST', 'PUT', 'PATCH', 'DELETE'] and enhanced_wal.transaction_safety:
+                try:
+                    data = request.get_data()
+                    headers = dict(request.headers)
+                    
+                    # Log transaction BEFORE attempting execution
+                    transaction_id = enhanced_wal.transaction_safety.log_transaction_attempt(
+                        method=request.method,
+                        path=f"/{path}",
+                        data=data,
+                        headers=headers,
+                        remote_addr=request.remote_addr
+                    )
+                    logger.info(f"🛡️ TRANSACTION SAFETY: Pre-logged {transaction_id[:8]} for {request.method} /{path}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Transaction logging failed: {e}")
+                    # Continue without transaction safety rather than failing the request
                 
             logger.info(f"✅ PROXY_REQUEST: enhanced_wal object exists")
             logger.info(f"Forwarding {request.method} request to /{path}")
             
             # Get target instance using existing health-based routing
             logger.info(f"🔍 PROXY_REQUEST: Getting target instance...")
-            target_instance = enhanced_wal.choose_read_instance(f"/{path}", request.method, {})
+            target_instance = enhanced_wal.choose_read_instance_with_realtime_health(f"/{path}", request.method, {})
             if not target_instance:
                 logger.error(f"❌ PROXY_REQUEST: No healthy instances available")
                 return jsonify({"error": "No healthy instances available"}), 503
@@ -1829,6 +2009,18 @@ if __name__ == '__main__':
                     logger.error(f"❌ PROXY_REQUEST: Collection mapping failed: {mapping_error}")
                     # Don't fail the request for mapping issues
             
+            # 🛡️ TRANSACTION SAFETY: Mark transaction as completed
+            if transaction_id and enhanced_wal.transaction_safety:
+                try:
+                    enhanced_wal.transaction_safety.mark_transaction_completed(
+                        transaction_id, 
+                        response.status_code,
+                        {"status": "success", "proxy_response": True}
+                    )
+                    logger.info(f"🛡️ TRANSACTION SAFETY: Completed {transaction_id[:8]} with status {response.status_code}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to mark transaction completed: {e}")
+            
             # Return response with working JSON handling
             logger.info(f"✅ PROXY_REQUEST: Returning response to client")
             return Response(
@@ -1841,6 +2033,22 @@ if __name__ == '__main__':
             import traceback
             logger.error(f"❌ PROXY_REQUEST FAILED for {request.method} /{path}: {e}")
             logger.error(f"Full traceback: {traceback.format_exc()}")
+            
+            # 🛡️ TRANSACTION SAFETY: Mark transaction as failed for recovery
+            if transaction_id and enhanced_wal.transaction_safety:
+                try:
+                    # Detect timing gap failures
+                    is_timing_gap = "No healthy instances" in str(e) or "Connection" in str(e)
+                    
+                    enhanced_wal.transaction_safety.mark_transaction_failed(
+                        transaction_id,
+                        str(e)[:500],  # Limit error message length
+                        is_timing_gap=is_timing_gap
+                    )
+                    logger.info(f"🛡️ TRANSACTION SAFETY: Failed {transaction_id[:8]} - {'timing gap' if is_timing_gap else 'general error'}")
+                except Exception as te:
+                    logger.error(f"❌ Failed to mark transaction failed: {te}")
+            
             return jsonify({"error": f"Service temporarily unavailable: {str(e)}"}), 503
     
     # Start Flask web server immediately

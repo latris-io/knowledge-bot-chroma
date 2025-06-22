@@ -623,10 +623,18 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             )
 
     def test_write_failover_with_primary_down(self):
-        """Test write failover when primary is down (CMS resilience simulation)"""
-        logger.info("🚨 Testing Write Failover with Primary Down (CMS Resilience)")
+        """
+        🚨 USE CASE 2: Primary Instance Down Testing
         
-        self.start_test("Write Failover - Primary Down")
+        CRITICAL: This test requires MANUAL primary instance suspension.
+        For real USE CASE 2 testing, use: python use_case_2_manual_testing.py --manual-confirmed
+        
+        This automated version only tests basic functionality, not real failover.
+        """
+        logger.info("🚨 Testing Write Failover with Primary Down (LIMITED AUTOMATED VERSION)")
+        logger.info("⚠️  For REAL USE CASE 2 testing, use: python use_case_2_manual_testing.py --manual-confirmed")
+        
+        self.start_test("Write Failover - Primary Down (Automated)")
         start_time = time.time()
         
         try:
@@ -636,7 +644,7 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             
             if status_response.status_code != 200:
                 return self.log_test_result(
-                    "Write Failover - Primary Down",
+                    "Write Failover - Primary Down (Automated)",
                     False,
                     f"Cannot check system status: {status_response.status_code}",
                     time.time() - start_time
@@ -648,13 +656,22 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             primary_healthy = any(inst.get('name') == 'primary' and inst.get('healthy') for inst in instances)
             replica_healthy = any(inst.get('name') == 'replica' and inst.get('healthy') for inst in instances)
             
+            # CRITICAL SAFEGUARD: If primary is actually down, redirect to manual protocol
+            if not primary_healthy:
+                return self.log_test_result(
+                    "Write Failover - Primary Down (Automated)", 
+                    False,
+                    "🚨 PRIMARY IS DOWN! Use manual protocol: python use_case_2_manual_testing.py --manual-confirmed",
+                    time.time() - start_time
+                )
+            
             logger.info(f"   Initial health: Primary={primary_healthy}, Replica={replica_healthy}")
             
             if not replica_healthy:
                 return self.log_test_result(
-                    "Write Failover - Primary Down",
+                    "Write Failover - Primary Down (Automated)",
                     False,
-                    "Replica not healthy - cannot test primary failover scenario",
+                    "Replica not healthy - cannot test failover scenario",
                     time.time() - start_time
                 )
             
@@ -669,7 +686,7 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             
             if create_response.status_code not in [200, 201]:
                 return self.log_test_result(
-                    "Write Failover - Primary Down",
+                    "Write Failover - Primary Down (Automated)",
                     False,
                     f"Collection creation failed: {create_response.status_code}",
                     time.time() - start_time
@@ -705,7 +722,7 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             
             if not normal_success:
                 return self.log_test_result(
-                    "Write Failover - Primary Down",
+                    "Write Failover - Primary Down (Automated)",
                     False,
                     f"Baseline operation failed: {normal_response.status_code}",
                     time.time() - start_time
@@ -910,17 +927,17 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 result_msg = f"❌ {test_type} failed: {', '.join(issues)}"
             
             return self.log_test_result(
-                "Write Failover - Primary Down",
+                "Write Failover - Primary Down (Automated)",
                 overall_success,
-                result_msg,
+                result_msg + " [Use use_case_2_manual_testing.py for real USE CASE 2]",
                 time.time() - start_time
             )
             
         except Exception as e:
             return self.log_test_result(
-                "Write Failover - Primary Down",
+                "Write Failover - Primary Down (Automated)",
                 False,
-                f"Exception: {str(e)}",
+                f"Exception: {str(e)} [Use use_case_2_manual_testing.py for real USE CASE 2]",
                 time.time() - start_time
             )
 
@@ -2130,6 +2147,15 @@ def main():
     args = parser.parse_args()
     
     tester = EnhancedComprehensiveTest(args.url)
+    
+    # CRITICAL NOTICE about USE CASE 2
+    logger.info("=" * 80)
+    logger.info("🚨 IMPORTANT: USE CASE 2 (Primary Instance Down) Testing")
+    logger.info("   This test suite includes LIMITED automated USE CASE 2 testing")
+    logger.info("   For REAL USE CASE 2 testing with actual primary failure:")
+    logger.info("   👉 Use: python use_case_2_manual_testing.py --manual-confirmed")
+    logger.info("   (Requires manual primary instance suspension via Render dashboard)")
+    logger.info("=" * 80)
     
     logger.info("🚀 Starting Enhanced Comprehensive Tests with Selective Cleanup")
     logger.info(f"🌐 Target URL: {args.url}")
