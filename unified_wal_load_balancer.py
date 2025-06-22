@@ -342,21 +342,33 @@ class UnifiedWALLoadBalancer:
             raise
 
     def collect_resource_metrics(self) -> ResourceMetrics:
-        """Collect current resource usage metrics"""
-        memory = psutil.virtual_memory()
-        cpu_percent = psutil.cpu_percent(interval=0.1)  # Non-blocking
+        """Collect current PROCESS-SPECIFIC resource usage metrics"""
+        # CRITICAL FIX: Use process-specific metrics, not system-wide
+        process = psutil.Process()
+        
+        # Process-specific memory usage
+        memory_info = process.memory_info()
+        memory_usage_mb = memory_info.rss / 1024 / 1024  # Resident Set Size in MB
+        
+        # Calculate memory percentage based on container limit (400MB)
+        memory_percent = (memory_usage_mb / self.max_memory_usage_mb) * 100
+        
+        # Process-specific CPU usage
+        cpu_percent = process.cpu_percent(interval=0.1)  # Non-blocking
         
         return ResourceMetrics(
-            memory_usage_mb=memory.used / 1024 / 1024,
-            memory_percent=memory.percent,
+            memory_usage_mb=memory_usage_mb,
+            memory_percent=memory_percent,
             cpu_percent=cpu_percent,
             timestamp=datetime.now()
         )
 
     def calculate_optimal_batch_size(self, estimated_total_writes: int = 100) -> int:
-        """Calculate optimal WAL sync batch size based on current memory usage and volume"""
-        current_memory = psutil.virtual_memory()
-        available_memory_mb = (self.max_memory_usage_mb - (current_memory.used / 1024 / 1024))
+        """Calculate optimal WAL sync batch size based on current PROCESS memory usage and volume"""
+        # CRITICAL FIX: Use process-specific memory, not system-wide
+        process = psutil.Process()
+        process_memory_mb = process.memory_info().rss / 1024 / 1024
+        available_memory_mb = (self.max_memory_usage_mb - process_memory_mb)
         
         # Adaptive batch sizing based on memory pressure
         if available_memory_mb < 50:  # Less than 50MB available
@@ -678,7 +690,9 @@ class UnifiedWALLoadBalancer:
             return 0, len(batch.writes)
         
         success_count = 0
-        start_memory = psutil.virtual_memory().used / 1024 / 1024
+        # CRITICAL FIX: Use process-specific memory, not system-wide  
+        process = psutil.Process()
+        start_memory = process.memory_info().rss / 1024 / 1024
         start_time = time.time()
         
         logger.info(f"🔄 Processing sync batch: {batch.batch_size} writes to {batch.target_instance} ({batch.estimated_memory_mb:.1f}MB)")
@@ -686,8 +700,8 @@ class UnifiedWALLoadBalancer:
         try:
             for write_record in batch.writes:
                 try:
-                    # Check memory pressure during processing
-                    current_memory = psutil.virtual_memory().used / 1024 / 1024
+                    # Check PROCESS memory pressure during processing
+                    current_memory = process.memory_info().rss / 1024 / 1024
                     if current_memory > self.max_memory_usage_mb * 0.9:  # 90% threshold
                         logger.warning(f"⚠️ Memory pressure during batch processing: {current_memory:.1f}MB")
                         gc.collect()  # Force garbage collection
@@ -839,7 +853,7 @@ class UnifiedWALLoadBalancer:
                     self.mark_write_failed(write_record['write_id'], f"{method} {final_path}: {error_msg}")
                     self.stats["failed_syncs"] += 1
             
-            end_memory = psutil.virtual_memory().used / 1024 / 1024
+            end_memory = process.memory_info().rss / 1024 / 1024
             memory_delta = end_memory - start_memory
             processing_time = time.time() - start_time
             throughput = batch.batch_size / processing_time if processing_time > 0 else 0
