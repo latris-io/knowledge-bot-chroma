@@ -2,18 +2,20 @@
 """
 REAL PRODUCTION VALIDATION TESTS
 Tests actual functionality that matters to real users, not just API responses
+NOW INCLUDES ENHANCED CLEANUP: PostgreSQL cleanup + selective lifecycle
 """
 
 import requests
 import time
 import json
 import sys
+from enhanced_test_base_cleanup import EnhancedTestBase
 
-class ProductionValidator:
+class ProductionValidator(EnhancedTestBase):
     def __init__(self, base_url):
-        self.base_url = base_url
+        # Initialize enhanced test base with PostgreSQL cleanup + selective lifecycle
+        super().__init__(base_url, test_prefix="PRODUCTION")
         self.session_id = int(time.time())
-        self.test_collections = set()
         self.failures = []
         
     def fail(self, test, reason, details=""):
@@ -75,7 +77,7 @@ class ProductionValidator:
         print("🔍 TESTING: Collection Creation & Distributed Mapping (Real Production Logic)")
         
         test_collection = f"REAL_TEST_{self.session_id}"
-        self.test_collections.add(test_collection)
+        self.track_collection(test_collection)
         
         print(f"   Creating collection: {test_collection}")
         
@@ -193,7 +195,7 @@ class ProductionValidator:
         # Test scenario 1: Normal operation with both instances healthy
         print("   Testing normal write operation (baseline)...")
         baseline_collection = f"BASELINE_TEST_{int(time.time())}"
-        self.test_collections.add(baseline_collection)
+        self.track_collection(baseline_collection)
         
         baseline_response = requests.post(
             f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
@@ -214,7 +216,7 @@ class ProductionValidator:
         print("   Testing document ingest resilience (CMS simulation)...")
         
         cms_collection = f"CMS_FAILOVER_TEST_{int(time.time())}"
-        self.test_collections.add(cms_collection)
+        self.track_collection(cms_collection)
         
         # Create collection for document testing
         collection_response = requests.post(
@@ -253,6 +255,10 @@ class ProductionValidator:
             json=cms_documents,
             timeout=30
         )
+        
+        # Track documents for enhanced cleanup system
+        if ingest_response.status_code in [200, 201]:
+            self.track_documents(cms_collection, cms_documents["ids"])
         
         ingest_success = ingest_response.status_code in [200, 201]
         print(f"   CMS document ingest: {'✅ Success' if ingest_success else '❌ Failed'} ({ingest_response.status_code})")
@@ -391,7 +397,7 @@ class ProductionValidator:
         
         # Create collection to test sync
         test_collection = f"WAL_SYNC_TEST_{int(time.time())}"
-        self.test_collections.add(test_collection)
+        self.track_collection(test_collection)
         
         print(f"   Creating collection to test WAL sync: {test_collection}")
         
@@ -470,7 +476,7 @@ class ProductionValidator:
         
         # Use existing collection for document tests
         test_collection = f"CMS_PRODUCTION_TEST_{int(time.time())}"
-        self.test_collections.add(test_collection)
+        self.track_collection(test_collection)
         
         print(f"   Creating collection for CMS simulation: {test_collection}")
         
@@ -518,6 +524,10 @@ class ProductionValidator:
             json=cms_documents,
             timeout=30
         )
+        
+        # Track documents for enhanced cleanup system
+        if add_response.status_code in [200, 201]:
+            self.track_documents(test_collection, cms_documents["ids"])
         
         if add_response.status_code not in [200, 201]:
             print(f"   ⚠️  CMS document ingest returned {add_response.status_code} - collection mapping may still be syncing")
@@ -630,26 +640,20 @@ class ProductionValidator:
         return True
     
     def cleanup(self):
-        """Clean up test data"""
-        print("🧹 Cleaning up test data...")
-        cleaned = 0
-        for collection_name in self.test_collections:
-            try:
-                # Delete collection by name (load balancer will handle UUID mapping)
-                response = requests.delete(
-                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}", 
-                    timeout=30
-                )
-                if response.status_code in [200, 204, 404]:
-                    cleaned += 1
-                    print(f"   ✅ Cleaned up: {collection_name}")
-                else:
-                    print(f"   ⚠️  Could not clean: {collection_name} (status: {response.status_code})")
-            except Exception as e:
-                print(f"   ⚠️  Could not clean: {collection_name} (error: {e})")
+        """Enhanced cleanup - includes PostgreSQL data with selective lifecycle"""
+        print("🧹 Enhanced cleanup: ChromaDB + PostgreSQL data with selective lifecycle...")
         
-        if cleaned > 0:
-            print(f"🧹 Cleanup completed: {cleaned}/{len(self.test_collections)} collections cleaned")
+        # Use enhanced selective cleanup system
+        # Only cleans data from PASSED tests, preserves FAILED test data for debugging
+        cleanup_results = self.selective_cleanup()
+        
+        print(f"✅ Enhanced cleanup completed:")
+        print(f"   ChromaDB collections: {cleanup_results['collections_deleted']} deleted")
+        print(f"   PostgreSQL mappings: {cleanup_results['postgresql_mappings_deleted']} deleted")
+        print(f"   PostgreSQL WAL entries: {cleanup_results['postgresql_wal_deleted']} deleted")
+        
+        if cleanup_results['tests_preserved'] > 0:
+            print(f"   🔍 Preserved data from {cleanup_results['tests_preserved']} failed tests for debugging")
     
     def run_validation(self):
         """Run production validation"""
@@ -675,12 +679,30 @@ class ProductionValidator:
                 print(f"\\n[{i}/{total}] Running: {name}")
                 print("-" * 50)
                 
-                if test_func():
-                    passed += 1
-                    print(f"✅ {name} PASSED")
-                else:
-                    print(f"❌ {name} FAILED")
-                    # Continue with other tests instead of breaking
+                # Start tracking test with enhanced system
+                self.start_test(name)
+                start_time = time.time()
+                
+                try:
+                    test_result = test_func()
+                    duration = time.time() - start_time
+                    
+                    # Log result with enhanced system (includes selective cleanup planning)
+                    self.log_test_result(name, test_result, duration=duration)
+                    
+                    if test_result:
+                        passed += 1
+                        print(f"✅ {name} PASSED")
+                    else:
+                        print(f"❌ {name} FAILED")
+                        # Continue with other tests instead of breaking
+                        
+                except Exception as e:
+                    duration = time.time() - start_time
+                    error_msg = f"Test exception: {str(e)}"
+                    self.log_test_result(name, False, details=error_msg, duration=duration)
+                    print(f"❌ {name} FAILED (Exception: {e})")
+                    # Continue with other tests
                     
         finally:
             self.cleanup()
