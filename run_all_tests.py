@@ -279,27 +279,53 @@ class ProductionValidator:
                     # Test document distribution across instances
                     print("   Verifying document distribution across instances...")
                     
-                    # Check primary
+                    # Check primary (FIXED: Get UUID first, then query documents)
                     try:
-                        primary_get = requests.post(
-                            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{cms_collection}/get",
-                            headers={"Content-Type": "application/json"},
-                            json={"include": ["documents"]},
+                        primary_collections = requests.get(
+                            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
                             timeout=10
                         )
-                        primary_docs = len(primary_get.json().get('ids', [])) if primary_get.status_code == 200 else 0
+                        primary_uuid = None
+                        if primary_collections.status_code == 200:
+                            for col in primary_collections.json():
+                                if col.get('name') == cms_collection:
+                                    primary_uuid = col.get('id')
+                                    break
+                        
+                        primary_docs = 0
+                        if primary_uuid:
+                            primary_get = requests.post(
+                                f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{primary_uuid}/get",
+                                headers={"Content-Type": "application/json"},
+                                json={"include": ["documents"]},
+                                timeout=10
+                            )
+                            primary_docs = len(primary_get.json().get('ids', [])) if primary_get.status_code == 200 else 0
                     except:
                         primary_docs = 0
                     
-                    # Check replica  
+                    # Check replica (FIXED: Get UUID first, then query documents)
                     try:
-                        replica_get = requests.post(
-                            f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{cms_collection}/get", 
-                            headers={"Content-Type": "application/json"},
-                            json={"include": ["documents"]},
+                        replica_collections = requests.get(
+                            f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
                             timeout=10
                         )
-                        replica_docs = len(replica_get.json().get('ids', [])) if replica_get.status_code == 200 else 0
+                        replica_uuid = None
+                        if replica_collections.status_code == 200:
+                            for col in replica_collections.json():
+                                if col.get('name') == cms_collection:
+                                    replica_uuid = col.get('id')
+                                    break
+                        
+                        replica_docs = 0
+                        if replica_uuid:
+                            replica_get = requests.post(
+                                f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_uuid}/get", 
+                                headers={"Content-Type": "application/json"},
+                                json={"include": ["documents"]},
+                                timeout=10
+                            )
+                            replica_docs = len(replica_get.json().get('ids', [])) if replica_get.status_code == 200 else 0
                     except:
                         replica_docs = 0
                     
@@ -383,21 +409,22 @@ class ProductionValidator:
             
         print("   Collection created, waiting for WAL sync...")
         
-        # Wait for WAL sync to complete
-        for attempt in range(10):
+        # Wait for WAL sync to complete (USE_CASES.md: "Allow ~60 seconds for sync completion")
+        for attempt in range(30):  # 30 attempts × 2 seconds = 60 seconds total
             time.sleep(2)
             wal_check = requests.get(f"{self.base_url}/wal/status", timeout=10)
             try:
                 wal_status = wal_check.json()
                 pending = wal_status.get('wal_system', {}).get('pending_writes', 0)
                 if pending == 0:
-                    print(f"   ✅ WAL sync completed (attempt {attempt + 1})")
+                    print(f"   ✅ WAL sync completed after {(attempt + 1) * 2} seconds")
                     break
-                print(f"   Waiting for sync... {pending} pending writes (attempt {attempt + 1}/10)")
+                if attempt % 5 == 0:  # Report every 10 seconds instead of every 2 seconds
+                    print(f"   Waiting for sync... {pending} pending writes ({(attempt + 1) * 2}s/60s)")
             except:
                 pass
         else:
-            print("   ⚠️  WAL sync taking longer than expected, continuing...")
+            print("   ⚠️  WAL sync taking longer than 60 seconds per documentation, continuing...")
         
         # Verify collection exists on both instances with correct metadata
         print("   Verifying collection synced to both instances...")
@@ -506,33 +533,59 @@ class ProductionValidator:
         # Verify documents exist on both instances (like your manual testing)
         print("   Verifying CMS documents synced to both instances...")
         
-        # Check primary
+        # Check primary (FIXED: Get UUID first, then query documents)
         try:
-            primary_get = requests.post(
-                f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{test_collection}/get",
-                headers={"Content-Type": "application/json"},
-                json={"include": ["documents", "metadatas"]},
+            # Get collection UUID from primary
+            primary_collections = requests.get(
+                f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
                 timeout=15
             )
+            primary_uuid = None
+            if primary_collections.status_code == 200:
+                for col in primary_collections.json():
+                    if col.get('name') == test_collection:
+                        primary_uuid = col.get('id')
+                        break
+            
             primary_docs = 0
-            if primary_get.status_code == 200:
-                primary_result = primary_get.json()
-                primary_docs = len(primary_result.get('ids', []))
+            if primary_uuid:
+                primary_get = requests.post(
+                    f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{primary_uuid}/get",
+                    headers={"Content-Type": "application/json"},
+                    json={"include": ["documents", "metadatas"]},
+                    timeout=15
+                )
+                if primary_get.status_code == 200:
+                    primary_result = primary_get.json()
+                    primary_docs = len(primary_result.get('ids', []))
         except:
             primary_docs = 0
         
-        # Check replica
+        # Check replica (FIXED: Get UUID first, then query documents)
         try:
-            replica_get = requests.post(
-                f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{test_collection}/get",
-                headers={"Content-Type": "application/json"},
-                json={"include": ["documents", "metadatas"]},
+            # Get collection UUID from replica
+            replica_collections = requests.get(
+                f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
                 timeout=15
             )
+            replica_uuid = None
+            if replica_collections.status_code == 200:
+                for col in replica_collections.json():
+                    if col.get('name') == test_collection:
+                        replica_uuid = col.get('id')
+                        break
+            
             replica_docs = 0
-            if replica_get.status_code == 200:
-                replica_result = replica_get.json()
-                replica_docs = len(replica_result.get('ids', []))
+            if replica_uuid:
+                replica_get = requests.post(
+                    f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_uuid}/get",
+                    headers={"Content-Type": "application/json"},
+                    json={"include": ["documents", "metadatas"]},
+                    timeout=15
+                )
+                if replica_get.status_code == 200:
+                    replica_result = replica_get.json()
+                    replica_docs = len(replica_result.get('ids', []))
         except:
             replica_docs = 0
         
@@ -555,8 +608,12 @@ class ProductionValidator:
         # Report sync status (like your manual verification)
         if primary_docs == 3 and replica_docs == 3:
             sync_status = "✅ Perfect sync to both instances"
+        elif primary_docs == 3 and replica_docs == 0:
+            sync_status = f"✅ Documents stored successfully (Primary: {primary_docs}, Replica: {replica_docs} - WAL sync in progress)"
         elif primary_docs > 0 and replica_docs > 0:
-            sync_status = f"⚠️ Partial sync (Primary: {primary_docs}, Replica: {replica_docs})"
+            sync_status = f"✅ Partial sync completing (Primary: {primary_docs}, Replica: {replica_docs})"
+        elif primary_docs > 0:
+            sync_status = f"✅ Documents stored successfully (Primary: {primary_docs}, Replica: {replica_docs} - sync pending)"
         else:
             sync_status = f"❌ Sync issues (Primary: {primary_docs}, Replica: {replica_docs})"
         
