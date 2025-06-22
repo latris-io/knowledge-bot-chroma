@@ -1507,8 +1507,9 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                     # Track documents in the cleanup system
                     self.track_documents(collection_name, ids)
                     
+                    # CRITICAL FIX: Use collection_name (not UUID) for load balancer routing
                     doc_response = self.make_request('POST',
-                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_id}/add",
+                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/add",
                         json={
                             "documents": documents,
                             "ids": ids
@@ -1609,18 +1610,20 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
             total_docs_primary = 0
             total_docs_replica = 0
             
+            # Define test collection prefix for validation
+            test_prefix = 'AUTOTEST_enhanced_high_load_perf_'
+            
             try:
                 # Check primary instance
                 primary_collections = self.make_request('GET', 'https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections')
                 if primary_collections.status_code == 200:
                     primary_data = primary_collections.json()
-                    # Count test collections only
-                    total_collections_primary = len([c for c in primary_data if c['name'].startswith('AUTOTEST_enhanced_high_load_perf')]
-                    )
+                    # Count test collections only (fix collection name pattern)
+                    total_collections_primary = len([c for c in primary_data if c['name'].startswith(test_prefix)])
                     
-                    # Count documents in test collections
+                    # Count documents in test collections (fix pattern)
                     for collection in primary_data:
-                        if collection['name'].startswith('AUTOTEST_enhanced_high_load_perf'):
+                        if collection['name'].startswith(test_prefix):
                             try:
                                 doc_response = self.make_request('POST', 
                                     f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection['name']}/get",
@@ -1639,13 +1642,12 @@ class EnhancedComprehensiveTest(EnhancedTestBase):
                 replica_collections = self.make_request('GET', 'https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections')
                 if replica_collections.status_code == 200:
                     replica_data = replica_collections.json()
-                    # Count test collections only
-                    total_collections_replica = len([c for c in replica_data if c['name'].startswith('AUTOTEST_enhanced_high_load_perf')]
-                    )
+                    # Count test collections only (fix pattern)
+                    total_collections_replica = len([c for c in replica_data if c['name'].startswith(test_prefix)])
                     
-                    # Count documents in test collections
+                    # Count documents in test collections (fix pattern)
                     for collection in replica_data:
-                        if collection['name'].startswith('AUTOTEST_enhanced_high_load_perf'):
+                        if collection['name'].startswith(test_prefix):
                             try:
                                 doc_response = self.make_request('POST', 
                                     f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection['name']}/get",
