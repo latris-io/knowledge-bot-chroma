@@ -176,6 +176,17 @@ For focused **USE CASE 1 testing**, use `run_all_tests.py` **only** - it include
 
 ## 🚨 **USE CASE 2: Primary Instance Down (High Availability)** ✅ **ENTERPRISE-GRADE SUCCESS**
 
+### **🔴 CRITICAL TESTING REQUIREMENT: MANUAL INFRASTRUCTURE FAILURE ONLY**
+
+**⚠️ USE CASE 2 CANNOT BE TESTED WITH AUTOMATED SCRIPTS**
+
+To properly test USE CASE 2, you **MUST**:
+1. **Manually suspend the primary instance** via Render dashboard
+2. **Test CMS operations during actual infrastructure failure**
+3. **Manually resume primary and verify sync**
+
+**❌ Running `run_enhanced_tests.py` is NOT USE CASE 2 testing** - it only tests failover logic while both instances remain healthy.
+
 ### **🎉 MAJOR BREAKTHROUGH ACHIEVED** 
 **CRITICAL RETRY LOGIC BUG RESOLVED**: The fundamental issue causing 57% WAL sync failure rates has been **completely fixed**, achieving **100% data consistency** during infrastructure failures.
 
@@ -244,14 +255,34 @@ elif replica and replica.is_healthy:  # WRITE FAILOVER
 
 ### **Test Coverage**
 
+#### **🚨 CRITICAL: Automated Tests vs Manual Testing**
+
+**❌ AUTOMATED TESTS ARE NOT SUFFICIENT FOR USE CASE 2**
+
 #### **Enhanced Tests** (`run_enhanced_tests.py`)
-- ✅ **Write Failover - Primary Down**: Simulates CMS resilience during primary issues
+- ✅ **Write Failover - Primary Down**: **ONLY TESTS FAILOVER LOGIC** - does not simulate real infrastructure failures
   - Tests normal operation baseline
-  - Tests write resilience during primary problems  
+  - Tests write resilience during **simulated** primary problems  
   - Validates document accessibility via load balancer
   - Checks document distribution analysis
+  - **⚠️ PRIMARY INSTANCE REMAINS HEALTHY** - this is NOT real infrastructure failure testing
 
 **Specific Test:** `test_write_failover_with_primary_down()`
+
+**🔴 LIMITATION**: Enhanced tests only validate the **programmatic failover logic** but do **NOT** test actual infrastructure failure scenarios. They cannot replace manual testing.
+
+#### **🔥 WHAT USE CASE 2 ACTUALLY REQUIRES:**
+
+**✅ MANDATORY: Manual Infrastructure Failure Simulation**
+- **User must suspend primary instance** via Render dashboard
+- **Real infrastructure failure** - primary actually goes offline
+- **CMS operations during failure** - test actual user workflows
+- **Primary recovery and sync validation** - complete lifecycle testing
+
+**❌ NOT SUFFICIENT: Running automated tests**
+- Enhanced tests only test logic, not real failures
+- Primary instance stays healthy throughout automated tests
+- Does not validate complete infrastructure failure lifecycle
 
 #### **Production Validation Tests** (`run_all_tests.py`)  
 - ✅ **Load Balancer Failover**: CMS production scenario simulation
@@ -454,6 +485,17 @@ curl https://chroma-load-balancer.onrender.com/collection/mappings
 ---
 
 ## 🔴 **USE CASE 3: Replica Instance Down (Read Failover)** ✅ **COMPLETE SUCCESS**
+
+### **🔴 CRITICAL TESTING REQUIREMENT: MANUAL INFRASTRUCTURE FAILURE ONLY**
+
+**⚠️ USE CASE 3 CANNOT BE TESTED WITH AUTOMATED SCRIPTS**
+
+To properly test USE CASE 3, you **MUST**:
+1. **Manually suspend the replica instance** via Render dashboard
+2. **Test read operations during actual infrastructure failure**
+3. **Manually resume replica and verify sync**
+
+**❌ Running `run_enhanced_tests.py` is NOT USE CASE 3 testing** - it only tests failover logic while both instances remain healthy.
 
 ### **🎉 PRODUCTION TESTING BREAKTHROUGH ACHIEVED** 
 **100% DATA CONSISTENCY VALIDATED**: USE CASE 3 has been rigorously tested with actual infrastructure failure simulation, achieving complete success with our enhanced systems.
