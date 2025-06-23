@@ -255,6 +255,28 @@ elif replica and replica.is_healthy:  # WRITE FAILOVER
 
 ### **Test Coverage**
 
+#### **🎉 NEW: Enhanced Manual Testing Script with Selective Auto-Cleanup** ⭐
+
+**✅ RECOMMENDED: Guided Manual Testing** (`test_use_case_2_manual.py`)
+- ✅ **Complete lifecycle guidance**: Step-by-step manual infrastructure failure simulation
+- ✅ **Automated testing during failure**: Comprehensive operation testing while primary is down
+- ✅ **Recovery verification**: Automatic monitoring of primary restoration and sync completion
+- ✅ **Selective automatic cleanup**: Same enhanced cleanup behavior as USE CASE 1 - only cleans successful test data, preserves failed test data for debugging
+- ✅ **Enterprise validation**: Real infrastructure failure with production-grade verification
+
+**Run Command:**
+```bash
+python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
+```
+
+**Testing Flow:**
+1. **Initial health check** - Verify system ready
+2. **Manual primary suspension** - Guided Render dashboard instructions
+3. **Automated failure testing** - 4 comprehensive operation tests during outage
+4. **Manual primary recovery** - Guided restoration instructions  
+5. **Automatic sync verification** - Monitor WAL completion and data consistency
+6. **Selective automatic cleanup** - Same as USE CASE 1: removes successful test data, preserves failed test data for debugging
+
 #### **🚨 CRITICAL: Automated Tests vs Manual Testing**
 
 **❌ AUTOMATED TESTS ARE NOT SUFFICIENT FOR USE CASE 2**
@@ -270,19 +292,6 @@ elif replica and replica.is_healthy:  # WRITE FAILOVER
 **Specific Test:** `test_write_failover_with_primary_down()`
 
 **🔴 LIMITATION**: Enhanced tests only validate the **programmatic failover logic** but do **NOT** test actual infrastructure failure scenarios. They cannot replace manual testing.
-
-#### **🔥 WHAT USE CASE 2 ACTUALLY REQUIRES:**
-
-**✅ MANDATORY: Manual Infrastructure Failure Simulation**
-- **User must suspend primary instance** via Render dashboard
-- **Real infrastructure failure** - primary actually goes offline
-- **CMS operations during failure** - test actual user workflows
-- **Primary recovery and sync validation** - complete lifecycle testing
-
-**❌ NOT SUFFICIENT: Running automated tests**
-- Enhanced tests only test logic, not real failures
-- Primary instance stays healthy throughout automated tests
-- Does not validate complete infrastructure failure lifecycle
 
 #### **Production Validation Tests** (`run_all_tests.py`)  
 - ✅ **Load Balancer Failover**: CMS production scenario simulation
@@ -1040,7 +1049,10 @@ python run_all_tests.py --url https://chroma-load-balancer.onrender.com
 
 ### **Test Specific Scenarios**
 ```bash
-# Test only write failover (USE CASE 2)
+# Test USE CASE 2 with guided manual infrastructure failure + selective cleanup (RECOMMENDED)
+python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
+
+# Test only write failover logic (USE CASE 2 - programmatic only)
 python test_write_failover.py --url https://chroma-load-balancer.onrender.com
 
 # Test only transaction safety under high load (USE CASE 4)
