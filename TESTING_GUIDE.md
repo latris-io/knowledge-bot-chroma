@@ -80,11 +80,12 @@ export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional
 - ✅ **Baseline Comparison**: Before/after transaction count measurement
 - ✅ **Production Safety**: Zero data loss confirmation under stress conditions
 
-### **⚖️ Manual Infrastructure Testing (`use_case_2_manual_testing.py`)**
-- ✅ **Real Infrastructure Failure**: Actual primary instance suspension testing
-- ✅ **CMS Operation Continuity**: File upload/delete/query during failures  
-- ✅ **Automatic Recovery Validation**: Primary restoration and sync verification
-- ✅ **End-to-End Workflow**: Complete failure → recovery → validation cycle
+### **⚖️ Enhanced Manual Infrastructure Testing (`test_use_case_2_manual.py`)** ⭐
+- ✅ **Real Infrastructure Failure**: Actual primary instance suspension testing with guided prompts
+- ✅ **Automated Testing During Failure**: 4 comprehensive operation tests (collection creation, document addition with embeddings, document query, additional collection)
+- ✅ **Automatic Recovery Validation**: Primary restoration and sync verification with monitoring
+- ✅ **Selective Cleanup**: Same as USE CASE 1 - removes successful test data, preserves failed test data for debugging
+- ✅ **End-to-End Workflow**: Complete guided failure → recovery → validation → cleanup cycle
 
 ## 🔧 Manual Testing Scenarios
 

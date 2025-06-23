@@ -1,8 +1,21 @@
 # 🚨 USE CASE 2 Testing - READ THIS FIRST
 
-## ⚠️ CRITICAL: Manual Testing Required
+## ⭐ **ENHANCED TESTING SCRIPT AVAILABLE**
 
-**USE CASE 2 (Primary Instance Down) testing requires MANUAL primary instance suspension.**
+**USE CASE 2 (Primary Instance Down) testing now has a comprehensive guided script with selective cleanup.**
+
+### ✅ **RECOMMENDED: Enhanced Guided Testing**
+```bash
+# Complete guided testing with automatic cleanup
+python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
+```
+
+**The enhanced script provides:**
+- **Step-by-step guidance** for manual primary suspension via Render dashboard
+- **4 automated tests** during infrastructure failure (collection creation, document addition with embeddings, document query, additional collection)
+- **Automatic monitoring** of primary recovery and sync completion
+- **Selective cleanup** - same as USE CASE 1: removes successful test data, preserves failed test data for debugging
+- **Complete testing summary** with success metrics
 
 ### 🚫 **DON'T Do This**
 ```bash
@@ -10,22 +23,15 @@
 python run_enhanced_tests.py --url https://chroma-load-balancer.onrender.com
 ```
 
-### ✅ **DO This Instead**
-```bash
-# 1. Suspend primary instance via Render dashboard
-# 2. Wait 30-60 seconds  
-# 3. Run manual testing:
-python use_case_2_manual_testing.py --manual-confirmed
-```
-
 ### 📋 **Quick Steps**
-1. **Go to Render dashboard** → `chroma-primary` → **Suspend**
-2. **Wait 30-60 seconds** for health detection
-3. **Run manual test**: `python use_case_2_manual_testing.py --manual-confirmed`
-4. **Resume primary** via Render dashboard after testing
+1. **Run the enhanced script**: `python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com`
+2. **Follow guided prompts** for primary suspension via Render dashboard
+3. **Script handles all testing** during infrastructure failure automatically
+4. **Follow guided prompts** for primary recovery
+5. **Automatic cleanup** removes successful test data
 
 ### 📚 **Full Documentation**
-- **Complete protocol**: `USE_CASE_2_TESTING_PROTOCOL.md`
-- **Production use cases**: `USE_CASES.md`
+- **Complete use cases**: `USE_CASES.md` (fully updated)
+- **Production deployment**: `PRODUCTION_TESTING_GUIDE.md`
 
-**The automated test suite will redirect you here if you try to run USE CASE 2 tests incorrectly.** 
+**The enhanced script provides enterprise-grade infrastructure failure testing with bulletproof data protection.** 

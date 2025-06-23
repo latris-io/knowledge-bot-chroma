@@ -34,7 +34,7 @@ This guide ensures **100% safe testing in production** with **bulletproof data c
 | `run_all_tests.py` | **PRIMARY**: Production validation | 5 per test run | Enhanced selective cleanup |
 | `run_enhanced_tests.py` | **SECONDARY**: Comprehensive scenarios | Multiple | Enhanced selective cleanup |
 | `test_use_case_4_transaction_safety.py` | Transaction safety validation | Multiple | Enhanced cleanup |
-| `use_case_2_manual_testing.py` | Manual failover testing | Multiple | Enhanced cleanup |
+| `test_use_case_2_manual.py` | Enhanced manual failover testing | Multiple | Selective cleanup (same as USE CASE 1) |
 
 ## 🚀 **Running Tests in Production (Current System)**
 
@@ -67,13 +67,16 @@ python test_use_case_4_transaction_safety.py --url https://chroma-load-balancer.
 # Expected result: 15/15 transactions logged (100% capture rate)
 ```
 
-### **4. Manual Failover Testing** (Advanced)
+### **4. Enhanced Manual Failover Testing** ⭐ (Advanced)
 ```bash
-# Test real infrastructure failure scenarios
-python use_case_2_manual_testing.py --url https://chroma-load-balancer.onrender.com
+# Test real infrastructure failure scenarios with guided prompts and selective cleanup
+python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
 
-# Requires manual primary instance suspension via Render dashboard
-# Tests actual infrastructure failure resilience
+# Features:
+# - Guided manual primary instance suspension via Render dashboard
+# - 4 automated tests during infrastructure failure
+# - Automatic recovery monitoring and sync verification
+# - Selective cleanup (same as USE CASE 1) - preserves failed test data for debugging
 ```
 
 ## 🔍 **Test Validation - CRITICAL BUG FIXED**
