@@ -80,10 +80,19 @@ export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional
 - ✅ **Baseline Comparison**: Before/after transaction count measurement
 - ✅ **Production Safety**: Zero data loss confirmation under stress conditions
 
-### **⚖️ Enhanced Manual Infrastructure Testing (`test_use_case_2_manual.py`)** ⭐
+### **⚖️ Enhanced Manual Infrastructure Testing** ⭐
+
+#### **Primary Failure Testing (`test_use_case_2_manual.py`)**
 - ✅ **Real Infrastructure Failure**: Actual primary instance suspension testing with guided prompts
 - ✅ **Automated Testing During Failure**: 4 comprehensive operation tests (collection creation, document addition with embeddings, document query, additional collection)
 - ✅ **Automatic Recovery Validation**: Primary restoration and sync verification with monitoring
+- ✅ **Selective Cleanup**: Same as USE CASE 1 - removes successful test data, preserves failed test data for debugging
+- ✅ **End-to-End Workflow**: Complete guided failure → recovery → validation → cleanup cycle
+
+#### **Replica Failure Testing (`test_use_case_3_manual.py`)** ⭐
+- ✅ **Real Infrastructure Failure**: Actual replica instance suspension testing with guided prompts
+- ✅ **Automated Testing During Failure**: 5 comprehensive operation tests (collection creation, read operations with failover validation, write operations zero-impact testing, DELETE operations graceful degradation, health detection verification)
+- ✅ **Automatic Recovery Validation**: Replica restoration and sync verification with monitoring
 - ✅ **Selective Cleanup**: Same as USE CASE 1 - removes successful test data, preserves failed test data for debugging
 - ✅ **End-to-End Workflow**: Complete guided failure → recovery → validation → cleanup cycle
 

@@ -34,7 +34,8 @@ This guide ensures **100% safe testing in production** with **bulletproof data c
 | `run_all_tests.py` | **PRIMARY**: Production validation | 5 per test run | Enhanced selective cleanup |
 | `run_enhanced_tests.py` | **SECONDARY**: Comprehensive scenarios | Multiple | Enhanced selective cleanup |
 | `test_use_case_4_transaction_safety.py` | Transaction safety validation | Multiple | Enhanced cleanup |
-| `test_use_case_2_manual.py` | Enhanced manual failover testing | Multiple | Selective cleanup (same as USE CASE 1) |
+| `test_use_case_2_manual.py` | Enhanced manual primary failure testing | Multiple | Selective cleanup (same as USE CASE 1) |
+| `test_use_case_3_manual.py` | Enhanced manual replica failure testing | Multiple | Selective cleanup (same as USE CASE 1) |
 
 ## 🚀 **Running Tests in Production (Current System)**
 
@@ -67,14 +68,26 @@ python test_use_case_4_transaction_safety.py --url https://chroma-load-balancer.
 # Expected result: 15/15 transactions logged (100% capture rate)
 ```
 
-### **4. Enhanced Manual Failover Testing** ⭐ (Advanced)
+### **4. Enhanced Manual Primary Failure Testing** ⭐ (Advanced)
 ```bash
-# Test real infrastructure failure scenarios with guided prompts and selective cleanup
+# Test real primary infrastructure failure scenarios with guided prompts and selective cleanup
 python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
 
 # Features:
 # - Guided manual primary instance suspension via Render dashboard
 # - 4 automated tests during infrastructure failure
+# - Automatic recovery monitoring and sync verification
+# - Selective cleanup (same as USE CASE 1) - preserves failed test data for debugging
+```
+
+### **5. Enhanced Manual Replica Failure Testing** ⭐ (Advanced)
+```bash
+# Test real replica infrastructure failure scenarios with guided prompts and selective cleanup
+python test_use_case_3_manual.py --url https://chroma-load-balancer.onrender.com
+
+# Features:
+# - Guided manual replica instance suspension via Render dashboard
+# - 5 automated tests during infrastructure failure (collection creation, read failover, write zero-impact, DELETE graceful degradation, health detection)
 # - Automatic recovery monitoring and sync verification
 # - Selective cleanup (same as USE CASE 1) - preserves failed test data for debugging
 ```
