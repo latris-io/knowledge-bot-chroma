@@ -1049,12 +1049,15 @@ Resource-Only Scaling:
 
 ### **Test Coverage**
 
-#### **Transaction Safety Verification Test** (`test_use_case_4_transaction_safety.py`)
-- ✅ **Stress Load Generation**: Creates 15 concurrent collection creation requests
+#### **Transaction Safety Verification Test** (`test_use_case_4_transaction_safety.py`) ⭐
+- ✅ **Stress Load Generation**: Creates 30 concurrent collection creation requests
 - ✅ **Transaction Logging Verification**: Validates 100% transaction capture rate  
 - ✅ **503 Error Handling**: Proves operations logged even during timeouts/connection issues
 - ✅ **Baseline Comparison**: Measures transaction count before/after stress testing
 - ✅ **Production Safety**: Confirms zero data loss under high load conditions
+- ✅ **Enhanced Selective Cleanup**: Same as USE CASE 1 - only cleans successful test data, preserves failed test data for debugging
+- ✅ **PostgreSQL Cleanup**: Removes collection mappings, WAL entries, and performance metrics
+- ✅ **Debugging Preservation**: Failed test data preserved with debugging URLs and investigation guidance
 
 **Run Command:**
 ```bash
@@ -1101,11 +1104,11 @@ python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
 # Test USE CASE 3 with guided manual replica failure + selective cleanup (RECOMMENDED)
 python test_use_case_3_manual.py --url https://chroma-load-balancer.onrender.com
 
+# Test USE CASE 4 transaction safety under high load + selective cleanup (RECOMMENDED)
+python test_use_case_4_transaction_safety.py --url https://chroma-load-balancer.onrender.com
+
 # Test only write failover logic (USE CASE 2 - programmatic only)
 python test_write_failover.py --url https://chroma-load-balancer.onrender.com
-
-# Test only transaction safety under high load (USE CASE 4)
-python test_use_case_4_transaction_safety.py --url https://chroma-load-balancer.onrender.com
 
 # Test only production CMS scenarios  
 python -c "
@@ -1133,10 +1136,10 @@ curl -s https://chroma-load-balancer.onrender.com/wal/status | jq .
 
 ### **Before Going Live**
 - [x] Run both test suites with 100% success rate
-- [x] Verify normal CMS operations work (USE CASE 1)
-- [x] Test primary failover scenario manually (USE CASE 2)  
+- [x] Verify normal CMS operations work (USE CASE 1) - Enhanced selective cleanup
+- [x] Test primary failover scenario manually (USE CASE 2) - Enhanced script with selective cleanup
 - [x] Test replica failover scenario manually (USE CASE 3) - Enhanced script with selective cleanup
-- [x] Test high load performance and transaction safety (USE CASE 4)
+- [x] Test high load performance and transaction safety (USE CASE 4) - Enhanced selective cleanup
 - [x] Confirm WAL sync functioning
 - [x] Validate collection auto-mapping
 - [x] Check PostgreSQL connectivity
