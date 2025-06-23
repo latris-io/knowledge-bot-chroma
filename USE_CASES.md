@@ -272,7 +272,11 @@ python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
 **Testing Flow:**
 1. **Initial health check** - Verify system ready
 2. **Manual primary suspension** - Guided Render dashboard instructions
-3. **Automated failure testing** - 4 comprehensive operation tests during outage
+3. **Automated failure testing** - 4 comprehensive operation tests during outage:
+   - **Collection Creation** - Create test collection during primary failure
+   - **Document Addition** - Add document with embeddings during failure  
+   - **Document Query** - Query documents using embeddings during failure
+   - **Additional Collection** - Create second test collection during failure
 4. **Manual primary recovery** - Guided restoration instructions  
 5. **Automatic sync verification** - Monitor WAL completion and data consistency
 6. **Selective automatic cleanup** - Same as USE CASE 1: removes successful test data, preserves failed test data for debugging
@@ -302,30 +306,30 @@ python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
 
 **Specific Test:** `test_failover_functionality()`
 
-### **Manual Validation**
-1. **Simulate primary failure**: 
-   ```bash
-   # Option 1: Use admin endpoint (if enabled)
-   curl -X POST https://chroma-load-balancer.onrender.com/admin/instances/primary/health \
-        -H "Content-Type: application/json" \
-        -d '{"healthy": false, "duration_seconds": 60}'
-   
-   # Option 2: RECOMMENDED - Manually suspend primary instance on Render dashboard
-   # Go to Render dashboard → chroma-primary service → Suspend
-   ```
+### **Manual Validation - ENHANCED SCRIPT AVAILABLE** ⭐
 
-2. **Test comprehensive CMS operations during failure**:
-   - **Upload files through your CMS** → Verify ingestion succeeds (routes to replica)
-   - **Delete files through your CMS** → Verify deletion succeeds (routes to replica)  
-   - **Query/search via CMS** → Verify reads work (routes to replica)
-   - Check all operations transparent to users throughout failure
+**✅ RECOMMENDED**: Use the enhanced testing script for guided validation:
+```bash
+python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
+```
 
-3. **Restore primary and verify complete sync**:
-   - **Manually restart primary instance on Render dashboard**
-   - Wait for WAL sync processing (~2 minutes for complete sync)
-   - **Verify uploaded documents appear on primary instance**
-   - **Verify deleted documents are removed from primary instance**
-   - **Confirm zero data loss and complete consistency**
+**The script automates all validation steps with:**
+- **Guided prompts** for manual primary suspension via Render dashboard
+- **Automated testing** during infrastructure failure (4 comprehensive tests)
+- **Automatic monitoring** of primary recovery and sync completion
+- **Selective cleanup** preserving failed test data for debugging
+
+**❌ LEGACY APPROACH**: Manual curl commands (not recommended - use script instead)
+<details>
+<summary>Click to expand manual curl validation (legacy)</summary>
+
+1. **Simulate primary failure via Render dashboard**
+2. **Test operations manually**:
+   - Collection creation, document addition, document query, etc.
+3. **Restore primary and verify sync manually**
+   - Manual verification of data consistency across instances
+
+</details>
 
 ### **Success Criteria** ✅ **ALL CRITERIA ACHIEVED**
 - ✅ **CMS ingest continues during primary downtime** ← **100% SUCCESS (5/5 operations)**
@@ -355,9 +359,16 @@ USE CASE 2 now provides **bulletproof protection** against primary instance fail
 - ✅ **Zero timing gaps** - Operations succeed in 0.6-1.1 seconds during infrastructure failures
 - ✅ **Guaranteed data durability** - No transaction loss during infrastructure failures
 
-### **🔥 PRODUCTION MANUAL TESTING PROTOCOL**
+### **🔥 PRODUCTION TESTING PROTOCOL - ENHANCED SCRIPT** ⭐
 
-**CRITICAL**: USE CASE 2 testing requires **manual primary instance control** to simulate real infrastructure failures.
+**✅ RECOMMENDED**: Use the enhanced testing script which automates the protocol below:
+```bash
+python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
+```
+
+**❌ LEGACY APPROACH**: Manual step-by-step protocol (automated by script above)
+<details>
+<summary>Click to expand legacy manual protocol (automated by enhanced script)</summary>
 
 #### **Step 1: Prepare Test Environment**
 ```bash
@@ -475,6 +486,14 @@ AND (status = 'executed' OR (status = 'failed' AND updated_at < NOW() - INTERVAL
 - ✅ **Pre-execution logging**: All write operations logged before routing
 - ✅ **Exponential backoff**: 1min, 2min, 4min delays prevent primary overload
 - ✅ **100% data consistency**: Complete elimination of transaction loss during infrastructure failures
+
+**Verification Checklist**:
+- ✅ **Documents uploaded during failure** → Now exist on primary
+- ✅ **Documents deleted during failure** → Removed from primary
+- ✅ **Document counts match** → Both instances have identical data
+- ✅ **Zero data loss confirmed** → All operations properly synchronized
+
+</details>
 
 ### **Validation Commands**
 ```bash
