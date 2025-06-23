@@ -585,6 +585,33 @@ if primary_success or replica_success:
 
 ### **Test Coverage**
 
+#### **🎉 NEW: Enhanced Manual Testing Script with Selective Auto-Cleanup** ⭐
+
+**✅ RECOMMENDED: Guided Manual Testing** (`test_use_case_3_manual.py`)
+- ✅ **Complete lifecycle guidance**: Step-by-step manual replica suspension via Render dashboard
+- ✅ **Automated testing during failure**: Comprehensive operation testing while replica is down
+- ✅ **Recovery verification**: Automatic monitoring of replica restoration and sync completion
+- ✅ **Selective cleanup**: Same enhanced cleanup behavior as USE CASE 1 - only cleans successful test data, preserves failed test data for debugging
+- ✅ **Enterprise validation**: Real infrastructure failure with production-grade verification
+
+**Run Command:**
+```bash
+python test_use_case_3_manual.py --url https://chroma-load-balancer.onrender.com
+```
+
+**Testing Flow:**
+1. **Initial health check** - Verify system ready
+2. **Manual replica suspension** - Guided Render dashboard instructions
+3. **Automated failure testing** - 5 comprehensive operation tests during outage:
+   - **Collection Creation** - Create test collection during replica failure (zero impact expected)
+   - **Read Operations** - Validate read failover to primary (collection listing + document queries)
+   - **Write Operations** - Confirm zero impact during replica failure  
+   - **DELETE Operations** - Validate graceful degradation (primary-only success)
+   - **Health Detection** - Verify load balancer detects replica failure
+4. **Manual replica recovery** - Guided restoration instructions  
+5. **Automatic sync verification** - Monitor WAL completion and data consistency
+6. **Selective automatic cleanup** - Same as USE CASE 1: removes successful test data, preserves failed test data for debugging
+
 #### **Enhanced Tests** (`run_enhanced_tests.py`)
 - ✅ **Replica Down Scenario**: Comprehensive 3-phase testing
   - **Phase 1**: Normal operation baseline with both instances
@@ -1071,6 +1098,9 @@ python run_all_tests.py --url https://chroma-load-balancer.onrender.com
 # Test USE CASE 2 with guided manual infrastructure failure + selective cleanup (RECOMMENDED)
 python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
 
+# Test USE CASE 3 with guided manual replica failure + selective cleanup (RECOMMENDED)
+python test_use_case_3_manual.py --url https://chroma-load-balancer.onrender.com
+
 # Test only write failover logic (USE CASE 2 - programmatic only)
 python test_write_failover.py --url https://chroma-load-balancer.onrender.com
 
@@ -1105,7 +1135,7 @@ curl -s https://chroma-load-balancer.onrender.com/wal/status | jq .
 - [x] Run both test suites with 100% success rate
 - [x] Verify normal CMS operations work (USE CASE 1)
 - [x] Test primary failover scenario manually (USE CASE 2)  
-- [x] Test replica failover scenario manually (USE CASE 3)
+- [x] Test replica failover scenario manually (USE CASE 3) - Enhanced script with selective cleanup
 - [x] Test high load performance and transaction safety (USE CASE 4)
 - [x] Confirm WAL sync functioning
 - [x] Validate collection auto-mapping
