@@ -89,22 +89,89 @@ class UseCase2Tester:
             return 0
 
     def verify_document_exists_on_instance(self, instance_url, collection_uuid, doc_id):
-        """Verify a specific document exists on an instance"""
+        """Verify a specific document exists on an instance and return full document data"""
         try:
             response = requests.post(
                 f"{instance_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_uuid}/get",
-                json={"ids": [doc_id], "include": ["documents", "metadatas"]},
+                json={"ids": [doc_id], "include": ["documents", "metadatas", "embeddings"]},
                 timeout=10
             )
             if response.status_code == 200:
                 result = response.json()
                 documents = result.get('documents', [])
-                return len(documents) > 0 and len(documents[0]) > 0
-            return False
+                metadatas = result.get('metadatas', [])
+                embeddings = result.get('embeddings', [])
+                
+                if len(documents) > 0 and len(documents[0]) > 0:
+                    return {
+                        'exists': True,
+                        'content': documents[0][0] if documents[0] else None,
+                        'metadata': metadatas[0][0] if metadatas and metadatas[0] else {},
+                        'embeddings': embeddings[0] if embeddings else []
+                    }
+                else:
+                    return {'exists': False}
+            return {'exists': False}
         except Exception as e:
             self.log(f"Error checking document on {instance_url}: {e}", "WARNING")
-            return False
+            return {'exists': False}
             
+    def compare_document_integrity(self, original_doc, primary_doc, replica_doc, doc_id):
+        """Compare document integrity between original, primary, and replica"""
+        integrity_issues = []
+        
+        # Check if documents exist on both instances
+        if not primary_doc.get('exists', False):
+            integrity_issues.append("Missing on primary")
+        if not replica_doc.get('exists', False):
+            integrity_issues.append("Missing on replica")
+            
+        if not primary_doc.get('exists', False) or not replica_doc.get('exists', False):
+            return False, integrity_issues
+            
+        # Content integrity check
+        original_content = original_doc['content']
+        primary_content = primary_doc.get('content')
+        replica_content = replica_doc.get('content')
+        
+        if primary_content != original_content:
+            integrity_issues.append(f"Primary content mismatch: expected '{original_content}', got '{primary_content}'")
+        if replica_content != original_content:
+            integrity_issues.append(f"Replica content mismatch: expected '{original_content}', got '{replica_content}'")
+        if primary_content != replica_content:
+            integrity_issues.append(f"Primary/replica content differs: '{primary_content}' vs '{replica_content}'")
+            
+        # Metadata integrity check
+        original_metadata = original_doc['metadata']
+        primary_metadata = primary_doc.get('metadata', {})
+        replica_metadata = replica_doc.get('metadata', {})
+        
+        # Check key metadata fields
+        for key, expected_value in original_metadata.items():
+            primary_value = primary_metadata.get(key)
+            replica_value = replica_metadata.get(key)
+            
+            if primary_value != expected_value:
+                integrity_issues.append(f"Primary metadata['{key}'] mismatch: expected '{expected_value}', got '{primary_value}'")
+            if replica_value != expected_value:
+                integrity_issues.append(f"Replica metadata['{key}'] mismatch: expected '{expected_value}', got '{replica_value}'")
+            if primary_value != replica_value:
+                integrity_issues.append(f"Primary/replica metadata['{key}'] differs: '{primary_value}' vs '{replica_value}'")
+                
+        # Embeddings integrity check
+        original_embeddings = original_doc['embeddings']
+        primary_embeddings = primary_doc.get('embeddings', [])
+        replica_embeddings = replica_doc.get('embeddings', [])
+        
+        if primary_embeddings != original_embeddings:
+            integrity_issues.append(f"Primary embeddings mismatch: expected {original_embeddings}, got {primary_embeddings}")
+        if replica_embeddings != original_embeddings:
+            integrity_issues.append(f"Replica embeddings mismatch: expected {original_embeddings}, got {replica_embeddings}")
+        if primary_embeddings != replica_embeddings:
+            integrity_issues.append(f"Primary/replica embeddings differ: {primary_embeddings} vs {replica_embeddings}")
+            
+        return len(integrity_issues) == 0, integrity_issues
+
     def create_test_collection(self, name_suffix="", test_name=None):
         """Create a test collection during failure simulation"""
         collection_name = f"{self.session_id}_{name_suffix}" if name_suffix else self.session_id
@@ -376,24 +443,28 @@ class UseCase2Tester:
                             doc_id = doc_info['id']
                             total_docs_checked += 1
                             
-                            primary_has_doc = self.verify_document_exists_on_instance(self.primary_url, primary_uuid, doc_id)
-                            replica_has_doc = self.verify_document_exists_on_instance(self.replica_url, replica_uuid, doc_id)
+                            primary_doc = self.verify_document_exists_on_instance(self.primary_url, primary_uuid, doc_id)
+                            replica_doc = self.verify_document_exists_on_instance(self.replica_url, replica_uuid, doc_id)
                             
-                            if primary_has_doc and replica_has_doc:
+                            # ENHANCED: Full content integrity verification
+                            integrity_ok, integrity_issues = self.compare_document_integrity(doc_info, primary_doc, replica_doc, doc_id)
+                            
+                            if integrity_ok:
                                 synced_docs += 1
-                                self.log(f"   ✅ Document '{doc_id}': Found on both instances")
-                            elif replica_has_doc and not primary_has_doc:
-                                self.log(f"   ❌ Document '{doc_id}': Only on replica (sync failed)")
-                                document_sync_success = False
-                            elif primary_has_doc and not replica_has_doc:
-                                self.log(f"   ⚠️ Document '{doc_id}': Only on primary (expected during failure)")
+                                self.log(f"   ✅ Document '{doc_id}': Perfect integrity on both instances")
+                                self.log(f"      Content: '{doc_info['content'][:50]}...' verified identical")
+                                self.log(f"      Metadata: {len(doc_info['metadata'])} fields verified")
+                                self.log(f"      Embeddings: {len(doc_info['embeddings'])} dimensions verified")
                             else:
-                                self.log(f"   ❌ Document '{doc_id}': Missing from both instances")
+                                self.log(f"   ❌ Document '{doc_id}': Data integrity issues detected")
+                                for issue in integrity_issues:
+                                    self.log(f"      - {issue}")
                                 document_sync_success = False
                     
                     self.log(f"📊 Document sync summary (attempt {attempt + 1}/{max_retries}):")
-                    self.log(f"   Documents synced: {synced_docs}/{total_docs_checked} = {synced_docs/total_docs_checked*100:.1f}%" if total_docs_checked > 0 else "No documents to check")
-                    self.log(f"   Document sync success: {'✅ Complete' if document_sync_success and synced_docs == total_docs_checked else '❌ Incomplete'}")
+                    self.log(f"   Documents with perfect integrity: {synced_docs}/{total_docs_checked} = {synced_docs/total_docs_checked*100:.1f}%" if total_docs_checked > 0 else "No documents to check")
+                    self.log(f"   Content integrity success: {'✅ Complete' if document_sync_success and synced_docs == total_docs_checked else '❌ Incomplete'}")
+                    self.log(f"   Verification level: ENHANCED (content + metadata + embeddings)")
                     
                     # Overall consistency includes both collection and document sync
                     overall_consistency = collection_consistency and document_sync_success and (synced_docs == total_docs_checked if total_docs_checked > 0 else True)
@@ -674,18 +745,18 @@ MANUAL ACTION REQUIRED: Resume Primary Instance
         print(f"⏱️  Total test time: {total_time/60:.1f} minutes")
         print(f"🧪 Operations during failure: {success_count}/{total_tests} successful ({success_count/total_tests*100:.1f}%)")
         print(f"🔄 Primary recovery: {'✅ Success' if recovery_success else '⚠️ Partial'}")
-        print(f"📊 Data consistency: {'✅ Complete' if consistency_ok else '⚠️ Partial'} (ENHANCED: includes document-level sync)")
+        print(f"📊 Data consistency: {'✅ Complete' if consistency_ok else '⚠️ Partial'} (ENHANCED: includes document-level content integrity)")
         print(f"🧹 Automatic cleanup: {'✅ Complete' if cleanup_success else '⚠️ Manual needed'}")
         
         # Enhanced summary for document tracking
         if self.documents_added_during_failure:
             total_docs = sum(len(docs) for docs in self.documents_added_during_failure.values())
-            print(f"📋 Document sync verification: {total_docs} documents tracked and verified")
+            print(f"📋 Content integrity verification: {total_docs} documents verified (content + metadata + embeddings)")
         
         if overall_test_success:
             print("\n🎉 USE CASE 2: ✅ SUCCESS - Enterprise-grade high availability validated!")
             print("   Your system maintains CMS operations during infrastructure failures.")
-            print("   ✅ ENHANCED: Document-level sync from replica to primary verified!")
+            print("   ✅ ENHANCED: Complete document integrity verified (content + metadata + embeddings)!")
             return True
         else:
             print("\n❌ USE CASE 2: Issues detected - Review results above")
