@@ -381,13 +381,34 @@ class UseCase2Tester:
             
         return False
         
-    def cleanup_test_data(self):
-        """Clean up test data using selective cleanup (only successful tests - USE CASE 1 behavior)"""
+    def cleanup_test_data(self, overall_test_success=True):
+        """Clean up test data using selective cleanup based on OVERALL test result"""
         if not self.test_collections:
             self.log("No test data to clean up")
             return True
+        
+        # CRITICAL: If OVERALL test failed, preserve ALL data for debugging
+        if not overall_test_success:
+            self.log("🔒 OVERALL TEST FAILED - Preserving ALL test data for debugging")
+            self.log("🔍 PRESERVED COLLECTIONS FOR DEBUGGING:")
+            for collection in self.test_collections:
+                self.log(f"   - {collection}")
+                self.log(f"   URL: {self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection}")
             
-        self.log("🧹 Applying selective cleanup (same as USE CASE 1)...")
+            # Show why test failed
+            failed_reasons = []
+            for test_name, test_data in self.test_results.items():
+                if not test_data['success']:
+                    failed_reasons.append(test_name)
+            
+            if failed_reasons:
+                self.log(f"📋 Failed operations: {', '.join(failed_reasons)}")
+            self.log("💡 Review test output above for debugging information")
+            self.log("🧹 Manual cleanup available: python comprehensive_system_cleanup.py --url URL")
+            return True  # This is expected behavior for failed tests
+            
+        # If overall test PASSED, apply selective cleanup (only remove successful test data)
+        self.log("🧹 OVERALL TEST PASSED - Applying selective cleanup (same as USE CASE 1)...")
         
         # Analyze test results for selective cleanup
         successful_collections = []
@@ -410,9 +431,12 @@ class UseCase2Tester:
         # Check for any collections not tracked by individual tests
         untracked_collections = [col for col in self.test_collections if col not in successful_collections and col not in failed_collections]
         
-        # Conservative approach: only clean collections from explicitly successful tests
-        if successful_collections or (not failed_collections and not untracked_collections):
-            self.log(f"🔄 Cleaning {len(successful_collections)} collections from successful tests...")
+        # Clean successful collections only
+        collections_to_clean = successful_collections
+        collections_to_preserve = failed_collections + untracked_collections
+        
+        if collections_to_clean:
+            self.log(f"🔄 Cleaning {len(collections_to_clean)} collections from successful tests...")
             try:
                 # Use comprehensive_system_cleanup.py for bulletproof cleanup
                 result = subprocess.run([
@@ -429,45 +453,42 @@ class UseCase2Tester:
                         if 'CLEANUP SUMMARY' in line or line.startswith('✅') or line.startswith('🔧'):
                             if line.strip():
                                 self.log(f"   {line.strip()}")
-                    return True
+                    cleanup_success = True
                 else:
                     self.log(f"❌ Cleanup failed with return code {result.returncode}", "ERROR")
                     self.log(f"Error output: {result.stderr}", "ERROR")
-                    return False
+                    cleanup_success = False
                     
             except subprocess.TimeoutExpired:
                 self.log("❌ Cleanup timeout - manual cleanup may be required", "ERROR")
-                return False
+                cleanup_success = False
             except Exception as e:
                 self.log(f"❌ Cleanup error: {e}", "ERROR")
-                return False
+                cleanup_success = False
         else:
             self.log("ℹ️  No successful tests with collections found - no data to clean")
+            cleanup_success = True
         
-        # Report what's being preserved
-        if failed_collections:
+        # Report what's being preserved (even in successful overall tests)
+        if collections_to_preserve:
             self.log("🔒 PRESERVED FOR DEBUGGING:")
             for collection in failed_collections:
-                self.log(f"   - {collection} (from failed test)")
-                
-        if untracked_collections:
-            self.log("🔒 PRESERVED (untracked):")
+                self.log(f"   - {collection} (from failed individual test)")
             for collection in untracked_collections:
                 self.log(f"   - {collection} (untracked - preserved by default)")
                 
-        # Provide debugging URLs for preserved collections
-        if failed_collections or untracked_collections:
+            # Provide debugging URLs for preserved collections
             self.log("🔍 DEBUG COLLECTIONS:")
-            for collection in failed_collections + untracked_collections:
+            for collection in collections_to_preserve:
                 self.log(f"   Collection: {collection}")
                 self.log(f"   URL: {self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection}")
         
-        if failed_collections or untracked_collections:
+        if collections_to_preserve:
             self.log("⚠️ Some collections preserved for debugging - manual cleanup may be needed later")
-            return True  # Still return success as this is expected behavior
         else:
-            self.log("✅ Selective cleanup complete - successful test data removed, no failed test data to preserve")
-            return True
+            self.log("✅ Selective cleanup complete - all test data removed (no failed operations)")
+            
+        return cleanup_success
             
     def run_complete_test_cycle(self):
         """Run the complete USE CASE 2 testing cycle"""
@@ -541,9 +562,12 @@ MANUAL ACTION REQUIRED: Resume Primary Instance
         self.log("📋 Step 7: Verifying data consistency...")
         consistency_ok = self.verify_data_consistency()
         
-        # Step 8: Automatic Cleanup
+        # Determine overall test success BEFORE cleanup
+        overall_test_success = success_count >= total_tests * 0.8 and consistency_ok
+        
+        # Step 8: Automatic Cleanup (Based on OVERALL test result)
         self.log("📋 Step 8: Automatic cleanup of test data...")
-        cleanup_success = self.cleanup_test_data()
+        cleanup_success = self.cleanup_test_data(overall_test_success)
         
         # Final Summary
         total_time = time.time() - self.start_time
@@ -561,13 +585,14 @@ MANUAL ACTION REQUIRED: Resume Primary Instance
             total_docs = sum(len(docs) for docs in self.documents_added_during_failure.values())
             print(f"📋 Document sync verification: {total_docs} documents tracked and verified")
         
-        if success_count >= total_tests * 0.8 and consistency_ok:
+        if overall_test_success:
             print("\n🎉 USE CASE 2: ✅ SUCCESS - Enterprise-grade high availability validated!")
             print("   Your system maintains CMS operations during infrastructure failures.")
             print("   ✅ ENHANCED: Document-level sync from replica to primary verified!")
             return True
         else:
             print("\n❌ USE CASE 2: Issues detected - Review results above")
+            print("   🔒 TEST DATA PRESERVED for debugging (failed test)")
             return False
 
 def main():
