@@ -566,14 +566,36 @@ MANUAL ACTION REQUIRED: Suspend Primary Instance
         self.log("📋 Step 3: Verifying primary failure detection...")
         time.sleep(10)  # Wait for health detection
         
-        failure_status = self.check_system_health()
-        if failure_status:
-            primary_healthy = failure_status.get('instances', [{}])[0].get('healthy', True)
-            if not primary_healthy:
-                self.log("✅ Primary failure detected by load balancer")
+        # Verify primary is actually down before proceeding
+        primary_is_down = False
+        for attempt in range(6):  # Try for up to 60 seconds
+            failure_status = self.check_system_health()
+            if failure_status:
+                primary_healthy = failure_status.get('instances', [{}])[0].get('healthy', True)
+                if not primary_healthy:
+                    self.log("✅ Primary failure detected by load balancer")
+                    primary_is_down = True
+                    break
+                else:
+                    if attempt < 5:
+                        self.log(f"⚠️ Primary still appears healthy - waiting (attempt {attempt + 1}/6)...", "WARNING")
+                        time.sleep(10)
+                    else:
+                        self.log("❌ Primary suspension not detected after 60 seconds", "ERROR")
             else:
-                self.log("⚠️ Primary still appears healthy - may need more time", "WARNING")
-                
+                self.log("❌ Cannot check system status", "ERROR")
+                break
+        
+        if not primary_is_down:
+            self.log("❌ CRITICAL: Primary instance not properly suspended", "ERROR")
+            self.log("📋 Please ensure you have:")
+            self.log("   1. Gone to your Render dashboard")
+            self.log("   2. Found the 'chroma-primary' service")  
+            self.log("   3. Clicked 'Suspend' (not just restart)")
+            self.log("   4. Waited for the suspension to complete")
+            self.log("🔄 Run the test again after properly suspending the primary")
+            return False
+        
         # Step 4: Test Operations During Failure
         self.log("📋 Step 4: Testing operations during infrastructure failure...")
         success_count, total_tests = self.test_operations_during_failure()
@@ -582,8 +604,23 @@ MANUAL ACTION REQUIRED: Suspend Primary Instance
             self.log("❌ All operations failed during primary outage", "ERROR")
             return False
             
-        # Step 5: Manual Primary Recovery
-        self.wait_for_user("""
+        # Step 5: Manual Primary Recovery - but only if primary is still down
+        # Check if primary is still down before asking for resumption
+        current_status = self.check_system_health()
+        if current_status:
+            primary_healthy = current_status.get('instances', [{}])[0].get('healthy', False)
+            if primary_healthy:
+                self.log("⚠️ Primary appears to have recovered automatically - skipping manual resumption", "WARNING")
+                primary_needs_resumption = False
+            else:
+                self.log("🔍 Primary is still down - proceeding with manual resumption")
+                primary_needs_resumption = True
+        else:
+            self.log("⚠️ Cannot check system status - assuming primary needs resumption")
+            primary_needs_resumption = True
+            
+        if primary_needs_resumption:
+            self.wait_for_user("""
 MANUAL ACTION REQUIRED: Resume Primary Instance
         
 1. Go back to your Render dashboard
@@ -591,10 +628,29 @@ MANUAL ACTION REQUIRED: Resume Primary Instance
 3. Click 'Resume' or 'Restart' to restore the primary
 4. Wait for the service to fully start up (~30-60 seconds)
         """)
-        
+        else:
+            self.log("📋 Step 5: Skipping manual resumption (primary already healthy)")
+            
         # Step 6: Wait for Recovery and Sync
         self.log("📋 Step 6: Waiting for recovery and sync completion...")
-        recovery_success = self.wait_for_recovery_and_sync()
+        if primary_needs_resumption:
+            recovery_success = self.wait_for_recovery_and_sync()
+        else:
+            # Primary was already healthy, just check sync status
+            self.log("⏳ Primary already healthy - checking sync status...")
+            final_status = self.check_system_health()
+            if final_status:
+                pending_writes = final_status.get('unified_wal', {}).get('pending_writes', 0)
+                self.log(f"📊 Current sync status: {pending_writes} pending writes")
+                if pending_writes == 0:
+                    self.log("✅ Sync already complete")
+                    recovery_success = True
+                else:
+                    self.log("⏳ WAL sync still in progress - waiting for completion...")
+                    recovery_success = self.wait_for_recovery_and_sync()
+            else:
+                self.log("⚠️ Cannot check system status")
+                recovery_success = False
         
         if not recovery_success:
             self.log("⚠️ Recovery may still be in progress", "WARNING")
