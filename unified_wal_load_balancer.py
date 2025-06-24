@@ -1947,7 +1947,49 @@ if __name__ == '__main__':
             
         except Exception as e:
             return jsonify({"error": str(e)}), 500
-    
+
+    @app.route('/admin/create_mapping', methods=['POST'])
+    def create_mapping():
+        """Admin endpoint to manually create collection mapping and see exact error"""
+        try:
+            data = request.get_json()
+            collection_name = data.get('collection_name')
+            primary_id = data.get('primary_id') 
+            replica_id = data.get('replica_id')
+            
+            if not collection_name:
+                return jsonify({"error": "collection_name required"}), 400
+            
+            with enhanced_wal.db_lock:
+                with enhanced_wal.get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        # Try the same INSERT that's failing
+                        cur.execute("""
+                            INSERT INTO collection_id_mapping 
+                            (collection_name, primary_collection_id, replica_collection_id, created_at)
+                            VALUES (%s, %s, %s, NOW())
+                            ON CONFLICT (collection_name) DO UPDATE SET
+                            primary_collection_id = EXCLUDED.primary_collection_id,
+                            replica_collection_id = EXCLUDED.replica_collection_id,
+                            updated_at = NOW()
+                        """, (collection_name, primary_id, replica_id))
+                        conn.commit()
+                        
+            return jsonify({
+                "success": True,
+                "message": f"Mapping created/updated for {collection_name}",
+                "primary_id": primary_id,
+                "replica_id": replica_id
+            }), 200
+            
+        except Exception as e:
+            import traceback
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+
     @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
         """Transaction-safe proxy with pre-execution logging to prevent timing gap data loss"""
@@ -2136,10 +2178,10 @@ if __name__ == '__main__':
                     # Parse response to get collection info
                     collection_info = response.json()
                     collection_name = collection_info.get('name')
-                    primary_uuid = collection_info.get('id')
+                    collection_uuid = collection_info.get('id')
                     
-                    if collection_name and primary_uuid:
-                        logger.info(f"✅ PROXY_REQUEST: Collection created - name: {collection_name}, UUID: {primary_uuid[:8]}")
+                    if collection_name and collection_uuid:
+                        logger.info(f"✅ PROXY_REQUEST: Collection created - name: {collection_name}, UUID: {collection_uuid[:8]} on {target_instance.name}")
                         
                         # Store collection mapping in database for distributed system
                         with enhanced_wal.db_lock:
@@ -2152,20 +2194,45 @@ if __name__ == '__main__':
                                     """, (collection_name,))
                                     
                                     if not cur.fetchone():
-                                        # Create new mapping entry (replica UUID will be filled by WAL sync)
-                                        cur.execute("""
-                                            INSERT INTO collection_id_mapping 
-                                            (collection_name, primary_collection_id, replica_collection_id, created_at)
-                                            VALUES (%s, %s, NULL, NOW())
-                                            ON CONFLICT (collection_name) DO UPDATE SET
-                                            primary_collection_id = EXCLUDED.primary_collection_id,
-                                            updated_at = NOW()
-                                        """, (collection_name, primary_uuid))
-                                        conn.commit()
+                                        # CRITICAL FIX: Store UUID in correct column based on target instance
+                                        if target_instance.name == "primary":
+                                            # Collection created on primary - store as primary UUID
+                                            cur.execute("""
+                                                INSERT INTO collection_id_mapping 
+                                                (collection_name, primary_collection_id, created_at) 
+                                                VALUES (%s, %s, NOW())
+                                            """, (collection_name, collection_uuid))
+                                            logger.info(f"✅ PROXY_REQUEST: Primary collection mapping created for {collection_name}")
+                                        elif target_instance.name == "replica":
+                                            # Collection created on replica (USE CASE 2) - store as replica UUID
+                                            cur.execute("""
+                                                INSERT INTO collection_id_mapping 
+                                                (collection_name, replica_collection_id, created_at) 
+                                                VALUES (%s, %s, NOW())
+                                            """, (collection_name, collection_uuid))
+                                            logger.info(f"✅ PROXY_REQUEST: Replica collection mapping created for {collection_name}")
                                         
-                                        logger.info(f"✅ PROXY_REQUEST: Collection mapping created for {collection_name}")
+                                        conn.commit()
+                                        logger.info(f"✅ PROXY_REQUEST: Collection mapping committed for {collection_name}")
                                     else:
-                                        logger.info(f"ℹ️ PROXY_REQUEST: Collection mapping already exists for {collection_name}")
+                                        # Mapping exists - update the appropriate column
+                                        if target_instance.name == "primary":
+                                            cur.execute("""
+                                                UPDATE collection_id_mapping 
+                                                SET primary_collection_id = %s, updated_at = NOW()
+                                                WHERE collection_name = %s
+                                            """, (collection_uuid, collection_name))
+                                            logger.info(f"✅ PROXY_REQUEST: Updated primary UUID for existing mapping {collection_name}")
+                                        elif target_instance.name == "replica":
+                                            cur.execute("""
+                                                UPDATE collection_id_mapping 
+                                                SET replica_collection_id = %s, updated_at = NOW()
+                                                WHERE collection_name = %s
+                                            """, (collection_uuid, collection_name))
+                                            logger.info(f"✅ PROXY_REQUEST: Updated replica UUID for existing mapping {collection_name}")
+                                        
+                                        conn.commit()
+                                        logger.info(f"✅ PROXY_REQUEST: Collection mapping updated for {collection_name}")
                         
                 except Exception as mapping_error:
                     logger.error(f"❌ PROXY_REQUEST: Collection mapping failed: {mapping_error}")
