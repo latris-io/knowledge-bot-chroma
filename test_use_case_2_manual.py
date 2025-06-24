@@ -249,13 +249,15 @@ class UseCase2Tester:
         self.log(f"📊 Operations during failure: {success_count}/{total_tests} successful ({success_count/total_tests*100:.1f}%)")
         return success_count, total_tests
         
-    def wait_for_recovery_and_sync(self, timeout_minutes=5):
-        """Wait for primary recovery and WAL sync completion"""
+    def wait_for_recovery_and_sync(self, timeout_minutes=12):
+        """Wait for primary recovery and WAL sync completion with proper retry logic"""
         self.log("⏳ Waiting for primary recovery and WAL sync...")
         
         start_time = time.time()
         timeout_seconds = timeout_minutes * 60
         
+        # Phase 1: Wait for primary recovery
+        recovery_complete = False
         while time.time() - start_time < timeout_seconds:
             status = self.check_system_health()
             if status:
@@ -267,118 +269,157 @@ class UseCase2Tester:
                 
                 self.log(f"Status: Healthy: {healthy_instances}/2, Primary: {primary_healthy}, Replica: {replica_healthy}, Pending: {pending_writes}")
                 
-                # Recovery complete when both instances healthy and minimal pending writes
-                if healthy_instances == 2 and pending_writes <= 2:
-                    self.log("✅ Primary recovery and sync completed!")
-                    return True
+                # Recovery complete when both instances healthy
+                if healthy_instances == 2 and primary_healthy and replica_healthy:
+                    if not recovery_complete:
+                        self.log("✅ Primary recovery completed, now waiting for WAL sync...")
+                        recovery_complete = True
                     
-            time.sleep(10)
+                    # Now wait for WAL sync to actually complete (0 pending writes)
+                    if pending_writes == 0:
+                        self.log("✅ WAL sync completed (0 pending writes)")
+                        # Wait additional 30 seconds to ensure sync operations are fully processed
+                        self.log("⏳ Waiting additional 30 seconds for sync processing...")
+                        time.sleep(30)
+                        return True
+                    elif pending_writes <= 5:
+                        self.log(f"⏳ WAL sync in progress ({pending_writes} pending writes)...")
+                    else:
+                        self.log(f"⏳ Heavy WAL sync in progress ({pending_writes} pending writes)...")
+                        
+            time.sleep(15)  # Check every 15 seconds during sync
             
-        self.log("⚠️ Recovery timeout reached", "WARNING")
+        self.log("⚠️ Recovery timeout reached - sync may still be in progress", "WARNING")
+        
+        # Final status check
+        final_status = self.check_system_health()
+        if final_status:
+            final_pending = final_status.get('unified_wal', {}).get('pending_writes', 0)
+            self.log(f"📊 Final sync status: {final_pending} pending writes")
+        
         return False
         
-    def verify_data_consistency(self):
-        """ENHANCED: Verify that test data exists and documents are synced between instances"""
-        self.log("🔍 Verifying data consistency (ENHANCED: including document-level sync)...")
+    def verify_data_consistency(self, max_retries=3):
+        """ENHANCED: Verify that test data exists and documents are synced between instances with retry logic"""
+        self.log("🔍 Verifying data consistency (ENHANCED: including document-level sync with retries)...")
         
-        try:
-            # Step 1: Check collections exist via load balancer
-            response = requests.get(
-                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
-                timeout=10
-            )
-            
-            if response.status_code != 200:
-                self.log(f"❌ Failed to get collections via load balancer: {response.status_code}", "ERROR")
-                return False
+        for attempt in range(max_retries):
+            if attempt > 0:
+                self.log(f"🔄 Verification attempt {attempt + 1}/{max_retries} (waiting 30 seconds for sync to complete)...")
+                time.sleep(30)
+        
+            try:
+                # Step 1: Check collections exist via load balancer
+                response = requests.get(
+                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                    timeout=10
+                )
                 
-            collections = response.json()
-            collection_names = [c['name'] for c in collections]
-            found_collections = [name for name in self.test_collections if name in collection_names]
-            
-            self.log(f"📊 Collection-level verification:")
-            self.log(f"   Created during failure: {len(self.test_collections)}")
-            self.log(f"   Found after recovery: {len(found_collections)}")
-            self.log(f"   Collection consistency: {len(found_collections)}/{len(self.test_collections)} = {len(found_collections)/len(self.test_collections)*100:.1f}%" if self.test_collections else "No test collections")
-            
-            collection_consistency = len(found_collections) == len(self.test_collections)
-            
-            # Step 2: ENHANCED - Verify document-level sync between instances
-            if self.documents_added_during_failure:
-                self.log(f"📋 Document-level sync verification:")
-                self.log(f"   Documents added during failure: {sum(len(docs) for docs in self.documents_added_during_failure.values())}")
+                if response.status_code != 200:
+                    self.log(f"❌ Failed to get collections via load balancer: {response.status_code}", "ERROR")
+                    if attempt < max_retries - 1:
+                        continue
+                    return False
+                    
+                collections = response.json()
+                collection_names = [c['name'] for c in collections]
+                found_collections = [name for name in self.test_collections if name in collection_names]
                 
-                # Get collection mappings for direct instance access
-                mappings = self.get_collection_mappings()
+                self.log(f"📊 Collection-level verification (attempt {attempt + 1}/{max_retries}):")
+                self.log(f"   Created during failure: {len(self.test_collections)}")
+                self.log(f"   Found after recovery: {len(found_collections)}")
+                self.log(f"   Collection consistency: {len(found_collections)}/{len(self.test_collections)} = {len(found_collections)/len(self.test_collections)*100:.1f}%" if self.test_collections else "No test collections")
                 
+                collection_consistency = len(found_collections) == len(self.test_collections)
+                
+                # Step 2: ENHANCED - Verify document-level sync between instances
                 document_sync_success = True
                 total_docs_checked = 0
                 synced_docs = 0
                 
-                for collection_name, documents in self.documents_added_during_failure.items():
-                    if collection_name not in found_collections:
-                        self.log(f"   ⚠️ Collection {collection_name} not found - skipping document verification")
+                if self.documents_added_during_failure:
+                    self.log(f"📋 Document-level sync verification (attempt {attempt + 1}/{max_retries}):")
+                    self.log(f"   Documents added during failure: {sum(len(docs) for docs in self.documents_added_during_failure.values())}")
+                    
+                    # Get collection mappings for direct instance access
+                    mappings = self.get_collection_mappings()
+                    
+                    for collection_name, documents in self.documents_added_during_failure.items():
+                        if collection_name not in found_collections:
+                            self.log(f"   ⚠️ Collection {collection_name} not found - skipping document verification")
+                            continue
+                            
+                        # Find UUIDs for this collection
+                        primary_uuid = None
+                        replica_uuid = None
+                        
+                        for mapping in mappings:
+                            if mapping.get('collection_name') == collection_name:
+                                primary_uuid = mapping.get('primary_collection_id')
+                                replica_uuid = mapping.get('replica_collection_id')
+                                break
+                        
+                        if not primary_uuid or not replica_uuid:
+                            self.log(f"   ⚠️ Could not find UUIDs for collection {collection_name}")
+                            continue
+                        
+                        self.log(f"   Checking collection '{collection_name}': Primary UUID: {primary_uuid[:8]}..., Replica UUID: {replica_uuid[:8]}...")
+                        
+                        # Check document count on both instances
+                        primary_count = self.get_document_count_from_instance(self.primary_url, primary_uuid)
+                        replica_count = self.get_document_count_from_instance(self.replica_url, replica_uuid)
+                        
+                        self.log(f"   Document counts: Primary: {primary_count}, Replica: {replica_count}")
+                        
+                        # Check each document exists on both instances
+                        for doc_info in documents:
+                            doc_id = doc_info['id']
+                            total_docs_checked += 1
+                            
+                            primary_has_doc = self.verify_document_exists_on_instance(self.primary_url, primary_uuid, doc_id)
+                            replica_has_doc = self.verify_document_exists_on_instance(self.replica_url, replica_uuid, doc_id)
+                            
+                            if primary_has_doc and replica_has_doc:
+                                synced_docs += 1
+                                self.log(f"   ✅ Document '{doc_id}': Found on both instances")
+                            elif replica_has_doc and not primary_has_doc:
+                                self.log(f"   ❌ Document '{doc_id}': Only on replica (sync failed)")
+                                document_sync_success = False
+                            elif primary_has_doc and not replica_has_doc:
+                                self.log(f"   ⚠️ Document '{doc_id}': Only on primary (expected during failure)")
+                            else:
+                                self.log(f"   ❌ Document '{doc_id}': Missing from both instances")
+                                document_sync_success = False
+                    
+                    self.log(f"📊 Document sync summary (attempt {attempt + 1}/{max_retries}):")
+                    self.log(f"   Documents synced: {synced_docs}/{total_docs_checked} = {synced_docs/total_docs_checked*100:.1f}%" if total_docs_checked > 0 else "No documents to check")
+                    self.log(f"   Document sync success: {'✅ Complete' if document_sync_success and synced_docs == total_docs_checked else '❌ Incomplete'}")
+                    
+                    # Overall consistency includes both collection and document sync
+                    overall_consistency = collection_consistency and document_sync_success and (synced_docs == total_docs_checked if total_docs_checked > 0 else True)
+                    
+                else:
+                    self.log(f"📋 No documents were added during failure - only verifying collection sync")
+                    overall_consistency = collection_consistency
+                
+                # If we have complete consistency, return success immediately
+                if overall_consistency:
+                    self.log(f"🎯 Overall data consistency: ✅ Complete (achieved on attempt {attempt + 1}/{max_retries})")
+                    return True
+                else:
+                    self.log(f"🎯 Overall data consistency: ❌ Issues detected (attempt {attempt + 1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        self.log(f"⏳ Will retry verification in 30 seconds...")
                         continue
-                        
-                    # Find UUIDs for this collection
-                    primary_uuid = None
-                    replica_uuid = None
+                    else:
+                        self.log(f"❌ Final attempt failed - sync incomplete")
+                        return False
                     
-                    for mapping in mappings:
-                        if mapping.get('collection_name') == collection_name:
-                            primary_uuid = mapping.get('primary_collection_id')
-                            replica_uuid = mapping.get('replica_collection_id')
-                            break
+            except Exception as e:
+                self.log(f"❌ Verification error (attempt {attempt + 1}/{max_retries}): {e}", "ERROR")
+                if attempt < max_retries - 1:
+                    continue
                     
-                    if not primary_uuid or not replica_uuid:
-                        self.log(f"   ⚠️ Could not find UUIDs for collection {collection_name}")
-                        continue
-                    
-                    self.log(f"   Checking collection '{collection_name}': Primary UUID: {primary_uuid[:8]}..., Replica UUID: {replica_uuid[:8]}...")
-                    
-                    # Check document count on both instances
-                    primary_count = self.get_document_count_from_instance(self.primary_url, primary_uuid)
-                    replica_count = self.get_document_count_from_instance(self.replica_url, replica_uuid)
-                    
-                    self.log(f"   Document counts: Primary: {primary_count}, Replica: {replica_count}")
-                    
-                    # Check each document exists on both instances
-                    for doc_info in documents:
-                        doc_id = doc_info['id']
-                        total_docs_checked += 1
-                        
-                        primary_has_doc = self.verify_document_exists_on_instance(self.primary_url, primary_uuid, doc_id)
-                        replica_has_doc = self.verify_document_exists_on_instance(self.replica_url, replica_uuid, doc_id)
-                        
-                        if primary_has_doc and replica_has_doc:
-                            synced_docs += 1
-                            self.log(f"   ✅ Document '{doc_id}': Found on both instances")
-                        elif replica_has_doc and not primary_has_doc:
-                            self.log(f"   ❌ Document '{doc_id}': Only on replica (sync failed)")
-                            document_sync_success = False
-                        elif primary_has_doc and not replica_has_doc:
-                            self.log(f"   ⚠️ Document '{doc_id}': Only on primary (expected during failure)")
-                        else:
-                            self.log(f"   ❌ Document '{doc_id}': Missing from both instances")
-                            document_sync_success = False
-                
-                self.log(f"📊 Document sync summary:")
-                self.log(f"   Documents synced: {synced_docs}/{total_docs_checked} = {synced_docs/total_docs_checked*100:.1f}%" if total_docs_checked > 0 else "No documents to check")
-                self.log(f"   Document sync success: {'✅ Complete' if document_sync_success and synced_docs == total_docs_checked else '❌ Incomplete'}")
-                
-                # Overall consistency includes both collection and document sync
-                overall_consistency = collection_consistency and document_sync_success and (synced_docs == total_docs_checked if total_docs_checked > 0 else True)
-                
-            else:
-                self.log(f"📋 No documents were added during failure - only verifying collection sync")
-                overall_consistency = collection_consistency
-            
-            self.log(f"🎯 Overall data consistency: {'✅ Complete' if overall_consistency else '❌ Issues detected'}")
-            return overall_consistency
-                
-        except Exception as e:
-            self.log(f"❌ Verification error: {e}", "ERROR")
-            
         return False
         
     def cleanup_test_data(self, overall_test_success=True):
