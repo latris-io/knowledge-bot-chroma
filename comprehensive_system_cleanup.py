@@ -113,7 +113,10 @@ class ComprehensiveSystemCleanup:
                         is_test = any(prefix in mapping_name for prefix in [
                             'AUTOTEST_', 'test_', 'TEST_', 'temp_', 'debug_',
                             'SYNC_FIX_', 'LIVE_SYNC_', 'CMS_PRODUCTION_TEST_',
-                            'REAL_TEST_', 'WAL_SYNC_TEST_', 'USE_CASE_'
+                            'REAL_TEST_', 'WAL_SYNC_TEST_', 'USE_CASE_',
+                            'UC2_', 'UC3_', 'UC4_',  # USE CASE testing patterns
+                            'UC2_DELETE_', 'UC3_MANUAL_', 'UC4_SAFETY_',  # Specific USE CASE patterns
+                            'FIX_TEST_', 'DEBUG_MAPPING_', 'MAPPING_FIX_'  # Debug test patterns
                         ])
                         
                         if is_protected:
@@ -205,7 +208,11 @@ class ComprehensiveSystemCleanup:
             'AUTOTEST_', 'test_collection_', 'TEST_', 'temp_', 'debug_',
             'SYNC_FIX_', 'LIVE_SYNC_', 'CMS_PRODUCTION_TEST_',
             'REAL_TEST_', 'WAL_SYNC_TEST_', 'USE_CASE_', 'BASELINE_TEST_',
-            'CMS_FAILOVER_TEST_', 'client_test_'
+            'CMS_FAILOVER_TEST_', 'client_test_',
+            'UC2_', 'UC3_', 'UC4_',  # USE CASE testing patterns
+            'UC2_DELETE_', 'UC3_MANUAL_', 'UC4_SAFETY_',  # Specific USE CASE patterns
+            'STRESS_', 'SAFETY_', 'MANUAL_',  # Additional test patterns
+            'FIX_TEST_', 'DEBUG_MAPPING_', 'MAPPING_FIX_'  # Debug test patterns
         ]
         
         try:
@@ -392,6 +399,12 @@ class ComprehensiveSystemCleanup:
                            OR collection_name LIKE 'TEST_%'
                            OR collection_name LIKE 'SYNC_FIX_%'
                            OR collection_name LIKE 'USE_CASE_%'
+                           OR collection_name LIKE 'UC2_%'
+                           OR collection_name LIKE 'UC3_%'
+                           OR collection_name LIKE 'UC4_%'
+                           OR collection_name LIKE 'FIX_TEST_%'
+                           OR collection_name LIKE 'DEBUG_MAPPING_%'
+                           OR collection_name LIKE 'MAPPING_FIX_%'
                     """)
                     remaining_test_mappings = [row[0] for row in cur.fetchall()]
                     
@@ -429,7 +442,10 @@ class ComprehensiveSystemCleanup:
                         'AUTOTEST_', 'test_collection_', 'TEST_', 'temp_', 'debug_',
                         'SYNC_FIX_', 'LIVE_SYNC_', 'CMS_PRODUCTION_TEST_',
                         'REAL_TEST_', 'WAL_SYNC_TEST_', 'USE_CASE_', 'BASELINE_TEST_',
-                        'CMS_FAILOVER_TEST_', 'client_test_'
+                        'CMS_FAILOVER_TEST_', 'client_test_',
+                        'UC2_', 'UC3_', 'UC4_',  # USE CASE testing patterns
+                        'UC2_DELETE_', 'UC3_MANUAL_', 'UC4_SAFETY_',  # Specific USE CASE patterns
+                        'FIX_TEST_', 'DEBUG_MAPPING_', 'MAPPING_FIX_'  # Debug test patterns
                     ]
                     
                     PROTECTED_COLLECTIONS = [
