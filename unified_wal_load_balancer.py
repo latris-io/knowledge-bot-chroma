@@ -1838,8 +1838,10 @@ if __name__ == '__main__':
                     for row in cur.fetchall():
                         mappings.append({
                             "collection_name": row[0],
-                            "primary_uuid": row[1][:8] + "..." if row[1] else None,
-                            "replica_uuid": row[2][:8] + "..." if row[2] else None,
+                            "primary_collection_id": row[1],  # Full UUID for testing
+                            "replica_collection_id": row[2],  # Full UUID for testing
+                            "primary_uuid": row[1][:8] + "..." if row[1] else None,  # Display version
+                            "replica_uuid": row[2][:8] + "..." if row[2] else None,  # Display version
                             "created_at": row[3].isoformat() if row[3] else None,
                             "updated_at": row[4].isoformat() if row[4] else None,
                             "status": "complete" if row[1] and row[2] else "partial"
