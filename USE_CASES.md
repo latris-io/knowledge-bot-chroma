@@ -257,10 +257,13 @@ elif replica and replica.is_healthy:  # WRITE FAILOVER
 
 #### **🎉 NEW: Enhanced Manual Testing Script with Selective Auto-Cleanup** ⭐
 
-**✅ RECOMMENDED: Guided Manual Testing** (`test_use_case_2_manual.py`)
+**✅ RECOMMENDED: Enhanced Guided Manual Testing** (`test_use_case_2_manual.py`) ⭐ **ENHANCED**
 - ✅ **Complete lifecycle guidance**: Step-by-step manual infrastructure failure simulation
 - ✅ **Automated testing during failure**: Comprehensive operation testing while primary is down
 - ✅ **Recovery verification**: Automatic monitoring of primary restoration and sync completion
+- ✅ **🆕 ENHANCED Document-level sync verification**: Verifies documents added during failure are synced from replica to primary
+- ✅ **🆕 Direct instance verification**: Checks document counts and existence on both primary and replica instances using UUIDs
+- ✅ **🆕 Comprehensive sync validation**: Validates both collection-level AND document-level sync completion
 - ✅ **Selective automatic cleanup**: Same enhanced cleanup behavior as USE CASE 1 - only cleans successful test data, preserves failed test data for debugging
 - ✅ **Enterprise validation**: Real infrastructure failure with production-grade verification
 
@@ -278,8 +281,9 @@ python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
    - **Document Query** - Query documents using embeddings during failure
    - **Additional Collection** - Create second test collection during failure
 4. **Manual primary recovery** - Guided restoration instructions  
-5. **Automatic sync verification** - Monitor WAL completion and data consistency
-6. **Selective automatic cleanup** - Same as USE CASE 1: removes successful test data, preserves failed test data for debugging
+5. **🆕 ENHANCED automatic sync verification** - Monitor WAL completion, verify document-level sync from replica to primary
+6. **🆕 Direct instance validation** - Check document counts and existence on both instances using collection UUIDs
+7. **Selective automatic cleanup** - Same as USE CASE 1: removes successful test data, preserves failed test data for debugging
 
 #### **🚨 CRITICAL: Automated Tests vs Manual Testing**
 
