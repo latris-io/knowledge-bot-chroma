@@ -192,6 +192,65 @@ class ComprehensiveSystemCleanup:
             logger.error(f"❌ PostgreSQL cleanup failed: {e}")
             return {'success': False, 'error': str(e)}
     
+    def delete_collection_with_retry(self, instance_url, collection_name, instance_name, max_retries=2):
+        """Delete collection with retry logic for temporary server errors (502, timeouts, etc.)"""
+        import time
+        
+        for attempt in range(max_retries + 1):
+            try:
+                # Try delete by name first (better for V2 API)
+                delete_response = requests.delete(
+                    f"{instance_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}",
+                    timeout=30
+                )
+                
+                if delete_response.status_code in [200, 404]:  # Success or already deleted
+                    logger.info(f"    ✅ Deleted test collection: {collection_name}")
+                    return True
+                    
+                elif delete_response.status_code == 502 and attempt < max_retries:
+                    logger.warning(f"    ⚠️ 502 Bad Gateway deleting {collection_name} (attempt {attempt + 1}/{max_retries + 1}) - server may be recovering, retrying in 15 seconds...")
+                    time.sleep(15)
+                    continue
+                    
+                elif delete_response.status_code in [503, 504] and attempt < max_retries:  # Service unavailable, gateway timeout
+                    logger.warning(f"    ⚠️ Server temporarily unavailable for {collection_name} (HTTP {delete_response.status_code}, attempt {attempt + 1}/{max_retries + 1}), retrying in 15 seconds...")
+                    time.sleep(15)
+                    continue
+                    
+                else:
+                    logger.warning(f"    ❌ Failed to delete {collection_name}: HTTP {delete_response.status_code}")
+                    return False
+                    
+            except requests.exceptions.Timeout as e:
+                if attempt < max_retries:
+                    logger.warning(f"    ⚠️ Timeout deleting {collection_name} (attempt {attempt + 1}/{max_retries + 1}), retrying in 15 seconds...")
+                    time.sleep(15)
+                    continue
+                else:
+                    logger.warning(f"    ❌ Timeout deleting {collection_name} after {max_retries + 1} attempts: {e}")
+                    return False
+                    
+            except requests.exceptions.ConnectionError as e:
+                if attempt < max_retries:
+                    logger.warning(f"    ⚠️ Connection error deleting {collection_name} (attempt {attempt + 1}/{max_retries + 1}), retrying in 15 seconds...")
+                    time.sleep(15)
+                    continue
+                else:
+                    logger.warning(f"    ❌ Connection error deleting {collection_name} after {max_retries + 1} attempts: {e}")
+                    return False
+                    
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(f"    ⚠️ Error deleting {collection_name} (attempt {attempt + 1}/{max_retries + 1}), retrying in 15 seconds...")
+                    time.sleep(15)
+                    continue
+                else:
+                    logger.warning(f"    ❌ Error deleting {collection_name} after {max_retries + 1} attempts: {e}")
+                    return False
+        
+        return False
+    
     def cleanup_chromadb_collections(self, instance_url, instance_name):
         """Clean up ONLY test collections from a ChromaDB instance - PROTECTS PRODUCTION DATA"""
         logger.info(f"🧹 Cleaning {instance_name} ChromaDB collections...")
@@ -274,21 +333,8 @@ class ComprehensiveSystemCleanup:
                     collection_name = collection.get('name')
                     collection_id = collection.get('id')
                     
-                    try:
-                        # Try delete by name first (better for V2 API)
-                        delete_response = requests.delete(
-                            f"{instance_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}",
-                            timeout=30
-                        )
-                        
-                        if delete_response.status_code in [200, 404]:
-                            deleted_count += 1
-                            logger.info(f"    ✅ Deleted test collection: {collection_name}")
-                        else:
-                            logger.warning(f"    ⚠️ Failed to delete {collection_name}: {delete_response.status_code}")
-                            
-                    except Exception as e:
-                        logger.warning(f"    ⚠️ Error deleting {collection_name}: {e}")
+                    if self.delete_collection_with_retry(instance_url, collection_name, instance_name):
+                        deleted_count += 1
             else:
                 logger.info(f"  ℹ️ No test collections found to delete")
             
