@@ -769,53 +769,83 @@ class UnifiedWALLoadBalancer:
                             final_path = final_path.replace(collection_id, mapped_uuid)
                             logger.info(f"✅ UUID MAPPED for {instance.name}: {collection_id[:8]} -> {mapped_uuid[:8]}")
                             logger.info(f"   Path changed: {old_path} -> {final_path}")
+                        elif mapped_uuid is None:
+                            logger.error(f"❌ CRITICAL: No UUID mapping found for {collection_id[:8]} -> {instance.name}")
+                            logger.error(f"   Collection may not exist yet on target instance")
+                            # Skip this sync operation - collection doesn't exist on target
+                            self.mark_write_failed(write_id, f"No UUID mapping found for collection {collection_id[:8]} on {instance.name}")
+                            continue
                         else:
-                            logger.error(f"❌ CRITICAL: Could not map UUID {collection_id[:8]} for {instance.name}")
-                            logger.error(f"   This will cause 404 error on target instance")
-                            # Continue anyway to see the error in logs
+                            logger.info(f"ℹ️ UUID mapping not needed: {collection_id[:8]} (same on both instances)")
+                            # Continue with current UUID
                     
                     # Make the sync request with normalized path
                     response = self.make_direct_request(instance, method, final_path, data=data, headers=headers)
                     
-                    # CRITICAL: Update collection mapping for successful collection creation on replica
+                    # CRITICAL: Update collection mapping for successful collection creation
                     if (method == 'POST' and 
                         ('/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete'])) and
-                        response.status_code == 200 and 
-                        instance.name == 'replica'):
+                        response.status_code == 200):
                         try:
-                            # Parse response to get replica collection info
+                            # Parse response to get collection info
                             collection_info = response.json()
-                            replica_uuid = collection_info.get('id')
+                            new_uuid = collection_info.get('id')
                             collection_name = collection_info.get('name')
                             
-                            if replica_uuid and collection_name:
-                                logger.info(f"🎯 REPLICA COLLECTION CREATED: {collection_name} -> {replica_uuid[:8]}")
-                                # Update mapping with replica UUID
+                            if new_uuid and collection_name:
+                                logger.info(f"🎯 COLLECTION CREATED: {collection_name} -> {new_uuid[:8]} on {instance.name}")
+                                
+                                # Update mapping with new UUID
                                 with self.db_lock:
                                     with self.get_db_connection() as conn:
                                         with conn.cursor() as cur:
-                                            # First try to update existing mapping
-                                            cur.execute("""
-                                                UPDATE collection_id_mapping 
-                                                SET replica_collection_id = %s, updated_at = NOW()
-                                                WHERE collection_name = %s
-                                            """, (replica_uuid, collection_name))
-                                            
-                                            if cur.rowcount > 0:
-                                                conn.commit()
-                                                logger.info(f"✅ Updated collection mapping: {collection_name} -> replica UUID: {replica_uuid[:8]}")
-                                            else:
-                                                # Create new mapping if none exists
+                                            if instance.name == 'primary':
+                                                # Collection synced to primary - update primary UUID
                                                 cur.execute("""
-                                                    INSERT INTO collection_id_mapping 
-                                                    (collection_name, primary_collection_id, replica_collection_id, created_at)
-                                                    VALUES (%s, NULL, %s, NOW())
-                                                    ON CONFLICT (collection_name) DO UPDATE SET
-                                                    replica_collection_id = EXCLUDED.replica_collection_id,
-                                                    updated_at = NOW()
-                                                """, (collection_name, replica_uuid))
-                                                conn.commit()
-                                                logger.info(f"✅ Created collection mapping: {collection_name} -> replica UUID: {replica_uuid[:8]}")
+                                                    UPDATE collection_id_mapping 
+                                                    SET primary_collection_id = %s, updated_at = NOW()
+                                                    WHERE collection_name = %s
+                                                """, (new_uuid, collection_name))
+                                                
+                                                if cur.rowcount > 0:
+                                                    conn.commit()
+                                                    logger.info(f"✅ FIXED MAPPING: {collection_name} -> primary UUID: {new_uuid[:8]}")
+                                                else:
+                                                    # Create new mapping if none exists
+                                                    cur.execute("""
+                                                        INSERT INTO collection_id_mapping 
+                                                        (collection_name, primary_collection_id, created_at)
+                                                        VALUES (%s, %s, NOW())
+                                                        ON CONFLICT (collection_name) DO UPDATE SET
+                                                        primary_collection_id = EXCLUDED.primary_collection_id,
+                                                        updated_at = NOW()
+                                                    """, (collection_name, new_uuid))
+                                                    conn.commit()
+                                                    logger.info(f"✅ Created primary mapping: {collection_name} -> {new_uuid[:8]}")
+                                                    
+                                            elif instance.name == 'replica':
+                                                # Collection synced to replica - update replica UUID
+                                                cur.execute("""
+                                                    UPDATE collection_id_mapping 
+                                                    SET replica_collection_id = %s, updated_at = NOW()
+                                                    WHERE collection_name = %s
+                                                """, (new_uuid, collection_name))
+                                                
+                                                if cur.rowcount > 0:
+                                                    conn.commit()
+                                                    logger.info(f"✅ Updated replica mapping: {collection_name} -> {new_uuid[:8]}")
+                                                else:
+                                                    # Create new mapping if none exists
+                                                    cur.execute("""
+                                                        INSERT INTO collection_id_mapping 
+                                                        (collection_name, replica_collection_id, created_at)
+                                                        VALUES (%s, %s, NOW())
+                                                        ON CONFLICT (collection_name) DO UPDATE SET
+                                                        replica_collection_id = EXCLUDED.replica_collection_id,
+                                                        updated_at = NOW()
+                                                    """, (collection_name, new_uuid))
+                                                    conn.commit()
+                                                    logger.info(f"✅ Created replica mapping: {collection_name} -> {new_uuid[:8]}")
                                         
                         except Exception as mapping_error:
                             logger.error(f"❌ Failed to update collection mapping: {mapping_error}")
@@ -1499,11 +1529,11 @@ class UnifiedWALLoadBalancer:
                         cur.execute("SELECT COUNT(*) FROM collection_id_mapping")
                         total_mappings = cur.fetchone()[0]
                         logger.error(f"   Total mappings in database: {total_mappings}")
-                        return source_collection_id  # Return as-is if no mapping found
+                        return None  # Return None to fail sync properly instead of using wrong UUID
                         
         except Exception as e:
             logger.error(f"❌ UUID mapping failed for {source_collection_id[:8]} -> {target_instance_name}: {e}")
-            return source_collection_id  # Return as-is on error
+            return None  # Return None on error to fail sync properly
 
     def check_instance_health_realtime(self, instance: ChromaInstance, timeout: int = 5) -> bool:
         """
