@@ -226,6 +226,10 @@ class EnhancedTestBase:
         
         return success
     
+    def record_test_result(self, test_name: str, success: bool, details: str = ""):
+        """Record test result - alias for log_test_result for compatibility with USE CASE 5"""
+        return self.log_test_result(test_name, success, details)
+    
     def make_request(self, method, url, **kwargs):
         """Make HTTP request with error handling and logging"""
         try:
