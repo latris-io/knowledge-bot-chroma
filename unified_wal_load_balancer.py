@@ -922,13 +922,26 @@ class UnifiedWALLoadBalancer:
             # Get batches for each healthy instance with gradual recovery
             all_batches = []
             for instance in self.instances:
+                # USE CASE 2 METHOD: Real-time health verification before sync attempts
                 if instance.is_healthy:
+                    # ENHANCED: Double-check health with real-time verification (prevents timing race conditions)
+                    realtime_healthy = self.check_instance_health_realtime(instance, timeout=3)
+                    if not realtime_healthy:
+                        logger.warning(f"⚠️ SYNC PREVENTION: {instance.name} marked unhealthy via real-time check (cached: healthy, actual: down)")
+                        # Update cached health status immediately
+                        instance.is_healthy = False
+                        continue
+                    
                     # Use smaller batch size for recently recovered instances to prevent overload
                     instance_batch_size = self.calculate_recovery_batch_size(instance, batch_size)
                     batches = self.get_pending_syncs_in_batches(instance.name, instance_batch_size)
                     all_batches.extend(batches)
+                    logger.info(f"✅ SYNC APPROVED: {instance.name} real-time verified healthy - {len(batches)} batches queued")
+                else:
+                    logger.info(f"⏸️ SYNC SKIPPED: {instance.name} cached as unhealthy (USE CASE 2 method)")
             
             if not all_batches:
+                logger.info("ℹ️ No sync batches available (all instances down or no pending writes)")
                 return
             
             logger.info(f"🚀 High-volume sync: {len(all_batches)} batches, {sum(b.batch_size for b in all_batches)} total writes")
