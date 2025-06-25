@@ -29,7 +29,9 @@ class EnhancedVerificationBase:
         try:
             response = requests.get(f"{self.base_url}/admin/collection_mappings", timeout=10)
             if response.status_code == 200:
-                return response.json()
+                data = response.json()
+                mappings = data.get('collection_mappings', [])
+                return mappings
             else:
                 self.log(f"Failed to get collection mappings: {response.status_code}")
                 return []
