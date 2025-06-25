@@ -38,17 +38,19 @@ class UseCase3Tester(EnhancedVerificationBase):
         timestamp = datetime.now().strftime("%H:%M:%S")
         print(f"[{timestamp}] {level}: {message}" if level != "INFO" else f"[{timestamp}] {message}")
 
-    def check_system_health(self):
-        """Check current system health"""
+    def check_system_health(self, realtime=False):
+        """Check system health with optional real-time verification"""
         try:
-            response = requests.get(f"{self.base_url}/status", timeout=10)
+            url = f"{self.base_url}/status"
+            if realtime:
+                url += "?realtime=true"
+                
+            response = requests.get(url, timeout=10)
             if response.status_code == 200:
-                status = response.json()
-                return status
-            return None
-        except Exception as e:
-            self.log(f"Failed to check system health: {e}")
-            return None
+                return response.json()
+        except:
+            pass
+        return None
 
     def wait_for_user_input(self, prompt):
         """Wait for user to press Enter with a prompt"""
@@ -228,7 +230,7 @@ class UseCase3Tester(EnhancedVerificationBase):
         # Test 5: Health Detection
         test_name = "health_detection"
         self.log("Test 5: Load Balancer Health Detection")
-        status = self.check_system_health()
+        status = self.check_system_health(True)
         if status:
             healthy_instances = status.get('healthy_instances', 0)
             # Should show 1/2 healthy (primary only)
@@ -252,7 +254,7 @@ class UseCase3Tester(EnhancedVerificationBase):
         recovery_complete = False
         
         while time.time() - start_time < timeout_seconds:
-            status = self.check_system_health()
+            status = self.check_system_health(True)
             if status:
                 healthy_instances = status.get('healthy_instances', 0)
                 pending_writes = status.get('unified_wal', {}).get('pending_writes', 0)
@@ -285,7 +287,7 @@ class UseCase3Tester(EnhancedVerificationBase):
         self.log("⚠️ Recovery timeout reached - sync may still be in progress")
         
         # Final status check
-        final_status = self.check_system_health()
+        final_status = self.check_system_health(True)
         if final_status:
             final_pending = final_status.get('unified_wal', {}).get('pending_writes', 0)
             self.log(f"📊 Final sync status: {final_pending} pending writes")
@@ -631,7 +633,7 @@ class UseCase3Tester(EnhancedVerificationBase):
         
         # Step 3: Verify replica failure detection (flexible check)
         self.log("\n📋 Step 3: Verify Replica Failure Detection")
-        status = self.check_system_health()
+        status = self.check_system_health(True)
         if not status:
             self.log("❌ Cannot check system status")
             return False
