@@ -183,20 +183,7 @@ class UnifiedWALLoadBalancer:
         self.current_memory_usage = 0.0
         self.sync_executor = None
         
-        # Initialize unified WAL schema
-        self._initialize_unified_wal_schema()
-        
-        # Initialize Transaction Safety Service for timing gap protection
-        self.transaction_safety = None
-        if TRANSACTION_SAFETY_AVAILABLE:
-            try:
-                self.transaction_safety = TransactionSafetyService(self.database_url)
-                logger.info("🛡️ Transaction Safety Service enabled - timing gaps protected")
-            except Exception as e:
-                logger.error(f"❌ Failed to initialize Transaction Safety Service: {e}")
-                self.transaction_safety = None
-        
-        # Enhanced statistics
+        # Enhanced statistics - INITIALIZE BEFORE SCHEMA INITIALIZATION
         self.stats = {
             "total_requests": 0,
             "successful_requests": 0,
@@ -217,6 +204,19 @@ class UnifiedWALLoadBalancer:
             "connection_pool_misses": 0,
             "lock_contention_avoided": 0
         }
+        
+        # Initialize unified WAL schema
+        self._initialize_unified_wal_schema()
+        
+        # Initialize Transaction Safety Service for timing gap protection
+        self.transaction_safety = None
+        if TRANSACTION_SAFETY_AVAILABLE:
+            try:
+                self.transaction_safety = TransactionSafetyService(self.database_url)
+                logger.info("🛡️ Transaction Safety Service enabled - timing gaps protected")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize Transaction Safety Service: {e}")
+                self.transaction_safety = None
         
         # Start monitoring and sync threads
         self.health_thread = threading.Thread(target=self.health_monitor_loop, daemon=True)
