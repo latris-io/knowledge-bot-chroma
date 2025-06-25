@@ -1333,8 +1333,17 @@ class UnifiedWALLoadBalancer:
                 logger.error(f"Health monitoring error: {e}")
                 time.sleep(60)
 
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self, realtime_health: bool = False) -> Dict[str, Any]:
         """Get comprehensive status including high-volume metrics"""
+        if realtime_health:
+            # Real-time health checking for immediate testing feedback
+            logger.info("🔍 STATUS: Using real-time health checking")
+            for instance in self.instances:
+                old_health = instance.is_healthy
+                instance.is_healthy = self.check_instance_health_realtime(instance)
+                if old_health != instance.is_healthy:
+                    logger.info(f"🔄 STATUS: {instance.name} health updated: {old_health} → {instance.is_healthy}")
+        
         healthy_instances = self.get_healthy_instances()
         pending_count = self.get_pending_writes_count()
         
@@ -1377,7 +1386,8 @@ class UnifiedWALLoadBalancer:
                     "last_health_check": inst.last_health_check.isoformat()
                 } for inst in self.instances
             ],
-            "stats": self.stats
+            "stats": self.stats,
+            "realtime_health": realtime_health
         }
 
     # Keep other essential methods for load balancing functionality
@@ -1617,18 +1627,51 @@ class UnifiedWALLoadBalancer:
             logger.error("❌ NO HEALTHY INSTANCES for write operation")
             return None
         
-        # For READ operations, use cached health (less critical)
+        # For READ operations, use real-time health checking (FIXED: was using cached health)
         if method == "GET":
+            logger.info(f"🔍 READ OPERATION: Using real-time health checking for {method} {path}")
+            
             replica = self.get_replica_instance()
             primary = self.get_primary_instance()
             
-            # Use read replica ratio to determine routing
+            # Use read replica ratio, but verify health in real-time
             if replica and primary and random.random() < self.read_replica_ratio:
-                return replica
+                # Prefer replica for reads, but verify it's actually healthy
+                if self.check_instance_health_realtime(replica):
+                    logger.info("✅ READ → REPLICA (real-time verified)")
+                    return replica
+                else:
+                    logger.warning("⚠️ REPLICA DOWN (real-time) - Attempting primary failover")
+                    if self.check_instance_health_realtime(primary):
+                        logger.info("🔄 READ FAILOVER → PRIMARY (real-time verified)")
+                        return primary
+                    else:
+                        logger.error("❌ READ FAILOVER FAILED - Both instances down")
+                        return None
             elif primary:
-                return primary
-            else:
-                return replica
+                # Prefer primary for reads, verify real-time health
+                if self.check_instance_health_realtime(primary):
+                    logger.info("✅ READ → PRIMARY (real-time verified)")
+                    return primary
+                else:
+                    logger.warning("⚠️ PRIMARY DOWN (real-time) - Attempting replica failover")
+                    if replica and self.check_instance_health_realtime(replica):
+                        logger.info("🔄 READ FAILOVER → REPLICA (real-time verified)")
+                        return replica
+                    else:
+                        logger.error("❌ READ FAILOVER FAILED - Both instances down")
+                        return None
+            elif replica:
+                # Only replica available, verify real-time health
+                if self.check_instance_health_realtime(replica):
+                    logger.info("✅ READ → REPLICA (primary unavailable, real-time verified)")
+                    return replica
+                else:
+                    logger.error("❌ READ OPERATION FAILED - No healthy instances")
+                    return None
+            
+            logger.error("❌ NO INSTANCES AVAILABLE for read operation")
+            return None
         
         # Default fallback
         return self.get_primary_instance()
@@ -1737,7 +1780,10 @@ if __name__ == '__main__':
         try:
             if enhanced_wal is None:
                 return jsonify({"status": "initializing"}), 503
-            return jsonify(enhanced_wal.get_status()), 200
+            
+            # Check for real-time parameter
+            realtime = request.args.get('realtime', 'false').lower() == 'true'
+            return jsonify(enhanced_wal.get_status(realtime_health=realtime)), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
