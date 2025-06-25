@@ -639,21 +639,37 @@ class ScalabilityTester(EnhancedTestBase):
         }
         
         try:
-            # Analyze performance trends
+            # Analyze performance trends - with error handling for missing keys
             if len(self.performance_data) >= 2:
-                throughputs = [(name, data["throughput_ops_sec"]) for name, data in self.performance_data.items()]
-                best_performance = max(throughputs, key=lambda x: x[1])
-                worst_performance = min(throughputs, key=lambda x: x[1])
+                # 🔧 FIX: Handle missing throughput_ops_sec key safely
+                throughputs = []
+                for name, data in self.performance_data.items():
+                    if isinstance(data, dict):
+                        if "throughput_ops_sec" in data:
+                            throughputs.append((name, data["throughput_ops_sec"]))
+                        elif "normal_load" in data and isinstance(data["normal_load"], dict):
+                            # Handle concurrency control data differently
+                            success_rate = data["normal_load"].get("success_rate", 0)
+                            throughputs.append((name, success_rate / 10))  # Convert to ops/sec equivalent
+                        else:
+                            # Use a default if no throughput data available
+                            throughputs.append((name, 0.0))
                 
-                analysis["summary"] = {
-                    "tests_completed": len(self.performance_data),
-                    "best_performance": best_performance,
-                    "worst_performance": worst_performance,
-                    "performance_variation": best_performance[1] - worst_performance[1]
-                }
-                
-                self.log(f"📊 Performance summary: Best = {best_performance[0]} ({best_performance[1]:.1f} ops/sec), "
-                        f"Worst = {worst_performance[0]} ({worst_performance[1]:.1f} ops/sec)")
+                if throughputs:
+                    best_performance = max(throughputs, key=lambda x: x[1])
+                    worst_performance = min(throughputs, key=lambda x: x[1])
+                    
+                    analysis["summary"] = {
+                        "tests_completed": len(self.performance_data),
+                        "best_performance": best_performance,
+                        "worst_performance": worst_performance,
+                        "performance_variation": best_performance[1] - worst_performance[1]
+                    }
+                    
+                    self.log(f"📊 Performance summary: Best = {best_performance[0]} ({best_performance[1]:.1f} ops/sec), "
+                            f"Worst = {worst_performance[0]} ({worst_performance[1]:.1f} ops/sec)")
+                else:
+                    self.log("📊 No performance data with throughput metrics available")
             
             # Generate recommendations based on current features
             scalability_status = self.get_scalability_status()
@@ -829,8 +845,15 @@ class ScalabilityTester(EnhancedTestBase):
             analysis = self.analyze_performance_and_recommendations()
             self.log("📊 Analysis completed successfully")
         except Exception as e:
-            self.log(f"⚠️ Analysis failed: {e}")
+            self.log(f"❌ PHASE 6 FAILED: {e}")
             analysis = {"error": str(e)}
+            # Don't mark as overall failure - analysis is supplementary
+            phase_results.append({
+                "phase": "Phase 6: Performance Analysis",
+                "success": False,
+                "error": str(e),
+                "duration": 0
+            })
         
         # Final summary
         self.log(f"\n{'='*60}")
@@ -865,7 +888,11 @@ class ScalabilityTester(EnhancedTestBase):
     
     def selective_cleanup(self):
         """Enhanced selective cleanup (same as USE CASE 1-4) - only cleans successful test data"""
-        if not self.test_collections and not self.test_results:
+        # 🔧 FIX: Add safety checks for missing attributes
+        test_collections = getattr(self, 'test_collections', [])
+        test_results = getattr(self, 'test_results', {})
+        
+        if not test_collections and not test_results:
             print("No test data to clean up")
             return True
             
@@ -881,15 +908,15 @@ class ScalabilityTester(EnhancedTestBase):
         
         # Map collections to their test phases
         phase_collections = {
-            "baseline": [col for col in self.test_collections if "_baseline_" in col],
-            "connection_pooling": [col for col in self.test_collections if "_connection_pooling_" in col],
-            "granular_locking": [col for col in self.test_collections if "_granular_locking_" in col],
-            "combined_features": [col for col in self.test_collections if "_combined_features_" in col],
-            "resource_scaling": [col for col in self.test_collections if "_resource_scaling_" in col],
-            "scalability_test": [col for col in self.test_collections if "_scalability_test_" in col]
+            "baseline": [col for col in test_collections if "_baseline_" in col],
+            "connection_pooling": [col for col in test_collections if "_connection_pooling_" in col],
+            "granular_locking": [col for col in test_collections if "_granular_locking_" in col],
+            "combined_features": [col for col in test_collections if "_combined_features_" in col],
+            "resource_scaling": [col for col in test_collections if "_resource_scaling_" in col],
+            "scalability_test": [col for col in test_collections if "_scalability_test_" in col]
         }
         
-        for test_name, test_data in self.test_results.items():
+        for test_name, test_data in test_results.items():
             test_phase_collections = phase_collections.get(test_name.replace("_performance", "").replace("_validation", ""), [])
             
             if test_data['success']:
@@ -912,7 +939,7 @@ class ScalabilityTester(EnhancedTestBase):
         failed_collections = list(dict.fromkeys(failed_collections))
         
         # Check for any collections not tracked by individual tests
-        untracked_collections = [col for col in self.test_collections 
+        untracked_collections = [col for col in test_collections 
                                if col not in successful_collections and col not in failed_collections]
         
         print(f"📊 Cleanup analysis:")

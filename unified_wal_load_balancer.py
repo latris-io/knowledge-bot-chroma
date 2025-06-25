@@ -292,7 +292,7 @@ class UnifiedWALLoadBalancer:
                 if self.pool_available and self.connection_pool:
                     try:
                         self.connection_pool.putconn(conn)
-                        self.stats["connection_pool_hits"] += 1
+                        # 🔧 FIX: Don't count returning connection as "hit" - that inflates stats
                     except Exception as e:
                         logger.debug(f"Pool return failed: {e}")
                         conn.close()
@@ -308,6 +308,9 @@ class UnifiedWALLoadBalancer:
                 if conn:
                     self.stats["connection_pool_hits"] += 1
                     return conn
+                else:
+                    # Pool available but no connection available
+                    self.stats["connection_pool_misses"] += 1
             except Exception as e:
                 logger.warning(f"⚠️ Pool connection failed, falling back to direct: {e}")
                 self.stats["connection_pool_misses"] += 1
@@ -322,7 +325,8 @@ class UnifiedWALLoadBalancer:
                     connect_timeout=10,
                     application_name='unified-wal-lb'
                 )
-                if not self.pool_available:
+                # 🔧 FIX: Only count as miss if pooling is enabled but failed
+                if self.enable_connection_pooling and not self.pool_available:
                     self.stats["connection_pool_misses"] += 1
                 return conn
                 
