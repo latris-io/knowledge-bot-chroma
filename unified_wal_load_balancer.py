@@ -300,6 +300,26 @@ class UnifiedWALLoadBalancer:
                 else:
                     conn.close()
 
+    @contextlib.contextmanager
+    def get_shared_db_connection_ctx(self):
+        """🚀 Shared database connection for rapid sequential operations - improves pool efficiency"""
+        conn = None
+        try:
+            conn = self.get_db_connection()
+            yield conn
+            # 🔧 FIX: Keep connection alive longer for rapid reuse
+            time.sleep(0.01)  # Brief pause to allow connection reuse in rapid scenarios
+        finally:
+            if conn:
+                if self.pool_available and self.connection_pool:
+                    try:
+                        self.connection_pool.putconn(conn)
+                    except Exception as e:
+                        logger.debug(f"Pool return failed: {e}")
+                        conn.close()
+                else:
+                    conn.close()
+
     def get_db_connection(self):
         """🔗 Get database connection with improved error handling, retry logic, and connection pooling"""
         # 🚀 SCALABILITY: Use connection pool if available
@@ -345,7 +365,8 @@ class UnifiedWALLoadBalancer:
     def _initialize_unified_wal_schema(self):
         """Initialize unified WAL schema with high-volume optimizations"""
         try:
-            with self.get_db_connection() as conn:
+            # 🔧 FIX: Use connection context manager for pooled connections
+            with self.get_db_connection_ctx() as conn:
                 with conn.cursor() as cur:
                     # Unified WAL table for all writes
                     cur.execute("""
@@ -1475,7 +1496,7 @@ class UnifiedWALLoadBalancer:
     def get_status(self, realtime_health: bool = False) -> Dict[str, Any]:
         """Get comprehensive status including high-volume metrics"""
         if realtime_health:
-            # Real-time health checking for immediate testing feedback
+            # Real-time health checking for immediate testing
             logger.info("🔍 STATUS: Using real-time health checking")
             for instance in self.instances:
                 old_health = instance.is_healthy
@@ -1953,6 +1974,44 @@ class UnifiedWALLoadBalancer:
         
         return False
 
+    def optimize_connection_pool_for_rapid_operations(self):
+        """🚀 Optimize connection pool configuration for rapid database operations"""
+        if not self.pool_available or not self.connection_pool:
+            return False
+            
+        try:
+            # 🔧 Pre-warm the connection pool by creating some connections
+            temp_connections = []
+            for i in range(min(3, self.connection_pool.maxconn // 2)):
+                try:
+                    conn = self.connection_pool.getconn(timeout=1)
+                    if conn:
+                        # Test connection
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT 1")
+                        temp_connections.append(conn)
+                except Exception as e:
+                    logger.debug(f"Pre-warm connection {i} failed: {e}")
+                    break
+            
+            # Return all pre-warmed connections to pool
+            for conn in temp_connections:
+                try:
+                    self.connection_pool.putconn(conn)
+                except Exception as e:
+                    logger.debug(f"Failed to return pre-warmed connection: {e}")
+                    try:
+                        conn.close()
+                    except:
+                        pass
+            
+            logger.info(f"🚀 Connection pool optimized: {len(temp_connections)} connections pre-warmed")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Connection pool optimization failed: {e}")
+            return False
+
 # 🚀 REQUEST CONCURRENCY CONTROLS - Handle high concurrent user load
 class ConcurrencyManager:
     def __init__(self, max_concurrent_requests=None, request_queue_size=None, request_timeout=None):
@@ -2270,44 +2329,83 @@ if __name__ == '__main__':
 
     @app.route('/admin/scalability_status', methods=['GET'])
     def scalability_status():
-        """🚀 Get scalability features status and performance metrics"""
+        """🚀 Enhanced scalability status with performance metrics"""
         try:
-            if enhanced_wal is None:
-                return jsonify({"error": "WAL system not ready"}), 503
+            # Scalability features status
+            features = {
+                "connection_pooling": {
+                    "available": enhanced_wal.pool_available,
+                    "enabled": enhanced_wal.enable_connection_pooling,
+                    "min_connections": 5 if enhanced_wal.pool_available else 0,
+                    "max_connections": 20 if enhanced_wal.pool_available else 0
+                },
+                "granular_locking": {
+                    "available": enhanced_wal.enable_granular_locking,
+                    "lock_types": ["wal_write", "collection_mapping", "metrics", "status"] if enhanced_wal.enable_granular_locking else []
+                }
+            }
+            
+            # Pool performance metrics
+            pool_stats = {}
+            total_pool_ops = enhanced_wal.stats.get("connection_pool_hits", 0) + enhanced_wal.stats.get("connection_pool_misses", 0)
+            if total_pool_ops > 0:
+                pool_stats["pool_hit_rate"] = f"{(enhanced_wal.stats.get('connection_pool_hits', 0) / max(1, enhanced_wal.stats.get('connection_pool_hits', 0) + enhanced_wal.stats.get('connection_pool_misses', 0)) * 100):.1f}%"
+                pool_stats["total_operations"] = total_pool_ops
+                pool_stats["hits"] = enhanced_wal.stats.get("connection_pool_hits", 0)
+                pool_stats["misses"] = enhanced_wal.stats.get("connection_pool_misses", 0)
             
             return jsonify({
-                "scalability_features": {
-                    "connection_pooling": {
-                        "enabled": enhanced_wal.enable_connection_pooling,
-                        "available": enhanced_wal.pool_available,
-                        "min_connections": getattr(enhanced_wal.connection_pool, 'minconn', None) if enhanced_wal.pool_available else None,
-                        "max_connections": getattr(enhanced_wal.connection_pool, 'maxconn', None) if enhanced_wal.pool_available else None
-                    },
-                    "granular_locking": {
-                        "enabled": enhanced_wal.enable_granular_locking,
-                        "lock_types": ["wal_write", "collection_mapping", "metrics", "status"] if enhanced_wal.enable_granular_locking else ["global_only"]
-                    }
-                },
-                "performance_impact": {
-                    "connection_pool_hits": enhanced_wal.stats.get("connection_pool_hits", 0),
-                    "connection_pool_misses": enhanced_wal.stats.get("connection_pool_misses", 0),
+                "timestamp": datetime.now().isoformat(),
+                "scalability_features": features,
+                "performance_stats": {
                     "lock_contention_avoided": enhanced_wal.stats.get("lock_contention_avoided", 0),
-                    "pool_hit_rate": f"{(enhanced_wal.stats.get('connection_pool_hits', 0) / max(1, enhanced_wal.stats.get('connection_pool_hits', 0) + enhanced_wal.stats.get('connection_pool_misses', 0)) * 100):.1f}%"
+                    "memory_pressure_events": enhanced_wal.stats.get("memory_pressure_events", 0),
+                    "adaptive_batch_reductions": enhanced_wal.stats.get("adaptive_batch_reductions", 0),
+                    **pool_stats
                 },
-                "scaling_capacity": {
-                    "current_max_workers": enhanced_wal.max_workers,
-                    "current_memory_limit_mb": enhanced_wal.max_memory_usage_mb,
-                    "current_memory_usage_percent": enhanced_wal.current_memory_usage,
-                    "resource_scaling_available": "true - upgrade Render plan for automatic scaling"
-                },
-                "recommendations": {
-                    "connection_pooling": "Enable with ENABLE_CONNECTION_POOLING=true" if not enhanced_wal.enable_connection_pooling else "✅ Enabled",
-                    "granular_locking": "Enable with ENABLE_GRANULAR_LOCKING=true" if not enhanced_wal.enable_granular_locking else "✅ Enabled",
-                    "scaling_method": "Upgrade Render plan (CPU/Memory) for automatic performance scaling"
+                "current_load": {
+                    "concurrent_requests": enhanced_wal.stats.get("concurrent_requests", 0),
+                    "total_requests_processed": enhanced_wal.stats.get("total_requests_processed", 0),
+                    "timeout_requests": enhanced_wal.stats.get("timeout_requests", 0),
+                    "queue_full_rejections": enhanced_wal.stats.get("queue_full_rejections", 0)
                 }
             })
             
         except Exception as e:
+            logger.error(f"Scalability status error: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route('/admin/optimize_connection_pool', methods=['POST'])
+    def optimize_connection_pool():
+        """🚀 Optimize connection pool for rapid operations"""
+        try:
+            if not enhanced_wal.pool_available:
+                return jsonify({
+                    "success": False,
+                    "message": "Connection pooling not available"
+                }), 400
+            
+            success = enhanced_wal.optimize_connection_pool_for_rapid_operations()
+            
+            # Get updated stats
+            total_pool_ops = enhanced_wal.stats.get("connection_pool_hits", 0) + enhanced_wal.stats.get("connection_pool_misses", 0)
+            hit_rate = 0
+            if total_pool_ops > 0:
+                hit_rate = (enhanced_wal.stats.get("connection_pool_hits", 0) / total_pool_ops) * 100
+            
+            return jsonify({
+                "success": success,
+                "message": "Connection pool optimization completed" if success else "Optimization failed",
+                "current_stats": {
+                    "hit_rate": f"{hit_rate:.1f}%",
+                    "total_operations": total_pool_ops,
+                    "hits": enhanced_wal.stats.get("connection_pool_hits", 0),
+                    "misses": enhanced_wal.stats.get("connection_pool_misses", 0)
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"Connection pool optimization error: {e}")
             return jsonify({"error": str(e)}), 500
 
     @app.route('/admin/transaction_safety_status', methods=['GET'])
