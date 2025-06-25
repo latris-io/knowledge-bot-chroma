@@ -90,13 +90,13 @@ services:
         value: optimized_read_replica
       # Performance optimizations
       - key: MAX_CONCURRENT_REQUESTS
-        value: 8
+        value: 20
       - key: CONNECTION_POOL_SIZE
-        value: 10
+        value: 20
       - key: REQUEST_QUEUE_SIZE
-        value: 50
+        value: 100
       - key: REQUEST_TIMEOUT
-        value: 15
+        value: 30
       - key: CIRCUIT_BREAKER_TIMEOUT
         value: 30
       - key: READ_REPLICA_RATIO
@@ -131,15 +131,15 @@ services:
         value: "true"
       - key: SLACK_UPGRADE_ALERTS
         value: "true"
-      # USE CASE 5: Scalability Features (disabled by default for safety)
+      # USE CASE 5: Scalability Features (enabled and optimized)
       - key: ENABLE_CONNECTION_POOLING
-        value: "false"
+        value: "true"
       - key: ENABLE_GRANULAR_LOCKING
-        value: "false"
+        value: "true"
       - key: MAX_WORKERS
-        value: "3"
+        value: "2"
       - key: MAX_MEMORY_MB
-        value: "400"
+        value: "450"
 
   # Monitor worker - workers don't support free tier
   - type: worker
