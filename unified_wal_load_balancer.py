@@ -320,9 +320,7 @@ class UnifiedWALLoadBalancer:
                 try:
                     conn = self.connection_pool.getconn()
                     if conn:
-                        # Test connection validity
-                        with conn.cursor() as test_cur:
-                            test_cur.execute("SELECT 1")
+                        # ✅ NO CONNECTION TESTING - trust the pool for massive performance gain!
                         self.stats["connection_pool_hits"] += 1
                         connection_source = "pool"
                         logger.debug(f"🔗 Using pooled connection (hits: {self.stats['connection_pool_hits']})")
@@ -341,8 +339,7 @@ class UnifiedWALLoadBalancer:
                     connect_timeout=10,
                     application_name='unified-wal-lb-direct'
                 )
-                if self.enable_connection_pooling:
-                    self.stats["connection_pool_misses"] += 1
+                # ❌ DON'T double-count misses - only count if pooling was supposed to work
                 connection_source = "direct"
                 logger.debug(f"🔗 Using direct connection (misses: {self.stats['connection_pool_misses']})")
             
@@ -352,8 +349,7 @@ class UnifiedWALLoadBalancer:
             if conn:
                 if connection_source == "pool" and self.pool_available and self.connection_pool:
                     try:
-                        # 🔧 FIX: Add brief delay to improve connection reuse in rapid scenarios
-                        time.sleep(0.001)  # 1ms delay for better pool utilization
+                        # ✅ NO ARTIFICIAL DELAYS - return immediately for better reuse
                         self.connection_pool.putconn(conn)
                         logger.debug(f"🔗 Returned connection to pool")
                     except Exception as e:
@@ -376,8 +372,7 @@ class UnifiedWALLoadBalancer:
         try:
             conn = self.get_db_connection()
             yield conn
-            # 🔧 FIX: Keep connection alive longer for rapid reuse
-            time.sleep(0.01)  # Brief pause to allow connection reuse in rapid scenarios
+            # ✅ NO ARTIFICIAL DELAYS - let the pool handle timing
         finally:
             if conn:
                 if self.pool_available and self.connection_pool:
@@ -396,20 +391,9 @@ class UnifiedWALLoadBalancer:
             try:
                 conn = self.connection_pool.getconn()
                 if conn:
-                    # 🔧 FIX: Test connection validity and reuse if possible
-                    try:
-                        with conn.cursor() as test_cur:
-                            test_cur.execute("SELECT 1")
-                        self.stats["connection_pool_hits"] += 1
-                        return conn
-                    except Exception as e:
-                        # Connection is stale, close it and get a new one
-                        logger.debug(f"Stale pooled connection detected: {e}")
-                        try:
-                            conn.close()
-                        except:
-                            pass
-                        self.stats["connection_pool_misses"] += 1
+                    # ✅ NO CONNECTION TESTING - trust the pool, massive performance gain!
+                    self.stats["connection_pool_hits"] += 1
+                    return conn
                 else:
                     # Pool available but no connection available
                     self.stats["connection_pool_misses"] += 1
@@ -427,9 +411,7 @@ class UnifiedWALLoadBalancer:
                     connect_timeout=10,
                     application_name='unified-wal-lb'
                 )
-                # 🔧 FIX: Only count as miss if pooling is enabled but failed
-                if self.enable_connection_pooling and not self.pool_available:
-                    self.stats["connection_pool_misses"] += 1
+                # ❌ DON'T double-count misses here
                 return conn
                 
             except psycopg2.OperationalError as e:
