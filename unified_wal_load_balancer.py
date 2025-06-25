@@ -31,6 +31,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
 import contextlib
 from psycopg2 import pool as psycopg2_pool
+from werkzeug.exceptions import RequestTimeout
+from threading import Semaphore
+import queue
 
 # Flask imports for web service
 from flask import Flask, request, Response, jsonify
@@ -133,6 +136,13 @@ class UnifiedWALLoadBalancer:
         self.enable_connection_pooling = os.getenv("ENABLE_CONNECTION_POOLING", "false").lower() == "true"
         self.enable_granular_locking = os.getenv("ENABLE_GRANULAR_LOCKING", "false").lower() == "true"
         
+        # 🚀 REQUEST CONCURRENCY MANAGER - Handle high concurrent user load (200+ simultaneous users)
+        self.concurrency_manager = ConcurrencyManager(
+            max_concurrent_requests=int(os.getenv("MAX_CONCURRENT_REQUESTS", "50")),
+            request_queue_size=int(os.getenv("REQUEST_QUEUE_SIZE", "200")),
+            request_timeout=int(os.getenv("REQUEST_TIMEOUT", "30"))
+        )
+        
         # 🔗 CONNECTION POOLING - Eliminates database connection overhead
         self.database_url = os.getenv("DATABASE_URL", "postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha")
         self.connection_pool = None
@@ -202,7 +212,12 @@ class UnifiedWALLoadBalancer:
             # 🚀 SCALABILITY METRICS
             "connection_pool_hits": 0,
             "connection_pool_misses": 0,
-            "lock_contention_avoided": 0
+            "lock_contention_avoided": 0,
+            # 🚀 CONCURRENCY METRICS
+            "concurrent_requests": 0,
+            "total_requests_processed": 0,
+            "timeout_requests": 0,
+            "queue_full_rejections": 0
         }
         
         # Initialize unified WAL schema
@@ -1473,11 +1488,15 @@ class UnifiedWALLoadBalancer:
             "total_instances": len(self.instances),
             "high_volume_config": {
                 "max_memory_mb": self.max_memory_usage_mb,
+                "current_memory_percent": self.current_memory_usage,
                 "max_workers": self.max_workers,
                 "default_batch_size": self.default_batch_size,
                 "max_batch_size": self.max_batch_size,
-                "current_memory_percent": self.current_memory_usage,
-                "peak_memory_usage": self.stats["peak_memory_usage"]
+                "peak_memory_usage": self.stats.get("peak_memory_usage", 0.0),
+                # 🚀 CONCURRENCY CONFIGURATION
+                "max_concurrent_requests": self.concurrency_manager.max_concurrent_requests,
+                "request_queue_size": self.concurrency_manager.request_queue_size,
+                "request_timeout": self.concurrency_manager.request_timeout
             },
             "unified_wal": {
                 "pending_writes": pending_count,
@@ -1487,13 +1506,18 @@ class UnifiedWALLoadBalancer:
                 "approach": "High-Volume WAL-First"
             },
             "performance_stats": {
-                "batches_processed": self.stats["batches_processed"],
-                "memory_pressure_events": self.stats["memory_pressure_events"],
-                "adaptive_batch_reductions": self.stats["adaptive_batch_reductions"],
-                "successful_syncs": self.stats["successful_syncs"],
-                "failed_syncs": self.stats["failed_syncs"],
-                "avg_sync_throughput": f"{self.stats['avg_sync_throughput']:.1f} writes/sec",
-                "sync_cycles": self.stats["sync_cycles"]
+                "memory_pressure_events": self.stats.get("memory_pressure_events", 0),
+                "adaptive_batch_reductions": self.stats.get("adaptive_batch_reductions", 0),
+                "avg_sync_throughput": self.stats.get("avg_sync_throughput", 0.0),
+                # 🚀 SCALABILITY METRICS
+                "connection_pool_hits": self.stats.get("connection_pool_hits", 0),
+                "connection_pool_misses": self.stats.get("connection_pool_misses", 0),
+                "lock_contention_avoided": self.stats.get("lock_contention_avoided", 0),
+                # 🚀 CONCURRENCY METRICS  
+                "concurrent_requests_active": self.concurrency_manager.stats.get("concurrent_requests", 0),
+                "total_requests_processed": self.concurrency_manager.stats.get("total_requests", 0),
+                "timeout_requests": self.concurrency_manager.stats.get("timeout_requests", 0),
+                "queue_full_rejections": self.concurrency_manager.stats.get("queue_full_rejections", 0)
             },
             "instances": [
                 {
@@ -1849,6 +1873,54 @@ class UnifiedWALLoadBalancer:
         except Exception as e:
             logger.error(f"❌ RECOVERY: Failed to retry {method} {path}: {e}")
             return None
+
+# 🚀 REQUEST CONCURRENCY CONTROLS - Handle high concurrent user load
+class ConcurrencyManager:
+    def __init__(self, max_concurrent_requests=None, request_queue_size=None, request_timeout=None):
+        # Get values from environment variables that were set but not implemented
+        self.max_concurrent_requests = int(os.getenv("MAX_CONCURRENT_REQUESTS", max_concurrent_requests or "50"))
+        self.request_queue_size = int(os.getenv("REQUEST_QUEUE_SIZE", request_queue_size or "200"))  
+        self.request_timeout = int(os.getenv("REQUEST_TIMEOUT", request_timeout or "30"))
+        
+        # Create semaphore to limit concurrent requests
+        self.request_semaphore = Semaphore(self.max_concurrent_requests)
+        self.request_queue = queue.Queue(maxsize=self.request_queue_size)
+        
+        # Statistics
+        self.stats = {
+            "concurrent_requests": 0,
+            "queued_requests": 0,
+            "total_requests": 0,
+            "timeout_requests": 0,
+            "queue_full_rejections": 0
+        }
+        
+        logger.info(f"🚀 Concurrency Manager initialized: {self.max_concurrent_requests} concurrent, {self.request_queue_size} queue size")
+    
+    def __enter__(self):
+        """Context manager entry - acquire semaphore or timeout"""
+        start_time = time.time()
+        
+        # Try to acquire semaphore (blocks if at limit)
+        acquired = self.request_semaphore.acquire(timeout=self.request_timeout)
+        
+        if not acquired:
+            self.stats["timeout_requests"] += 1
+            raise RequestTimeout("Request timeout - too many concurrent requests")
+        
+        self.stats["concurrent_requests"] += 1
+        self.stats["total_requests"] += 1
+        
+        wait_time = time.time() - start_time
+        if wait_time > 1.0:  # Log if waited more than 1 second
+            logger.warning(f"⏳ Request waited {wait_time:.2f}s for concurrency slot")
+        
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - release semaphore"""
+        self.request_semaphore.release()
+        self.stats["concurrent_requests"] -= 1
 
 # Main execution for web service  
 if __name__ == '__main__':
@@ -2248,13 +2320,12 @@ if __name__ == '__main__':
                 "traceback": traceback.format_exc()
             }), 500
 
-    @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-    def proxy_request(path):
-        """Transaction-safe proxy with pre-execution logging to prevent timing gap data loss"""
+    def _handle_proxy_request_core(path):
+        """Core proxy request logic - separated for cleaner concurrency control"""
         transaction_id = None
         
         try:
-            logger.info(f"🚀 PROXY_REQUEST START: {request.method} /{path}")
+            logger.info(f"🚀 PROXY_REQUEST START: {request.method} /{path} [Concurrent: {enhanced_wal.concurrency_manager.stats['concurrent_requests']}/{enhanced_wal.concurrency_manager.max_concurrent_requests}]")
             
             if enhanced_wal is None:
                 logger.error("❌ PROXY_REQUEST FAILED: WAL system not ready")
@@ -2517,7 +2588,7 @@ if __name__ == '__main__':
                 status=response.status_code,
                 mimetype='application/json'
             )
-            
+                
         except Exception as e:
             import traceback
             logger.error(f"❌ PROXY_REQUEST FAILED for {request.method} /{path}: {e}")
@@ -2539,6 +2610,24 @@ if __name__ == '__main__':
                     logger.error(f"❌ Failed to mark transaction failed: {te}")
             
             return jsonify({"error": f"Service temporarily unavailable: {str(e)}"}), 503
+
+    @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+    def proxy_request(path):
+        """🚀 CONCURRENCY-CONTROLLED proxy for 200+ simultaneous users"""
+        try:
+            # 🚀 CONCURRENCY CONTROL: Handle high concurrent user load (200+ simultaneous CMS uploads)
+            with enhanced_wal.concurrency_manager:
+                return _handle_proxy_request_core(path)
+                
+        except RequestTimeout:
+            # 🚀 CONCURRENCY: Request timeout from concurrency manager
+            logger.warning(f"⏰ PROXY_REQUEST TIMEOUT: {request.method} /{path} - too many concurrent requests")
+            enhanced_wal.concurrency_manager.stats["timeout_requests"] += 1
+            return jsonify({
+                "error": "Request timeout - server overloaded, please retry",
+                "concurrent_limit": enhanced_wal.concurrency_manager.max_concurrent_requests,
+                "queue_size": enhanced_wal.concurrency_manager.request_queue_size
+            }), 503
     
     # Start Flask web server immediately
     port = int(os.getenv('PORT', 8000))
