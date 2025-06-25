@@ -924,7 +924,7 @@ Resource Decisions: Based on wrong data
 
 **AFTER (Fixed - Process-specific metrics)**:
 ```yaml
-Memory Usage: 14.1% of 400MB container (56.5625MB actual load balancer usage)
+Memory Usage: 12.7% of 400MB container (50.66MB actual load balancer usage)
 CPU Usage: Load balancer process only  
 Resource Decisions: Based on accurate load balancer metrics
 ```
@@ -954,7 +954,7 @@ Success       Memory <15%        ThreadPool=3        Zero Backup
 ```yaml
 ACCURATE Memory Management:
   - Total Limit: 400MB (container limit)
-  - Process Usage: 56.5625MB (14.1% actual usage)
+  - Process Usage: 50.66MB (12.7% actual usage)
   - Batch Limits: 30MB per batch
   - Adaptive Sizing: 1-200 operations
   - Pressure Handling: Automatic scaling based on REAL metrics
@@ -969,8 +969,8 @@ Parallel Processing:
 ### **🏆 PRODUCTION TEST RESULTS WITH ACCURATE MONITORING**
 
 #### **Phase 1: Baseline Performance (ACCURATE METRICS)**
-- ✅ **Process Memory**: 0MB baseline → 56.5625MB under load
-- ✅ **Memory Percentage**: 14.1% of 400MB limit (accurate calculation)
+- ✅ **Process Memory**: 0MB baseline → 50.66MB under load
+- ✅ **Memory Percentage**: 12.7% of 400MB limit (accurate calculation)
 - ✅ **Workers**: 3 ThreadPoolExecutor workers
 - ✅ **Memory Limit**: 400MB container (properly tracked)
 
@@ -981,10 +981,10 @@ Parallel Processing:
 - ✅ **Resource Handling**: No memory pressure events
 
 #### **Phase 3: Resource Pressure Analysis**
-- ✅ **Current Memory**: 56.5625MB process usage (accurate)
-- ✅ **Memory Pressure**: False (14.1% usage, well within limits)
+- ✅ **Current Memory**: 50.66MB process usage (accurate)
+- ✅ **Memory Pressure**: False (12.7% usage, well within limits)
 - ✅ **System Status**: Handling load within memory limits
-- ✅ **Headroom**: 343.4375MB available (85.9% headroom)
+- ✅ **Headroom**: 349.34MB available (87.3% headroom)
 
 #### **Phase 4: Concurrent Operations Under Load**
 - ✅ **Concurrent Success**: **100% success** (5/5 operations)
@@ -1013,7 +1013,7 @@ Parallel Processing:
 - ✅ **Bulletproof Verification**: Comprehensive testing proves 100% transaction capture under stress
 
 ### **🎯 ACCURATE PERFORMANCE VALIDATION**
-✅ **Process Memory Monitoring** - Now tracking actual load balancer usage (14.1%)
+✅ **Process Memory Monitoring** - Now tracking actual load balancer usage (12.7%)
 ✅ **Memory Pressure Handling** - Adaptive batch sizing based on real metrics
 ✅ **Concurrent Processing** - ThreadPoolExecutor scaling correctly under load
 ✅ **WAL Performance** - No backup under high load (0 pending writes)
@@ -1039,7 +1039,7 @@ memory_percent = (memory_usage_mb / self.max_memory_usage_mb) * 100  # Against 4
 
 **Benefits of Accurate Monitoring**:
 - ✅ **Real scaling decisions** based on actual load balancer resource usage
-- ✅ **Accurate memory pressure** detection (14.1% vs previous wrong 62.9%)
+- ✅ **Accurate memory pressure** detection (12.7% vs previous wrong 62.9%)
 - ✅ **Proper resource planning** for high-volume production scenarios
 - ✅ **Correct batch sizing** based on actual process memory pressure
 
@@ -1083,14 +1083,14 @@ USE CASE 4 now provides **bulletproof transaction protection** under high load c
 
 ```yaml
 Current Capacity (Accurate Metrics):
-  Process Memory: 56.5625MB / 400MB (14.1% usage)
-  Available Headroom: 343.4375MB (85.9% available)
+  Process Memory: 50.66MB / 400MB (12.7% usage)
+  Available Headroom: 349.34MB (87.3% available)
   Collection Throughput: 10 collections in 16.8s
   Concurrent Operations: 5 operations in 1.13s
   
 Scaling Projections (Resource-Only):
-  2x Volume: 28.2% memory usage (comfortable)
-  5x Volume: 70.5% memory usage (still within limits)
+  2x Volume: 25.4% memory usage (comfortable)
+  5x Volume: 63.5% memory usage (still within limits)
   10x Volume: Upgrade to 1GB memory plan recommended
   
 Resource-Only Scaling:
@@ -1131,9 +1131,9 @@ python run_enhanced_tests.py --url https://chroma-load-balancer.onrender.com
 
 ### **Success Criteria** ✅ **ALL CRITERIA ACHIEVED**
 - ✅ **High concurrent collection creation** ← **100% SUCCESS (15/15 operations)**
-- ✅ **Process-specific resource monitoring** ← **ACCURATE (14.1% usage vs 400MB limit)**
+- ✅ **Process-specific resource monitoring** ← **ACCURATE (12.7% usage vs 400MB limit)**
 - ✅ **Transaction safety under stress** ← **BULLETPROOF (100% capture rate)**
-- ✅ **Memory management under load** ← **OPTIMAL (85.9% headroom available)**
+- ✅ **Memory management under load** ← **OPTIMAL (87.3% headroom available)**
 - ✅ **WAL sync performance** ← **PERFECT (0 pending writes)**
 - ✅ **Enterprise-grade reliability** ← **VERIFIED (Zero data loss guarantee)**
 
