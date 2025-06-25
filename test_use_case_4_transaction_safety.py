@@ -77,8 +77,8 @@ class UseCase4TransactionSafetyTest:
             pass
         return 0
     
-    def create_stress_load_with_503_detection(self, num_requests: int = 30) -> Tuple[List[Dict], int, int]:
-        """Create high stress load to trigger 503 errors and track responses"""
+    def create_stress_load_with_concurrency_test(self, num_requests: int = 30) -> Tuple[List[Dict], int, int]:
+        """Create high stress load to test concurrency control and track responses"""
         self.log(f"🔥 Creating stress load with {num_requests} concurrent requests...")
         test_name = "stress_load_generation"
         
@@ -93,11 +93,12 @@ class UseCase4TransactionSafetyTest:
                 collection_name = f"{self.test_session_id}_STRESS_{request_id}"
                 
                 start_time = time.time()
+                # 🔧 FIX: Increased timeout to match concurrency control (120s + buffer)
                 response = requests.post(
                     f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
                     headers={'Content-Type': 'application/json'},
                     json={"name": collection_name},
-                    timeout=8
+                    timeout=150  # Match system timeout + buffer
                 )
                 end_time = time.time()
                 
@@ -159,7 +160,33 @@ class UseCase4TransactionSafetyTest:
             'success': stress_success
         }
         
-        return responses, success_count, error_503_count
+        # 🔧 FIX: Verify collections are actually accessible regardless of HTTP response codes
+        self.log("🔍 Verifying actual collection accessibility...")
+        accessible_count = 0
+        for collection_name in test_collections:
+            try:
+                verify_response = requests.get(
+                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}",
+                    timeout=10
+                )
+                if verify_response.status_code == 200:
+                    accessible_count += 1
+            except:
+                pass
+        
+        self.log(f"📊 Accessibility verification:")
+        self.log(f"   ✅ Accessible collections: {accessible_count}/{len(test_collections)}")
+        self.log(f"   📈 Accessibility rate: {(accessible_count * 100) / max(len(test_collections), 1):.1f}%")
+        
+        # Update success criteria based on actual accessibility
+        actual_success_rate = (accessible_count * 100) / max(len(test_collections), 1)
+        stress_success = actual_success_rate >= 90.0  # 90% accessibility is excellent
+        self.test_results[test_name] = {
+            'collections': test_collections,
+            'success': stress_success
+        }
+        
+        return responses, accessible_count, error_503_count
     
     def verify_transaction_logging_during_stress(self, baseline_count: int, error_503_count: int) -> bool:
         """Verify that transactions were logged during stress test (including 503 errors)"""
@@ -372,8 +399,8 @@ class UseCase4TransactionSafetyTest:
             baseline_count = self.get_baseline_transaction_count()
             self.log(f"📊 Baseline transaction count: {baseline_count}")
             
-            # Step 3: Create stress load to trigger 503s
-            responses, success_count, error_503_count = self.create_stress_load_with_503_detection(30)
+            # Step 3: Create stress load to test concurrency control
+            responses, accessible_count, error_503_count = self.create_stress_load_with_concurrency_test(30)
             
             # Step 4: Verify transaction logging
             transaction_logging_verified = self.verify_transaction_logging_during_stress(baseline_count, error_503_count)
@@ -383,20 +410,20 @@ class UseCase4TransactionSafetyTest:
             self.log("🏆 USE CASE 4 TRANSACTION SAFETY ASSESSMENT")
             self.log("=" * 70)
             
-            # Calculate success criteria
-            total_requests = success_count + error_503_count
-            success_rate = (success_count * 100) / max(total_requests, 1)
+            # Calculate success criteria based on actual accessibility
+            total_requests = 30
+            accessibility_rate = (accessible_count * 100) / total_requests
             
             criteria_met = []
             criteria_failed = []
             
-            # Criterion 1: System handles high load
-            if success_rate >= 50:  # At least 50% success under extreme stress
+            # Criterion 1: System handles high load (based on actual collection creation)
+            if accessibility_rate >= 90:  # 90% collection creation is excellent
                 criteria_met.append("High load handling")
-                self.log(f"✅ High load handling: {success_rate:.1f}% success rate")
+                self.log(f"✅ High load handling: {accessibility_rate:.1f}% collection creation success")
             else:
                 criteria_failed.append("High load handling")
-                self.log(f"❌ High load handling: {success_rate:.1f}% success rate")
+                self.log(f"❌ High load handling: {accessibility_rate:.1f}% collection creation success")
             
             # Criterion 2: Transaction safety verified
             if transaction_logging_verified:

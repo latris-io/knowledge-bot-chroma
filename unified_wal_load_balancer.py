@@ -140,7 +140,7 @@ class UnifiedWALLoadBalancer:
         self.concurrency_manager = ConcurrencyManager(
             max_concurrent_requests=int(os.getenv("MAX_CONCURRENT_REQUESTS", "50")),
             request_queue_size=int(os.getenv("REQUEST_QUEUE_SIZE", "200")),
-            request_timeout=int(os.getenv("REQUEST_TIMEOUT", "30"))
+            request_timeout=int(os.getenv("REQUEST_TIMEOUT", "120"))  # 🔧 FIX: Increased from 30s to 120s
         )
         
         # 🔗 CONNECTION POOLING - Eliminates database connection overhead
@@ -1954,7 +1954,8 @@ class ConcurrencyManager:
         # Get values from environment variables that were set but not implemented
         self.max_concurrent_requests = int(os.getenv("MAX_CONCURRENT_REQUESTS", max_concurrent_requests or "50"))
         self.request_queue_size = int(os.getenv("REQUEST_QUEUE_SIZE", request_queue_size or "200"))  
-        self.request_timeout = int(os.getenv("REQUEST_TIMEOUT", request_timeout or "30"))
+        # 🔧 FIX: Increased timeout from 30s to 120s to prevent premature timeouts
+        self.request_timeout = int(os.getenv("REQUEST_TIMEOUT", request_timeout or "120"))
         
         # Create semaphore to limit concurrent requests
         self.request_semaphore = Semaphore(self.max_concurrent_requests)
@@ -1966,35 +1967,68 @@ class ConcurrencyManager:
             "queued_requests": 0,
             "total_requests": 0,
             "timeout_requests": 0,
-            "queue_full_rejections": 0
+            "queue_full_rejections": 0,
+            # 🔧 NEW: Additional debugging stats
+            "semaphore_acquisitions": 0,
+            "semaphore_releases": 0,
+            "processing_failures": 0
         }
         
-        logger.info(f"🚀 Concurrency Manager initialized: {self.max_concurrent_requests} concurrent, {self.request_queue_size} queue size")
+        logger.info(f"🚀 Concurrency Manager initialized: {self.max_concurrent_requests} concurrent, {self.request_queue_size} queue size, {self.request_timeout}s timeout")
     
     def __enter__(self):
         """Context manager entry - acquire semaphore or timeout"""
         start_time = time.time()
+        request_id = f"req_{int(time.time() * 1000) % 10000}"
         
-        # Try to acquire semaphore (blocks if at limit)
-        acquired = self.request_semaphore.acquire(timeout=self.request_timeout)
+        logger.debug(f"🔄 {request_id}: Attempting semaphore acquire (current: {self.stats['concurrent_requests']}/{self.max_concurrent_requests})")
+        
+        # 🔧 FIX: Use blocking acquire with timeout but add proper error handling
+        try:
+            acquired = self.request_semaphore.acquire(timeout=self.request_timeout)
+        except Exception as e:
+            logger.error(f"❌ {request_id}: Semaphore acquire failed with exception: {e}")
+            self.stats["timeout_requests"] += 1
+            raise RequestTimeout(f"Semaphore acquisition failed: {e}")
         
         if not acquired:
+            logger.warning(f"⏰ {request_id}: Semaphore acquire timed out after {self.request_timeout}s")
             self.stats["timeout_requests"] += 1
-            raise RequestTimeout("Request timeout - too many concurrent requests")
+            raise RequestTimeout(f"Request timeout after {self.request_timeout}s - too many concurrent requests")
         
+        # Successfully acquired semaphore
         self.stats["concurrent_requests"] += 1
         self.stats["total_requests"] += 1
+        self.stats["semaphore_acquisitions"] += 1
         
         wait_time = time.time() - start_time
         if wait_time > 1.0:  # Log if waited more than 1 second
-            logger.warning(f"⏳ Request waited {wait_time:.2f}s for concurrency slot")
+            logger.warning(f"⏳ {request_id}: Request waited {wait_time:.2f}s for concurrency slot")
+        else:
+            logger.debug(f"✅ {request_id}: Semaphore acquired in {wait_time:.3f}s")
         
+        # Store request_id for debugging
+        self._current_request_id = request_id
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit - release semaphore"""
-        self.request_semaphore.release()
-        self.stats["concurrent_requests"] -= 1
+        request_id = getattr(self, '_current_request_id', 'unknown')
+        
+        try:
+            self.request_semaphore.release()
+            self.stats["concurrent_requests"] -= 1
+            self.stats["semaphore_releases"] += 1
+            logger.debug(f"🔓 {request_id}: Semaphore released (remaining: {self.stats['concurrent_requests']}/{self.max_concurrent_requests})")
+            
+            # Track processing failures
+            if exc_type is not None:
+                self.stats["processing_failures"] += 1
+                logger.warning(f"⚠️ {request_id}: Request completed with exception: {exc_type.__name__}")
+                
+        except Exception as e:
+            logger.error(f"❌ {request_id}: Error releasing semaphore: {e}")
+            # Don't raise here to avoid masking the original exception
 
 # Main execution for web service  
 if __name__ == '__main__':
@@ -2394,9 +2428,8 @@ if __name__ == '__main__':
                 "traceback": traceback.format_exc()
             }), 500
 
-    def _handle_proxy_request_core(path):
+    def _handle_proxy_request_core(path, transaction_id=None):
         """Core proxy request logic - separated for cleaner concurrency control"""
-        transaction_id = None
         
         try:
             logger.info(f"🚀 PROXY_REQUEST START: {request.method} /{path} [Concurrent: {enhanced_wal.concurrency_manager.stats['concurrent_requests']}/{enhanced_wal.concurrency_manager.max_concurrent_requests}]")
@@ -2404,26 +2437,6 @@ if __name__ == '__main__':
             if enhanced_wal is None:
                 logger.error("❌ PROXY_REQUEST FAILED: WAL system not ready")
                 return jsonify({"error": "WAL system not ready"}), 503
-            
-            # 🛡️ TRANSACTION SAFETY: Pre-execution logging for write operations
-            if request.method in ['POST', 'PUT', 'PATCH', 'DELETE'] and enhanced_wal.transaction_safety:
-                try:
-                    data = request.get_data()
-                    headers = dict(request.headers)
-                    
-                    # Log transaction BEFORE attempting execution
-                    transaction_id = enhanced_wal.transaction_safety.log_transaction_attempt(
-                        method=request.method,
-                        path=f"/{path}",
-                        data=data,
-                        headers=headers,
-                        remote_addr=request.remote_addr
-                    )
-                    logger.info(f"🛡️ TRANSACTION SAFETY: Pre-logged {transaction_id[:8]} for {request.method} /{path}")
-                    
-                except Exception as e:
-                    logger.error(f"❌ Transaction logging failed: {e}")
-                    # Continue without transaction safety rather than failing the request
                 
             logger.info(f"✅ PROXY_REQUEST: enhanced_wal object exists")
             logger.info(f"Forwarding {request.method} request to /{path}")
@@ -2659,19 +2672,56 @@ if __name__ == '__main__':
     @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     def proxy_request(path):
         """🚀 CONCURRENCY-CONTROLLED proxy for 200+ simultaneous users"""
+        transaction_id = None
+        
+        # 🛡️ TRANSACTION SAFETY: Pre-execution logging BEFORE concurrency control
+        if request.method in ['POST', 'PUT', 'PATCH', 'DELETE'] and enhanced_wal and enhanced_wal.transaction_safety:
+            try:
+                data = request.get_data()
+                headers = dict(request.headers)
+                
+                # Log transaction BEFORE concurrency control
+                transaction_id = enhanced_wal.transaction_safety.log_transaction_attempt(
+                    method=request.method,
+                    path=f"/{path}",
+                    data=data,
+                    headers=headers,
+                    remote_addr=request.remote_addr
+                )
+                logger.info(f"🛡️ TRANSACTION SAFETY: Pre-logged {transaction_id[:8]} for {request.method} /{path} BEFORE concurrency control")
+                
+            except Exception as e:
+                logger.error(f"❌ Transaction logging failed: {e}")
+                # Continue without transaction safety rather than failing the request
+        
         try:
             # 🚀 CONCURRENCY CONTROL: Handle high concurrent user load (200+ simultaneous CMS uploads)
             with enhanced_wal.concurrency_manager:
-                return _handle_proxy_request_core(path)
+                return _handle_proxy_request_core(path, transaction_id)
                 
         except RequestTimeout:
             # 🚀 CONCURRENCY: Request timeout from concurrency manager
             logger.warning(f"⏰ PROXY_REQUEST TIMEOUT: {request.method} /{path} - too many concurrent requests")
             enhanced_wal.concurrency_manager.stats["timeout_requests"] += 1
+            
+            # 🛡️ TRANSACTION SAFETY: Mark timeout transactions as failed for recovery
+            if transaction_id and enhanced_wal.transaction_safety:
+                try:
+                    enhanced_wal.transaction_safety.mark_transaction_failed(
+                        transaction_id,
+                        f"Concurrency timeout after {enhanced_wal.concurrency_manager.request_timeout}s",
+                        is_timing_gap=False,  # This is a concurrency issue, not timing gap
+                        is_concurrency_failure=True
+                    )
+                    logger.info(f"🛡️ TRANSACTION SAFETY: Marked timeout {transaction_id[:8]} for recovery")
+                except Exception as e:
+                    logger.error(f"❌ Failed to mark timeout transaction: {e}")
+            
             return jsonify({
                 "error": "Request timeout - server overloaded, please retry",
                 "concurrent_limit": enhanced_wal.concurrency_manager.max_concurrent_requests,
-                "queue_size": enhanced_wal.concurrency_manager.request_queue_size
+                "queue_size": enhanced_wal.concurrency_manager.request_queue_size,
+                "transaction_id": transaction_id[:8] if transaction_id else None
             }), 503
     
     # Start Flask web server immediately
