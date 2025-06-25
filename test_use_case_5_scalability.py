@@ -95,7 +95,12 @@ class ScalabilityTester(EnhancedTestBase):
     
     def make_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """Make HTTP request with error handling and performance tracking"""
-        url = f"{self.base_url}{endpoint}"
+        # Handle both relative endpoints and full URLs
+        if endpoint.startswith(('http://', 'https://')):
+            url = endpoint  # Already a full URL
+        else:
+            url = f"{self.base_url}{endpoint}"  # Relative endpoint
+            
         start_time = time.time()
         
         try:
