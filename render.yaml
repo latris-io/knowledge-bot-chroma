@@ -137,7 +137,7 @@ services:
       - key: ENABLE_GRANULAR_LOCKING
         value: "true"
       - key: MAX_WORKERS
-        value: "2"
+        value: "3"  # 🔧 FIX: Increased for better pool scaling (3*10=30 max connections)
       - key: MAX_MEMORY_MB
         value: "450"
 

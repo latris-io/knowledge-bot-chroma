@@ -150,9 +150,10 @@ class UnifiedWALLoadBalancer:
         
         if self.enable_connection_pooling:
             try:
-                # Calculate pool size based on max_workers + overhead
-                min_connections = max(2, self.max_workers)
-                max_connections = max(10, self.max_workers * 3)  # 3x workers for overhead
+                # 🔧 FIX: Calculate pool size for high-concurrency workloads  
+                # Each operation can make 10-20 DB calls, so scale pool appropriately
+                min_connections = max(5, self.max_workers * 2)  # Higher minimum
+                max_connections = max(20, self.max_workers * 10)  # Much larger pool for concurrent requests
                 
                 self.connection_pool = psycopg2_pool.ThreadedConnectionPool(
                     minconn=min_connections,
