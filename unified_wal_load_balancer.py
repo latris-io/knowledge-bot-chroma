@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
+import contextlib
+from psycopg2 import pool as psycopg2_pool
 
 # Flask imports for web service
 from flask import Flask, request, Response, jsonify
@@ -127,8 +129,49 @@ class UnifiedWALLoadBalancer:
         self.max_batch_size = int(os.getenv("MAX_BATCH_SIZE", "200"))
         self.resource_check_interval = 30  # seconds
         
-        # PostgreSQL connection for unified WAL
+        # 🚀 SCALABILITY FEATURES - Feature flags for safe deployment
+        self.enable_connection_pooling = os.getenv("ENABLE_CONNECTION_POOLING", "false").lower() == "true"
+        self.enable_granular_locking = os.getenv("ENABLE_GRANULAR_LOCKING", "false").lower() == "true"
+        
+        # 🔗 CONNECTION POOLING - Eliminates database connection overhead
         self.database_url = os.getenv("DATABASE_URL", "postgresql://chroma_user:xqIF9T5U6LhySuSw86JqWYf7qtyGDXy8@dpg-d16mkandiees73db52u0-a.oregon-postgres.render.com/chroma_ha")
+        self.connection_pool = None
+        self.pool_available = False
+        
+        if self.enable_connection_pooling:
+            try:
+                # Calculate pool size based on max_workers + overhead
+                min_connections = max(2, self.max_workers)
+                max_connections = max(10, self.max_workers * 3)  # 3x workers for overhead
+                
+                self.connection_pool = psycopg2_pool.ThreadedConnectionPool(
+                    minconn=min_connections,
+                    maxconn=max_connections,
+                    dsn=self.database_url,
+                    connect_timeout=10,
+                    application_name='unified-wal-lb-pooled'
+                )
+                self.pool_available = True
+                logger.info(f"🔗 Connection pool enabled: {min_connections}-{max_connections} connections")
+            except Exception as e:
+                logger.warning(f"⚠️ Connection pool initialization failed, using direct connections: {e}")
+                self.connection_pool = None
+                self.pool_available = False
+        else:
+            logger.info("🔗 Connection pooling disabled (set ENABLE_CONNECTION_POOLING=true to enable)")
+        
+        # 🔒 GRANULAR LOCKING - Reduces lock contention for better scalability
+        if self.enable_granular_locking:
+            # Operation-specific locks for better concurrent performance
+            self.wal_write_lock = threading.Lock()          # WAL operations
+            self.collection_mapping_lock = threading.Lock() # UUID mappings  
+            self.metrics_lock = threading.Lock()            # Performance metrics
+            self.status_lock = threading.Lock()             # Status updates
+            logger.info("🔒 Granular locking enabled - improved concurrency")
+        else:
+            logger.info("🔒 Granular locking disabled (set ENABLE_GRANULAR_LOCKING=true to enable)")
+        
+        # 🔒 BACKWARD COMPATIBILITY - Keep global lock for fallback
         self.db_lock = threading.Lock()
         
         # Consistency tracking
@@ -168,7 +211,11 @@ class UnifiedWALLoadBalancer:
             "adaptive_batch_reductions": 0,
             "avg_sync_throughput": 0.0,
             "peak_memory_usage": 0.0,
-            "deletion_conversions": 0
+            "deletion_conversions": 0,
+            # 🚀 SCALABILITY METRICS
+            "connection_pool_hits": 0,
+            "connection_pool_misses": 0,
+            "lock_contention_avoided": 0
         }
         
         # Start monitoring and sync threads
@@ -185,17 +232,85 @@ class UnifiedWALLoadBalancer:
         logger.info(f"📊 High-volume config: {self.max_memory_usage_mb}MB RAM, {self.max_workers} workers, batch {self.default_batch_size}-{self.max_batch_size}")
         logger.info(f"🎯 Read replica ratio: {self.read_replica_ratio * 100}%")
         logger.info(f"🔄 WAL sync interval: {self.sync_interval}s")
+        
+        # 🚀 SCALABILITY STATUS
+        features = []
+        if self.enable_connection_pooling and self.pool_available:
+            features.append("Connection Pooling")
+        if self.enable_granular_locking:
+            features.append("Granular Locking")
+        
+        if features:
+            logger.info(f"🚀 Scalability features enabled: {', '.join(features)}")
+        else:
+            logger.info("🚀 Scalability features disabled - enable with ENABLE_CONNECTION_POOLING=true, ENABLE_GRANULAR_LOCKING=true")
+
+    def _get_appropriate_lock(self, operation_type: str):
+        """🔒 Get appropriate lock based on operation type for optimal concurrency"""
+        if not self.enable_granular_locking:
+            return self.db_lock  # SAFE: Fallback to global lock
+        
+        # ENHANCED: Operation-specific locking for better performance
+        lock_map = {
+            'wal_write': self.wal_write_lock,
+            'collection_mapping': self.collection_mapping_lock,
+            'metrics': self.metrics_lock,
+            'status': self.status_lock,
+        }
+        
+        lock = lock_map.get(operation_type, self.db_lock)
+        
+        if lock != self.db_lock:
+            self.stats["lock_contention_avoided"] += 1
+            
+        return lock
+
+    @contextlib.contextmanager
+    def get_db_connection_ctx(self):
+        """🔗 Enhanced database connection with pooling support"""
+        conn = None
+        try:
+            conn = self.get_db_connection()
+            yield conn
+        finally:
+            if conn:
+                if self.pool_available and self.connection_pool:
+                    try:
+                        self.connection_pool.putconn(conn)
+                        self.stats["connection_pool_hits"] += 1
+                    except Exception as e:
+                        logger.debug(f"Pool return failed: {e}")
+                        conn.close()
+                else:
+                    conn.close()
 
     def get_db_connection(self):
-        """Get database connection with improved error handling and retry logic"""
+        """🔗 Get database connection with improved error handling, retry logic, and connection pooling"""
+        # 🚀 SCALABILITY: Use connection pool if available
+        if self.pool_available and self.connection_pool:
+            try:
+                conn = self.connection_pool.getconn()
+                if conn:
+                    self.stats["connection_pool_hits"] += 1
+                    return conn
+            except Exception as e:
+                logger.warning(f"⚠️ Pool connection failed, falling back to direct: {e}")
+                self.stats["connection_pool_misses"] += 1
+                # Fall through to direct connection
+        
+        # 🔗 FALLBACK: Direct connection (original behavior)
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                return psycopg2.connect(
+                conn = psycopg2.connect(
                     self.database_url,
                     connect_timeout=10,
                     application_name='unified-wal-lb'
                 )
+                if not self.pool_available:
+                    self.stats["connection_pool_misses"] += 1
+                return conn
+                
             except psycopg2.OperationalError as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"Database connection attempt {attempt + 1} failed, retrying: {e}")
@@ -474,7 +589,8 @@ class UnifiedWALLoadBalancer:
                 conversion_type = None
         
         try:
-            with self.db_lock:
+            # 🔒 SCALABILITY: Use appropriate lock for WAL operations
+            with self._get_appropriate_lock('wal_write'):
                 with self.get_db_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
@@ -796,7 +912,8 @@ class UnifiedWALLoadBalancer:
                                 logger.info(f"🎯 COLLECTION CREATED: {collection_name} -> {new_uuid[:8]} on {instance.name}")
                                 
                                 # Update mapping with new UUID
-                                with self.db_lock:
+                                # 🔒 SCALABILITY: Use appropriate lock for collection mapping operations
+                                with self._get_appropriate_lock('collection_mapping'):
                                     with self.get_db_connection() as conn:
                                         with conn.cursor() as cur:
                                             if instance.name == 'primary':
@@ -1017,7 +1134,8 @@ class UnifiedWALLoadBalancer:
     def mark_write_synced(self, write_id: str):
         """Mark a write as fully synced with graceful error handling"""
         try:
-            with self.db_lock:
+            # 🔒 SCALABILITY: Use appropriate lock for WAL status updates
+            with self._get_appropriate_lock('wal_write'):
                 with self.get_db_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
@@ -1035,7 +1153,8 @@ class UnifiedWALLoadBalancer:
     def mark_write_failed(self, write_id: str, error_message: str):
         """Mark a write as failed with graceful error handling"""
         try:
-            with self.db_lock:
+            # 🔒 SCALABILITY: Use appropriate lock for WAL status updates
+            with self._get_appropriate_lock('wal_write'):
                 with self.get_db_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
@@ -1387,6 +1506,11 @@ class UnifiedWALLoadBalancer:
                 } for inst in self.instances
             ],
             "stats": self.stats,
+            "scalability_features": {
+                "connection_pooling": self.enable_connection_pooling and self.pool_available,
+                "granular_locking": self.enable_granular_locking,
+                "scaling_method": "resource-only (upgrade Render plan for automatic scaling)"
+            },
             "realtime_health": realtime_health
         }
 
@@ -1950,6 +2074,48 @@ if __name__ == '__main__':
         except Exception as e:
             return jsonify({'error': str(e)}), 500
 
+    @app.route('/admin/scalability_status', methods=['GET'])
+    def scalability_status():
+        """🚀 Get scalability features status and performance metrics"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not ready"}), 503
+            
+            return jsonify({
+                "scalability_features": {
+                    "connection_pooling": {
+                        "enabled": enhanced_wal.enable_connection_pooling,
+                        "available": enhanced_wal.pool_available,
+                        "min_connections": getattr(enhanced_wal.connection_pool, 'minconn', None) if enhanced_wal.pool_available else None,
+                        "max_connections": getattr(enhanced_wal.connection_pool, 'maxconn', None) if enhanced_wal.pool_available else None
+                    },
+                    "granular_locking": {
+                        "enabled": enhanced_wal.enable_granular_locking,
+                        "lock_types": ["wal_write", "collection_mapping", "metrics", "status"] if enhanced_wal.enable_granular_locking else ["global_only"]
+                    }
+                },
+                "performance_impact": {
+                    "connection_pool_hits": enhanced_wal.stats.get("connection_pool_hits", 0),
+                    "connection_pool_misses": enhanced_wal.stats.get("connection_pool_misses", 0),
+                    "lock_contention_avoided": enhanced_wal.stats.get("lock_contention_avoided", 0),
+                    "pool_hit_rate": f"{(enhanced_wal.stats.get('connection_pool_hits', 0) / max(1, enhanced_wal.stats.get('connection_pool_hits', 0) + enhanced_wal.stats.get('connection_pool_misses', 0)) * 100):.1f}%"
+                },
+                "scaling_capacity": {
+                    "current_max_workers": enhanced_wal.max_workers,
+                    "current_memory_limit_mb": enhanced_wal.max_memory_usage_mb,
+                    "current_memory_usage_percent": enhanced_wal.current_memory_usage,
+                    "resource_scaling_available": "true - upgrade Render plan for automatic scaling"
+                },
+                "recommendations": {
+                    "connection_pooling": "Enable with ENABLE_CONNECTION_POOLING=true" if not enhanced_wal.enable_connection_pooling else "✅ Enabled",
+                    "granular_locking": "Enable with ENABLE_GRANULAR_LOCKING=true" if not enhanced_wal.enable_granular_locking else "✅ Enabled",
+                    "scaling_method": "Upgrade Render plan (CPU/Memory) for automatic performance scaling"
+                }
+            })
+            
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
     @app.route('/admin/transaction_safety_status', methods=['GET'])
     def transaction_safety_status():
         """Get Transaction Safety Service status and recent transaction logs"""
@@ -2051,7 +2217,8 @@ if __name__ == '__main__':
             if not collection_name:
                 return jsonify({"error": "collection_name required"}), 400
             
-            with enhanced_wal.db_lock:
+            # 🔒 SCALABILITY: Use appropriate lock for collection mapping operations
+            with enhanced_wal._get_appropriate_lock('collection_mapping'):
                 with enhanced_wal.get_db_connection() as conn:
                     with conn.cursor() as cur:
                         # Try the same INSERT that's failing
@@ -2193,7 +2360,8 @@ if __name__ == '__main__':
                         
                         # Direct database insert without complex logic
                         logger.info(f"🔍 PROXY_REQUEST: Acquiring database lock...")
-                        with enhanced_wal.db_lock:
+                        # 🔒 SCALABILITY: Use appropriate lock for WAL operations
+                        with enhanced_wal._get_appropriate_lock('wal_write'):
                             logger.info(f"✅ PROXY_REQUEST: Database lock acquired")
                             
                             logger.info(f"🔍 PROXY_REQUEST: Getting database connection...")
@@ -2275,7 +2443,8 @@ if __name__ == '__main__':
                         logger.info(f"✅ PROXY_REQUEST: Collection created - name: {collection_name}, UUID: {collection_uuid[:8]} on {target_instance.name}")
                         
                         # Store collection mapping in database for distributed system
-                        with enhanced_wal.db_lock:
+                        # 🔒 SCALABILITY: Use appropriate lock for collection mapping operations
+                        with enhanced_wal._get_appropriate_lock('collection_mapping'):
                             with enhanced_wal.get_db_connection() as conn:
                                 with conn.cursor() as cur:
                                     # Check if mapping already exists
