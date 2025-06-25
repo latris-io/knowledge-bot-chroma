@@ -1517,7 +1517,11 @@ class UnifiedWALLoadBalancer:
                 "concurrent_requests_active": self.concurrency_manager.stats.get("concurrent_requests", 0),
                 "total_requests_processed": self.concurrency_manager.stats.get("total_requests", 0),
                 "timeout_requests": self.concurrency_manager.stats.get("timeout_requests", 0),
-                "queue_full_rejections": self.concurrency_manager.stats.get("queue_full_rejections", 0)
+                "queue_full_rejections": self.concurrency_manager.stats.get("queue_full_rejections", 0),
+                # 🔧 MAPPING MONITORING (CRITICAL FOR USE CASE 4 SUCCESS)
+                "mapping_failures": self.stats.get("mapping_failures", 0),
+                "critical_mapping_failures": self.stats.get("critical_mapping_failures", 0),
+                "mapping_exceptions": self.stats.get("mapping_exceptions", 0)
             },
             "instances": [
                 {
@@ -1873,6 +1877,76 @@ class UnifiedWALLoadBalancer:
         except Exception as e:
             logger.error(f"❌ RECOVERY: Failed to retry {method} {path}: {e}")
             return None
+
+    def create_collection_mapping_with_retry(self, collection_name: str, collection_uuid: str, target_instance_name: str, max_retries: int = 3) -> bool:
+        """
+        🔧 BULLETPROOF: Create collection mapping with retry logic and race condition protection
+        """
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"🔧 MAPPING ATTEMPT {attempt + 1}/{max_retries}: Creating mapping for {collection_name} -> {collection_uuid[:8]} on {target_instance_name}")
+                
+                # 🔒 SCALABILITY: Use appropriate lock for collection mapping operations
+                with self._get_appropriate_lock('collection_mapping'):
+                    with self.get_db_connection() as conn:
+                        with conn.cursor() as cur:
+                            # BULLETPROOF: Use UPSERT to eliminate race conditions
+                            if target_instance_name == "primary":
+                                cur.execute("""
+                                    INSERT INTO collection_id_mapping 
+                                    (collection_name, primary_collection_id, created_at) 
+                                    VALUES (%s, %s, NOW())
+                                    ON CONFLICT (collection_name) DO UPDATE SET
+                                    primary_collection_id = EXCLUDED.primary_collection_id,
+                                    updated_at = NOW()
+                                """, (collection_name, collection_uuid))
+                                logger.info(f"✅ MAPPING SUCCESS: Primary mapping created/updated for {collection_name}")
+                                
+                            elif target_instance_name == "replica":
+                                cur.execute("""
+                                    INSERT INTO collection_id_mapping 
+                                    (collection_name, replica_collection_id, created_at) 
+                                    VALUES (%s, %s, NOW())
+                                    ON CONFLICT (collection_name) DO UPDATE SET
+                                    replica_collection_id = EXCLUDED.replica_collection_id,
+                                    updated_at = NOW()
+                                """, (collection_name, collection_uuid))
+                                logger.info(f"✅ MAPPING SUCCESS: Replica mapping created/updated for {collection_name}")
+                            
+                            conn.commit()
+                            
+                            # VALIDATION: Verify mapping was created
+                            cur.execute("""
+                                SELECT collection_name, primary_collection_id, replica_collection_id 
+                                FROM collection_id_mapping 
+                                WHERE collection_name = %s
+                            """, (collection_name,))
+                            result = cur.fetchone()
+                            
+                            if result:
+                                _, primary_id, replica_id = result
+                                logger.info(f"✅ MAPPING VERIFIED: {collection_name} -> P:{primary_id[:8] if primary_id else 'None'}, R:{replica_id[:8] if replica_id else 'None'}")
+                                return True
+                            else:
+                                logger.error(f"❌ MAPPING VALIDATION FAILED: No mapping found after creation for {collection_name}")
+                                return False
+                            
+            except Exception as e:
+                logger.error(f"❌ MAPPING ATTEMPT {attempt + 1} FAILED for {collection_name}: {e}")
+                
+                if attempt < max_retries - 1:
+                    # Exponential backoff: 0.1s, 0.2s, 0.4s
+                    delay = 0.1 * (2 ** attempt)
+                    logger.info(f"⏳ MAPPING RETRY: Waiting {delay}s before retry {attempt + 2}/{max_retries}")
+                    import time
+                    time.sleep(delay)
+                else:
+                    logger.error(f"💀 MAPPING FATAL: All {max_retries} attempts failed for {collection_name}")
+                    # Log to stats for monitoring
+                    self.stats["mapping_failures"] = self.stats.get("mapping_failures", 0) + 1
+                    return False
+        
+        return False
 
 # 🚀 REQUEST CONCURRENCY CONTROLS - Handle high concurrent user load
 class ConcurrencyManager:
@@ -2513,61 +2587,32 @@ if __name__ == '__main__':
                     if collection_name and collection_uuid:
                         logger.info(f"✅ PROXY_REQUEST: Collection created - name: {collection_name}, UUID: {collection_uuid[:8]} on {target_instance.name}")
                         
-                        # Store collection mapping in database for distributed system
-                        # 🔒 SCALABILITY: Use appropriate lock for collection mapping operations
-                        with enhanced_wal._get_appropriate_lock('collection_mapping'):
-                            with enhanced_wal.get_db_connection() as conn:
-                                with conn.cursor() as cur:
-                                    # Check if mapping already exists
-                                    cur.execute("""
-                                        SELECT collection_name FROM collection_id_mapping 
-                                        WHERE collection_name = %s
-                                    """, (collection_name,))
-                                    
-                                    if not cur.fetchone():
-                                        # CRITICAL FIX: Store UUID in correct column based on target instance
-                                        if target_instance.name == "primary":
-                                            # Collection created on primary - store as primary UUID
-                                            cur.execute("""
-                                                INSERT INTO collection_id_mapping 
-                                                (collection_name, primary_collection_id, created_at) 
-                                                VALUES (%s, %s, NOW())
-                                            """, (collection_name, collection_uuid))
-                                            logger.info(f"✅ PROXY_REQUEST: Primary collection mapping created for {collection_name}")
-                                        elif target_instance.name == "replica":
-                                            # Collection created on replica (USE CASE 2) - store as replica UUID
-                                            cur.execute("""
-                                                INSERT INTO collection_id_mapping 
-                                                (collection_name, replica_collection_id, created_at) 
-                                                VALUES (%s, %s, NOW())
-                                            """, (collection_name, collection_uuid))
-                                            logger.info(f"✅ PROXY_REQUEST: Replica collection mapping created for {collection_name}")
-                                        
-                                        conn.commit()
-                                        logger.info(f"✅ PROXY_REQUEST: Collection mapping committed for {collection_name}")
-                                    else:
-                                        # Mapping exists - update the appropriate column
-                                        if target_instance.name == "primary":
-                                            cur.execute("""
-                                                UPDATE collection_id_mapping 
-                                                SET primary_collection_id = %s, updated_at = NOW()
-                                                WHERE collection_name = %s
-                                            """, (collection_uuid, collection_name))
-                                            logger.info(f"✅ PROXY_REQUEST: Updated primary UUID for existing mapping {collection_name}")
-                                        elif target_instance.name == "replica":
-                                            cur.execute("""
-                                                UPDATE collection_id_mapping 
-                                                SET replica_collection_id = %s, updated_at = NOW()
-                                                WHERE collection_name = %s
-                                            """, (collection_uuid, collection_name))
-                                            logger.info(f"✅ PROXY_REQUEST: Updated replica UUID for existing mapping {collection_name}")
-                                        
-                                        conn.commit()
-                                        logger.info(f"✅ PROXY_REQUEST: Collection mapping updated for {collection_name}")
+                        # 🔧 BULLETPROOF: Use new retry-based mapping creation
+                        mapping_success = enhanced_wal.create_collection_mapping_with_retry(
+                            collection_name, 
+                            collection_uuid, 
+                            target_instance.name
+                        )
+                        
+                        if mapping_success:
+                            logger.info(f"🎉 PROXY_REQUEST: Collection mapping completed successfully for {collection_name}")
+                        else:
+                            logger.error(f"💀 PROXY_REQUEST: CRITICAL - Collection mapping failed permanently for {collection_name}")
+                            logger.error(f"   Impact: Collection {collection_name} exists but will be inaccessible via load balancer")
+                            logger.error(f"   Recovery: Manual mapping creation required via /admin/create_mapping")
+                            
+                            # CRITICAL: This is now a critical error that should be escalated
+                            # Don't fail the request, but ensure it's monitored and alerted
+                            enhanced_wal.stats["critical_mapping_failures"] = enhanced_wal.stats.get("critical_mapping_failures", 0) + 1
                         
                 except Exception as mapping_error:
-                    logger.error(f"❌ PROXY_REQUEST: Collection mapping failed: {mapping_error}")
-                    # Don't fail the request for mapping issues
+                    logger.error(f"❌ PROXY_REQUEST: Collection mapping exception: {mapping_error}")
+                    import traceback
+                    logger.error(f"Mapping traceback: {traceback.format_exc()}")
+                    
+                    # ESCALATION: Log critical infrastructure issue
+                    enhanced_wal.stats["mapping_exceptions"] = enhanced_wal.stats.get("mapping_exceptions", 0) + 1
+                    logger.error(f"💀 CRITICAL: Collection {collection_info.get('name', 'UNKNOWN')} may be inaccessible via load balancer")
             
             # 🛡️ TRANSACTION SAFETY: Mark transaction as completed
             if transaction_id and enhanced_wal.transaction_safety:
