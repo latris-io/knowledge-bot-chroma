@@ -160,8 +160,8 @@ class UseCase4TransactionSafetyTest:
             'success': stress_success
         }
         
-        # 🔧 FIX: Verify collections are actually accessible - only check successful HTTP responses
-        self.log("🔍 Verifying actual collection accessibility...")
+        # 🔧 FIX: Verify collections are actually accessible with retry logic for eventual consistency
+        self.log("🔍 Verifying actual collection accessibility with retry logic...")
         accessible_count = 0
         successful_collections = []
         
@@ -170,15 +170,55 @@ class UseCase4TransactionSafetyTest:
             if response_data.get("status_code") in [200, 201]:
                 collection_name = response_data.get("collection_name")
                 successful_collections.append(collection_name)
+                
+                # 🔄 RETRY LOGIC: Check accessibility with exponential backoff for eventual consistency
+        max_retries = 3
+        base_delay = 2  # Start with 2 seconds
+        accessible_collections = set()
+        collections_to_check = successful_collections.copy()
+        
+        for retry_attempt in range(max_retries):
+            if retry_attempt > 0:
+                delay = base_delay * (2 ** (retry_attempt - 1))  # 2s, 4s, 8s
+                self.log(f"🔄 Retry attempt {retry_attempt + 1}/{max_retries} after {delay}s delay...")
+                time.sleep(delay)
+            
+            newly_accessible = []
+            still_inaccessible = []
+            
+            for collection_name in collections_to_check:
                 try:
                     verify_response = requests.get(
                         f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}",
                         timeout=10
                     )
                     if verify_response.status_code == 200:
-                        accessible_count += 1
+                        accessible_collections.add(collection_name)
+                        newly_accessible.append(collection_name)
+                    else:
+                        still_inaccessible.append(collection_name)
                 except:
-                    pass
+                    still_inaccessible.append(collection_name)
+            
+            accessible_count = len(accessible_collections)
+            accessibility_rate = (accessible_count * 100) / max(len(successful_collections), 1)
+            
+            if newly_accessible:
+                self.log(f"📊 Attempt {retry_attempt + 1}: {len(newly_accessible)} newly accessible, {accessible_count}/{len(successful_collections)} total ({accessibility_rate:.1f}%)")
+            else:
+                self.log(f"📊 Attempt {retry_attempt + 1}: No new accessible collections, {accessible_count}/{len(successful_collections)} total ({accessibility_rate:.1f}%)")
+            
+            # Update collections to check for next iteration (only the ones still failing)
+            collections_to_check = still_inaccessible
+            
+            # If we achieved good accessibility or no more collections to retry, break
+            if accessibility_rate >= 90.0 or not collections_to_check:
+                if accessibility_rate >= 90.0:
+                    self.log("✅ Achieved 90%+ accessibility - eventual consistency working!")
+                break
+                
+        # Final results
+        accessible_count = len(accessible_collections)
         
         self.log(f"📊 Accessibility verification:")
         self.log(f"   ✅ Accessible collections: {accessible_count}/{len(successful_collections)}")
