@@ -138,8 +138,8 @@ class UnifiedWALLoadBalancer:
         
         # 🚀 REQUEST CONCURRENCY MANAGER - Handle high concurrent user load (200+ simultaneous users)
         self.concurrency_manager = ConcurrencyManager(
-            max_concurrent_requests=int(os.getenv("MAX_CONCURRENT_REQUESTS", "50")),
-            request_queue_size=int(os.getenv("REQUEST_QUEUE_SIZE", "200")),
+            max_concurrent_requests=int(os.getenv("MAX_CONCURRENT_REQUESTS", "30")),  # 🔧 FIX: Match USE CASE 4 testing
+            request_queue_size=int(os.getenv("REQUEST_QUEUE_SIZE", "100")),  # 🔧 FIX: Reduced to match 30 concurrency
             request_timeout=int(os.getenv("REQUEST_TIMEOUT", "120"))  # 🔧 FIX: Increased from 30s to 120s
         )
         
@@ -1952,8 +1952,8 @@ class UnifiedWALLoadBalancer:
 class ConcurrencyManager:
     def __init__(self, max_concurrent_requests=None, request_queue_size=None, request_timeout=None):
         # Get values from environment variables that were set but not implemented
-        self.max_concurrent_requests = int(os.getenv("MAX_CONCURRENT_REQUESTS", max_concurrent_requests or "50"))
-        self.request_queue_size = int(os.getenv("REQUEST_QUEUE_SIZE", request_queue_size or "200"))  
+        self.max_concurrent_requests = int(os.getenv("MAX_CONCURRENT_REQUESTS", max_concurrent_requests or "30"))  # 🔧 FIX: Match USE CASE 4 testing
+        self.request_queue_size = int(os.getenv("REQUEST_QUEUE_SIZE", request_queue_size or "100"))  # 🔧 FIX: Reduced to match concurrency
         # 🔧 FIX: Increased timeout from 30s to 120s to prevent premature timeouts
         self.request_timeout = int(os.getenv("REQUEST_TIMEOUT", request_timeout or "120"))
         
@@ -2009,22 +2009,31 @@ class ConcurrencyManager:
         
         # Store request_id for debugging
         self._current_request_id = request_id
+        self._request_start_time = time.time()
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit - release semaphore"""
         request_id = getattr(self, '_current_request_id', 'unknown')
+        start_time = getattr(self, '_request_start_time', time.time())
+        duration = time.time() - start_time
         
         try:
             self.request_semaphore.release()
             self.stats["concurrent_requests"] -= 1
             self.stats["semaphore_releases"] += 1
-            logger.debug(f"🔓 {request_id}: Semaphore released (remaining: {self.stats['concurrent_requests']}/{self.max_concurrent_requests})")
             
-            # Track processing failures
+            # Enhanced logging for debugging transaction failures
             if exc_type is not None:
                 self.stats["processing_failures"] += 1
-                logger.warning(f"⚠️ {request_id}: Request completed with exception: {exc_type.__name__}")
+                logger.error(f"❌ {request_id}: Request FAILED after {duration:.2f}s - {exc_type.__name__}: {exc_val}")
+                # Log full exception details for debugging
+                import traceback
+                logger.error(f"❌ {request_id}: Full traceback: {traceback.format_exception(exc_type, exc_val, exc_tb)}")
+            else:
+                logger.debug(f"✅ {request_id}: Request SUCCESS in {duration:.2f}s")
+            
+            logger.debug(f"🔓 {request_id}: Semaphore released (remaining: {self.stats['concurrent_requests']}/{self.max_concurrent_requests})")
                 
         except Exception as e:
             logger.error(f"❌ {request_id}: Error releasing semaphore: {e}")
@@ -2651,6 +2660,53 @@ if __name__ == '__main__':
             import traceback
             logger.error(f"❌ PROXY_REQUEST FAILED for {request.method} /{path}: {e}")
             logger.error(f"Full traceback: {traceback.format_exc()}")
+            
+            # 🔧 RETRY LOGIC: Attempt simple retry for certain failures
+            if "Connection" in str(e) or "timeout" in str(e).lower() or "502" in str(e):
+                logger.warning(f"🔄 RETRY: Connection issue detected, attempting simple retry")
+                try:
+                    import time
+                    time.sleep(0.5)  # Brief pause
+                    
+                    # Simple retry without complex logic
+                    target_instance = enhanced_wal.choose_read_instance_with_realtime_health(f"/{path}", request.method, {})
+                    if target_instance:
+                        normalized_path = enhanced_wal.normalize_api_path_to_v2(f"/{path}")
+                        url = f"{target_instance.url}{normalized_path}"
+                        data = request.get_data() if request.method in ['POST', 'PUT', 'PATCH'] else None
+                        
+                        import requests
+                        response = requests.request(
+                            method=request.method,
+                            url=url,
+                            headers={'Content-Type': 'application/json'} if data else {},
+                            data=data,
+                            timeout=15  # Longer timeout for retry
+                        )
+                        
+                        logger.info(f"✅ RETRY SUCCESS: {response.status_code} for {request.method} /{path}")
+                        
+                        # 🛡️ TRANSACTION SAFETY: Mark retry success
+                        if transaction_id and enhanced_wal.transaction_safety:
+                            try:
+                                enhanced_wal.transaction_safety.mark_transaction_completed(
+                                    transaction_id, 
+                                    response.status_code,
+                                    {"status": "retry_success", "original_error": str(e)[:100]}
+                                )
+                            except Exception as te:
+                                logger.error(f"❌ Failed to mark retry transaction completed: {te}")
+                        
+                        # Return successful retry response
+                        return Response(
+                            response.text,
+                            status=response.status_code,
+                            mimetype='application/json'
+                        )
+                        
+                except Exception as retry_error:
+                    logger.error(f"❌ RETRY FAILED: {retry_error}")
+                    # Fall through to original error handling
             
             # 🛡️ TRANSACTION SAFETY: Mark transaction as failed for recovery
             if transaction_id and enhanced_wal.transaction_safety:
