@@ -289,6 +289,9 @@ class ScalabilityTester(EnhancedTestBase):
             # Success criteria: Good performance + decent hit rate
             hit_rate_numeric = float(pool_hit_rate.replace('%', '')) if isinstance(pool_hit_rate, str) else 0
             
+            # 🔧 FIX: Calculate total pool operations for realistic expectations
+            total_pool_ops = pool_hits + pool_misses
+            
             # 🔧 FIX: Realistic hit rate expectations for HTTP API operations
             # HTTP API calls naturally have lower pool hit rates due to short-lived connections
             # Focus on performance and availability rather than artificial hit rate targets
