@@ -374,28 +374,28 @@ class ScalabilityTester(EnhancedTestBase):
                 print(f"   🔢 Expected database operations: {database_operations}")
                 print(f"   ✅ Successful database operations: {successful_db_ops}")
                 
-                # 🎯 REALISTIC SUCCESS CRITERIA for testing environment
-                # Connection pooling working globally (1.3% system-wide) proves infrastructure works
+                # 🎯 REALISTIC SUCCESS CRITERIA for connection pooling
+                # Connection pooling should provide meaningful benefits, not just "any evidence"
                 if test_total >= 10:  # Ensure we had meaningful database activity
-                    if hit_rate >= 1.0:  # 🔧 FIX: Realistic 1%+ hit rate for short-duration test
-                        print(f"   🎉 CONNECTION POOLING SUCCESS: {hit_rate:.1f}% hit rate for database operations")
+                    if hit_rate >= 30.0:  # Minimum acceptable hit rate for effective pooling
+                        print(f"   🎉 CONNECTION POOLING SUCCESS: {hit_rate:.1f}% hit rate (good performance)")
                         success_rate = 100.0
                         success = True
-                    elif global_hit_rate >= 1.0:  # Check global system performance as fallback
-                        print(f"   🎉 CONNECTION POOLING SUCCESS: Global system shows {global_hit_rate:.1f}% hit rate - pooling infrastructure working")
-                        success_rate = 100.0
+                    elif hit_rate >= 15.0:  # Marginal but acceptable
+                        print(f"   ⚠️ CONNECTION POOLING MARGINAL: {hit_rate:.1f}% hit rate (needs optimization)")
+                        success_rate = 70.0
                         success = True
-                    elif hit_rate > 0 or global_hit_rate > 0:  # Any evidence of pooling working
-                        print(f"   ✅ CONNECTION POOLING WORKING: Test {hit_rate:.1f}%, Global {global_hit_rate:.1f}% - infrastructure functional")
-                        success_rate = 85.0
-                        success = True
-                    else:
-                        print(f"   ⚠️ Connection pooling needs optimization: {hit_rate:.1f}% hit rate")
-                        success_rate = hit_rate / 1.0 * 85  # Proportional success
-                        success = hit_rate >= 0.5  # Very low threshold - any hits indicate working pool
+                    elif hit_rate >= 5.0:  # Poor performance
+                        print(f"   ❌ CONNECTION POOLING POOR: {hit_rate:.1f}% hit rate (significant issues)")
+                        success_rate = 40.0
+                        success = False
+                    else:  # Effectively not working
+                        print(f"   ❌ CONNECTION POOLING FAILED: {hit_rate:.1f}% hit rate (pooling not working)")
+                        success_rate = 20.0
+                        success = False
                 else:
                     print(f"   ⚠️ Insufficient database operations for meaningful testing: {test_total}")
-                    success_rate = 50.0  # Partial success - infrastructure works but test was incomplete
+                    success_rate = 0.0
                     success = False
                 
             else:
