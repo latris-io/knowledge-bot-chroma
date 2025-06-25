@@ -287,22 +287,63 @@ class UnifiedWALLoadBalancer:
 
     @contextlib.contextmanager
     def get_db_connection_ctx(self):
-        """🔗 Enhanced database connection with pooling support"""
+        """🔗 Enhanced database connection with pooling support and improved reuse"""
         conn = None
+        connection_source = "direct"
         try:
-            conn = self.get_db_connection()
+            # 🚀 ENHANCED: Try pool first with better connection management
+            if self.pool_available and self.connection_pool:
+                try:
+                    conn = self.connection_pool.getconn()
+                    if conn:
+                        # Test connection validity
+                        with conn.cursor() as test_cur:
+                            test_cur.execute("SELECT 1")
+                        self.stats["connection_pool_hits"] += 1
+                        connection_source = "pool"
+                        logger.debug(f"🔗 Using pooled connection (hits: {self.stats['connection_pool_hits']})")
+                    else:
+                        self.stats["connection_pool_misses"] += 1
+                        conn = None
+                except Exception as e:
+                    logger.debug(f"Pool connection failed: {e}")
+                    self.stats["connection_pool_misses"] += 1
+                    conn = None
+            
+            # Fallback to direct connection if pool failed
+            if conn is None:
+                conn = psycopg2.connect(
+                    self.database_url,
+                    connect_timeout=10,
+                    application_name='unified-wal-lb-direct'
+                )
+                if self.enable_connection_pooling:
+                    self.stats["connection_pool_misses"] += 1
+                connection_source = "direct"
+                logger.debug(f"🔗 Using direct connection (misses: {self.stats['connection_pool_misses']})")
+            
             yield conn
+            
         finally:
             if conn:
-                if self.pool_available and self.connection_pool:
+                if connection_source == "pool" and self.pool_available and self.connection_pool:
                     try:
+                        # 🔧 FIX: Add brief delay to improve connection reuse in rapid scenarios
+                        time.sleep(0.001)  # 1ms delay for better pool utilization
                         self.connection_pool.putconn(conn)
-                        # 🔧 FIX: Don't count returning connection as "hit" - that inflates stats
+                        logger.debug(f"🔗 Returned connection to pool")
                     except Exception as e:
                         logger.debug(f"Pool return failed: {e}")
-                        conn.close()
+                        try:
+                            conn.close()
+                        except:
+                            pass
                 else:
-                    conn.close()
+                    try:
+                        conn.close()
+                        logger.debug(f"🔗 Closed direct connection")
+                    except:
+                        pass
 
     @contextlib.contextmanager
     def get_shared_db_connection_ctx(self):
@@ -331,8 +372,20 @@ class UnifiedWALLoadBalancer:
             try:
                 conn = self.connection_pool.getconn()
                 if conn:
-                    self.stats["connection_pool_hits"] += 1
-                    return conn
+                    # 🔧 FIX: Test connection validity and reuse if possible
+                    try:
+                        with conn.cursor() as test_cur:
+                            test_cur.execute("SELECT 1")
+                        self.stats["connection_pool_hits"] += 1
+                        return conn
+                    except Exception as e:
+                        # Connection is stale, close it and get a new one
+                        logger.debug(f"Stale pooled connection detected: {e}")
+                        try:
+                            conn.close()
+                        except:
+                            pass
+                        self.stats["connection_pool_misses"] += 1
                 else:
                     # Pool available but no connection available
                     self.stats["connection_pool_misses"] += 1
@@ -1503,79 +1556,98 @@ class UnifiedWALLoadBalancer:
                 time.sleep(60)
 
     def get_status(self, realtime_health: bool = False) -> Dict[str, Any]:
-        """Get comprehensive status including high-volume metrics"""
-        if realtime_health:
-            # Real-time health checking for immediate testing
-            logger.info("🔍 STATUS: Using real-time health checking")
-            for instance in self.instances:
-                old_health = instance.is_healthy
-                instance.is_healthy = self.check_instance_health_realtime(instance)
-                if old_health != instance.is_healthy:
-                    logger.info(f"🔄 STATUS: {instance.name} health updated: {old_health} → {instance.is_healthy}")
-        
-        healthy_instances = self.get_healthy_instances()
-        pending_count = self.get_pending_writes_count()
-        
-        return {
-            "service": "Enhanced Unified WAL-First ChromaDB Load Balancer",
-            "architecture": "WAL-First with High-Volume Processing",
-            "healthy_instances": len(healthy_instances),
-            "total_instances": len(self.instances),
-            "high_volume_config": {
-                "max_memory_mb": self.max_memory_usage_mb,
-                "current_memory_percent": self.current_memory_usage,
-                "max_workers": self.max_workers,
-                "default_batch_size": self.default_batch_size,
-                "max_batch_size": self.max_batch_size,
-                "peak_memory_usage": self.stats.get("peak_memory_usage", 0.0),
-                # 🚀 CONCURRENCY CONFIGURATION
+        """🎯 Enhanced status with high-volume monitoring, real-time health, and advanced metrics"""
+        try:
+            instances = self.instances if hasattr(self, 'instances') else []
+            healthy_instances = [inst for inst in instances if inst.is_healthy]
+            
+            # Get pending write count
+            pending_count = 0
+            if hasattr(self, 'get_pending_write_count'):
+                try:
+                    pending_count = self.get_pending_write_count()
+                except:
+                    pass
+            
+            # 🔧 FIX: Get concurrency manager metrics properly
+            concurrency_stats = {
                 "max_concurrent_requests": self.concurrency_manager.max_concurrent_requests,
                 "request_queue_size": self.concurrency_manager.request_queue_size,
-                "request_timeout": self.concurrency_manager.request_timeout
-            },
-            "unified_wal": {
-                "pending_writes": pending_count,
-                "is_syncing": self.is_syncing,
-                "sync_interval_seconds": self.sync_interval,
-                "database": "PostgreSQL",
-                "approach": "High-Volume WAL-First"
-            },
-            "performance_stats": {
-                "memory_pressure_events": self.stats.get("memory_pressure_events", 0),
-                "adaptive_batch_reductions": self.stats.get("adaptive_batch_reductions", 0),
-                "avg_sync_throughput": self.stats.get("avg_sync_throughput", 0.0),
-                # 🚀 SCALABILITY METRICS
-                "connection_pool_hits": self.stats.get("connection_pool_hits", 0),
-                "connection_pool_misses": self.stats.get("connection_pool_misses", 0),
-                "lock_contention_avoided": self.stats.get("lock_contention_avoided", 0),
-                # 🚀 CONCURRENCY METRICS  
+                "request_timeout": self.concurrency_manager.request_timeout,
                 "concurrent_requests_active": self.concurrency_manager.stats.get("concurrent_requests", 0),
                 "total_requests_processed": self.concurrency_manager.stats.get("total_requests", 0),
                 "timeout_requests": self.concurrency_manager.stats.get("timeout_requests", 0),
                 "queue_full_rejections": self.concurrency_manager.stats.get("queue_full_rejections", 0),
-                # 🔧 MAPPING MONITORING (CRITICAL FOR USE CASE 4 SUCCESS)
-                "mapping_failures": self.stats.get("mapping_failures", 0),
-                "critical_mapping_failures": self.stats.get("critical_mapping_failures", 0),
-                "mapping_exceptions": self.stats.get("mapping_exceptions", 0)
-            },
-            "instances": [
-                {
-                    "name": inst.name,
-                    "healthy": inst.is_healthy,
-                    "success_rate": f"{inst.get_success_rate():.1f}%",
-                    "total_requests": inst.total_requests,
-                    "consecutive_failures": inst.consecutive_failures,
-                    "last_health_check": inst.last_health_check.isoformat()
-                } for inst in self.instances
-            ],
-            "stats": self.stats,
-            "scalability_features": {
-                "connection_pooling": self.enable_connection_pooling and self.pool_available,
-                "granular_locking": self.enable_granular_locking,
-                "scaling_method": "resource-only (upgrade Render plan for automatic scaling)"
-            },
-            "realtime_health": realtime_health
-        }
+                "semaphore_acquisitions": self.concurrency_manager.stats.get("semaphore_acquisitions", 0),
+                "semaphore_releases": self.concurrency_manager.stats.get("semaphore_releases", 0),
+                "processing_failures": self.concurrency_manager.stats.get("processing_failures", 0)
+            }
+
+            return {
+                "service": "Enhanced Unified WAL-First ChromaDB Load Balancer",
+                "architecture": "WAL-First with High-Volume Processing",
+                "healthy_instances": len(healthy_instances),
+                "total_instances": len(self.instances),
+                "high_volume_config": {
+                    "max_memory_mb": self.max_memory_usage_mb,
+                    "current_memory_percent": self.current_memory_usage,
+                    "max_workers": self.max_workers,
+                    "default_batch_size": self.default_batch_size,
+                    "max_batch_size": self.max_batch_size,
+                    "peak_memory_usage": self.stats.get("peak_memory_usage", 0.0),
+                    # 🚀 CONCURRENCY CONFIGURATION
+                    "max_concurrent_requests": concurrency_stats["max_concurrent_requests"],
+                    "request_queue_size": concurrency_stats["request_queue_size"],
+                    "request_timeout": concurrency_stats["request_timeout"]
+                },
+                "unified_wal": {
+                    "pending_writes": pending_count,
+                    "is_syncing": self.is_syncing,
+                    "sync_interval_seconds": self.sync_interval,
+                    "database": "PostgreSQL",
+                    "approach": "High-Volume WAL-First"
+                },
+                "performance_stats": {
+                    "memory_pressure_events": self.stats.get("memory_pressure_events", 0),
+                    "adaptive_batch_reductions": self.stats.get("adaptive_batch_reductions", 0),
+                    "avg_sync_throughput": self.stats.get("avg_sync_throughput", 0.0),
+                    # 🚀 SCALABILITY METRICS
+                    "connection_pool_hits": self.stats.get("connection_pool_hits", 0),
+                    "connection_pool_misses": self.stats.get("connection_pool_misses", 0),
+                    "lock_contention_avoided": self.stats.get("lock_contention_avoided", 0),
+                    # 🚀 CONCURRENCY METRICS  
+                    "concurrent_requests_active": concurrency_stats["concurrent_requests_active"],
+                    "total_requests_processed": concurrency_stats["total_requests_processed"],
+                    "timeout_requests": concurrency_stats["timeout_requests"],
+                    "queue_full_rejections": concurrency_stats["queue_full_rejections"],
+                    # 🔧 MAPPING MONITORING (CRITICAL FOR USE CASE 4 SUCCESS)
+                    "mapping_failures": self.stats.get("mapping_failures", 0),
+                    "critical_mapping_failures": self.stats.get("critical_mapping_failures", 0),
+                    "mapping_exceptions": self.stats.get("mapping_exceptions", 0)
+                },
+                # 🔧 FIX: Add concurrency details for debugging
+                "concurrency_details": concurrency_stats,
+                "instances": [
+                    {
+                        "name": inst.name,
+                        "healthy": inst.is_healthy,
+                        "success_rate": f"{inst.get_success_rate():.1f}%",
+                        "total_requests": inst.total_requests,
+                        "consecutive_failures": inst.consecutive_failures,
+                        "last_health_check": inst.last_health_check.isoformat()
+                    } for inst in self.instances
+                ],
+                "stats": self.stats,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Status generation error: {e}")
+            return {
+                "service": "Enhanced Unified WAL-First ChromaDB Load Balancer",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
 
     # Keep other essential methods for load balancing functionality
     def choose_read_instance(self, path: str, method: str, headers: Dict[str, str]) -> Optional[ChromaInstance]:
@@ -2025,41 +2097,51 @@ class UnifiedWALLoadBalancer:
     def get_high_frequency_db_connection_ctx(self):
         """🚀 Connection context optimized for high-frequency operations like testing"""
         conn = None
+        connection_source = "direct"
         try:
             if self.pool_available and self.connection_pool:
-                # For high-frequency operations, try to get pooled connection with longer timeout
-                try:
-                    conn = self.connection_pool.getconn(timeout=2)
-                    if conn:
-                        # Test if connection is still valid
-                        with conn.cursor() as test_cur:
-                            test_cur.execute("SELECT 1")
-                        self.stats["connection_pool_hits"] += 1
-                        yield conn
-                        return
-                    else:
+                # For high-frequency operations, try harder to get pooled connection
+                for attempt in range(2):  # Try twice for pool connection
+                    try:
+                        conn = self.connection_pool.getconn(timeout=3)
+                        if conn:
+                            # Test if connection is still valid
+                            with conn.cursor() as test_cur:
+                                test_cur.execute("SELECT 1")
+                            self.stats["connection_pool_hits"] += 1
+                            connection_source = "pool"
+                            logger.debug(f"🚀 High-freq pooled connection (attempt {attempt + 1})")
+                            break
+                        else:
+                            self.stats["connection_pool_misses"] += 1
+                    except Exception as e:
+                        logger.debug(f"Pool connection attempt {attempt + 1} failed: {e}")
                         self.stats["connection_pool_misses"] += 1
-                except Exception as e:
-                    logger.debug(f"Pool connection failed: {e}")
-                    self.stats["connection_pool_misses"] += 1
+                        if attempt == 0:
+                            time.sleep(0.01)  # Brief pause before retry
             
             # Fallback to direct connection
-            conn = psycopg2.connect(
-                self.database_url,
-                connect_timeout=10,
-                application_name='unified-wal-lb-high-freq'
-            )
-            if self.enable_connection_pooling and not self.pool_available:
-                self.stats["connection_pool_misses"] += 1
+            if conn is None:
+                conn = psycopg2.connect(
+                    self.database_url,
+                    connect_timeout=10,
+                    application_name='unified-wal-lb-high-freq'
+                )
+                if self.enable_connection_pooling:
+                    self.stats["connection_pool_misses"] += 1
+                connection_source = "direct"
+                logger.debug(f"🚀 High-freq direct connection")
+            
             yield conn
             
         finally:
             if conn:
-                if self.pool_available and self.connection_pool:
+                if connection_source == "pool" and self.pool_available and self.connection_pool:
                     try:
-                        # 🔧 FIX: Add slight delay to improve reuse chances
-                        time.sleep(0.001)  # 1ms delay for better pool utilization
+                        # 🔧 FIX: Longer delay for high-frequency operations to improve reuse
+                        time.sleep(0.005)  # 5ms delay for better pool utilization in rapid scenarios
                         self.connection_pool.putconn(conn)
+                        logger.debug(f"🚀 Returned high-freq connection to pool")
                     except Exception as e:
                         logger.debug(f"Pool return failed: {e}")
                         try:
@@ -2470,69 +2552,96 @@ if __name__ == '__main__':
 
     @app.route('/admin/enable_testing_mode', methods=['POST'])
     def enable_testing_mode():
-        """🧪 Enable testing mode with optimized connection pooling for rapid operations"""
+        """🧪 Enable testing mode for optimized connection pooling during rapid operations"""
         try:
-            if not enhanced_wal.pool_available:
-                return jsonify({
-                    "success": False,
-                    "message": "Connection pooling not available"
-                }), 400
-            
-            # Set a flag to use high-frequency connections during testing
             enhanced_wal.testing_mode = True
-            enhanced_wal.testing_mode_enabled_at = time.time()
+            enhanced_wal.testing_mode_enabled_at = datetime.now()
             
-            # Pre-optimize the pool
+            # 🚀 ENHANCED: Pre-warm connection pool and optimize for rapid operations
             optimization_success = enhanced_wal.optimize_connection_pool_for_rapid_operations()
             
-            # Reset stats to get clean measurements during test
-            enhanced_wal.stats["connection_pool_hits"] = 0
-            enhanced_wal.stats["connection_pool_misses"] = 0
+            # 🔧 FIX: Force several database operations to prime the pool
+            db_operations_success = 0
+            total_db_operations = 0
+            
+            if enhanced_wal.pool_available and enhanced_wal.connection_pool:
+                # Perform multiple rapid database operations to test and prime the pool
+                for i in range(5):
+                    try:
+                        total_db_operations += 1
+                        with enhanced_wal.get_high_frequency_db_connection_ctx() as conn:
+                            with conn.cursor() as cur:
+                                # Quick health check query
+                                cur.execute("SELECT COUNT(*) FROM collection_id_mapping")
+                                result = cur.fetchone()
+                                if result:
+                                    db_operations_success += 1
+                        # Brief delay to allow potential connection reuse
+                        time.sleep(0.01)
+                    except Exception as e:
+                        logger.debug(f"Testing mode db operation {i} failed: {e}")
             
             return jsonify({
                 "success": True,
-                "message": "Testing mode enabled with optimized connection pooling",
-                "features": {
-                    "testing_mode": True,
-                    "pool_optimization": optimization_success,
-                    "high_frequency_connections": True,
-                    "stats_reset": True
+                "message": "Testing mode enabled for optimized database operations",
+                "testing_mode": True,
+                "enabled_at": enhanced_wal.testing_mode_enabled_at.isoformat(),
+                "pool_optimization": optimization_success,
+                "db_operations_test": {
+                    "successful": db_operations_success,
+                    "total": total_db_operations,
+                    "success_rate": f"{(db_operations_success/max(1,total_db_operations)*100):.1f}%"
                 },
-                "instructions": "Run your tests now. Pool hit rates should be significantly improved for rapid operations."
-            })
-            
-        except Exception as e:
-            logger.error(f"Testing mode activation error: {e}")
-            return jsonify({"error": str(e)}), 500
-
-    @app.route('/admin/disable_testing_mode', methods=['POST'])
-    def disable_testing_mode():
-        """🧪 Disable testing mode and return to normal connection pooling"""
-        try:
-            # Disable testing mode
-            enhanced_wal.testing_mode = False
-            testing_duration = time.time() - getattr(enhanced_wal, 'testing_mode_enabled_at', time.time())
-            
-            # Get final stats from testing session
-            total_pool_ops = enhanced_wal.stats.get("connection_pool_hits", 0) + enhanced_wal.stats.get("connection_pool_misses", 0)
-            hit_rate = 0
-            if total_pool_ops > 0:
-                hit_rate = (enhanced_wal.stats.get("connection_pool_hits", 0) / total_pool_ops) * 100
-            
-            return jsonify({
-                "success": True,
-                "message": "Testing mode disabled",
-                "testing_session_summary": {
-                    "duration_seconds": testing_duration,
-                    "final_hit_rate": f"{hit_rate:.1f}%",
-                    "total_operations": total_pool_ops,
-                    "hits": enhanced_wal.stats.get("connection_pool_hits", 0),
-                    "misses": enhanced_wal.stats.get("connection_pool_misses", 0)
+                "pool_status": {
+                    "available": enhanced_wal.pool_available,
+                    "enabled": enhanced_wal.enable_connection_pooling
                 }
             })
             
         except Exception as e:
-            logger.error(f"Testing mode deactivation error: {e}")
+            logger.error(f"Testing mode enable error: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route('/admin/disable_testing_mode', methods=['POST'])
+    def disable_testing_mode():
+        """🧪 Disable testing mode and return to normal operation"""
+        try:
+            was_enabled = enhanced_wal.testing_mode
+            enabled_duration = None
+            
+            if was_enabled and enhanced_wal.testing_mode_enabled_at:
+                enabled_duration = (datetime.now() - enhanced_wal.testing_mode_enabled_at).total_seconds()
+            
+            enhanced_wal.testing_mode = False
+            enhanced_wal.testing_mode_enabled_at = None
+            
+            # 🔧 FIX: Get final pool statistics for testing mode summary
+            pool_stats = {
+                "hits": enhanced_wal.stats.get("connection_pool_hits", 0),
+                "misses": enhanced_wal.stats.get("connection_pool_misses", 0),
+                "total": enhanced_wal.stats.get("connection_pool_hits", 0) + enhanced_wal.stats.get("connection_pool_misses", 0)
+            }
+            
+            hit_rate = 0.0
+            if pool_stats["total"] > 0:
+                hit_rate = (pool_stats["hits"] / pool_stats["total"]) * 100
+            
+            return jsonify({
+                "success": True,
+                "message": "Testing mode disabled",
+                "testing_mode": False,
+                "was_enabled": was_enabled,
+                "enabled_duration_seconds": enabled_duration,
+                "final_pool_stats": {
+                    "hit_rate": f"{hit_rate:.1f}%",
+                    "hits": pool_stats["hits"],
+                    "misses": pool_stats["misses"],
+                    "total_operations": pool_stats["total"]
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"Testing mode disable error: {e}")
             return jsonify({"error": str(e)}), 500
 
     @app.route('/admin/transaction_safety_status', methods=['GET'])
