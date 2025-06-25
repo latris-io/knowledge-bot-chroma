@@ -131,6 +131,15 @@ services:
         value: "true"
       - key: SLACK_UPGRADE_ALERTS
         value: "true"
+      # USE CASE 5: Scalability Features (disabled by default for safety)
+      - key: ENABLE_CONNECTION_POOLING
+        value: "false"
+      - key: ENABLE_GRANULAR_LOCKING
+        value: "false"
+      - key: MAX_WORKERS
+        value: "3"
+      - key: MAX_MEMORY_MB
+        value: "400"
 
   # Monitor worker - workers don't support free tier
   - type: worker
