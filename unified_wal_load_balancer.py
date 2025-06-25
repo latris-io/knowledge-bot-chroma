@@ -162,6 +162,30 @@ class UnifiedWALLoadBalancer:
                     connect_timeout=10,
                     application_name='unified-wal-lb-pooled'
                 )
+                
+                # 🔧 FIX: Pre-warm the pool to improve hit rates
+                temp_connections = []
+                for i in range(min(3, min_connections)):
+                    try:
+                        conn = self.connection_pool.getconn()
+                        if conn:
+                            with conn.cursor() as cur:
+                                cur.execute("SELECT 1")
+                            temp_connections.append(conn)
+                    except Exception as e:
+                        logger.debug(f"Pre-warm connection {i} failed: {e}")
+                        break
+                
+                # Return pre-warmed connections to pool
+                for conn in temp_connections:
+                    try:
+                        self.connection_pool.putconn(conn)
+                    except Exception as e:
+                        logger.debug(f"Failed to return pre-warmed connection: {e}")
+                        try:
+                            conn.close()
+                        except:
+                            pass
                 self.pool_available = True
                 logger.info(f"🔗 Connection pool enabled: {min_connections}-{max_connections} connections")
             except Exception as e:
@@ -815,7 +839,8 @@ class UnifiedWALLoadBalancer:
     def get_pending_writes_count(self) -> int:
         """Get count of pending writes for monitoring (high-volume optimized)"""
         try:
-            with self.get_db_connection() as conn:
+            # 🔧 FIX: Use context manager for proper connection pooling
+            with self.get_db_connection_ctx() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
                         SELECT COUNT(*) FROM unified_wal_writes 
@@ -829,7 +854,8 @@ class UnifiedWALLoadBalancer:
     def get_pending_syncs_in_batches(self, target_instance: str, batch_size: int) -> List[SyncBatch]:
         """Get pending writes organized into optimized batches for high-volume processing"""
         try:
-            with self.get_db_connection() as conn:
+            # 🔧 FIX: Use context manager for proper connection pooling
+            with self.get_db_connection_ctx() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     # Get writes that need to be synced to this instance
                     # CRITICAL FIX: Include both 'executed' and 'failed' status for retry

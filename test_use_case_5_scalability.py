@@ -308,7 +308,9 @@ class ScalabilityTester(EnhancedTestBase):
             
             # 🔧 FIX: Force multiple rapid document operations (more database activity)
             print(f"   📄 Adding documents to trigger intensive database operations...")
-            for collection_name in self.test_collections[-10:]:  # Use more recent collections
+            # 🔧 FIX: Use collections created in this test instead of non-existent self.test_collections
+            recent_collections = [f"{self.session_id}_POOL_TEST_{i}" for i in range(max(0, database_operations-10), database_operations)]
+            for collection_name in recent_collections:
                 for doc_id in range(3):  # Multiple docs per collection
                     doc_response = self.make_request(
                         "POST",
@@ -552,8 +554,8 @@ class ScalabilityTester(EnhancedTestBase):
                     response = self.make_request(
                         "POST",
                         "/api/v2/tenants/default_tenant/databases/default_database/collections",
-                        json={"name": collection_name},
-                        timeout=30  # 🔧 FIX: Reasonable timeout
+                        json={"name": collection_name}
+                        # 🔧 FIX: Remove explicit timeout to avoid parameter duplication
                     )
                     
                     if response.status_code in [200, 201]:
@@ -599,8 +601,8 @@ class ScalabilityTester(EnhancedTestBase):
                     response = self.make_request(
                         "POST",
                         "/api/v2/tenants/default_tenant/databases/default_database/collections",
-                        json={"name": collection_name},
-                        timeout=20  # 🔧 FIX: Shorter timeout for stress test
+                        json={"name": collection_name}
+                        # 🔧 FIX: Remove explicit timeout to avoid parameter duplication
                     )
                     
                     if response.status_code in [200, 201]:
