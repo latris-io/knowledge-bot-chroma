@@ -152,9 +152,9 @@ class UnifiedWALLoadBalancer:
             try:
                 # 🔧 FIX: Calculate pool size for high-concurrency workloads  
                 # Each operation can make 10-20 DB calls, so scale pool appropriately
-                # 🔧 EMERGENCY: Drastically reduce pool size due to database connection limits
-                min_connections = 2  # Minimal connections to avoid database overload
-                max_connections = 5   # Very conservative to stay within database limits
+                # 🎯 BALANCED: Optimal pool size for both stability and performance
+                min_connections = 5   # Sufficient base connections 
+                max_connections = 15  # Balanced for burst workloads without DB overload
                 
                 self.connection_pool = psycopg2_pool.ThreadedConnectionPool(
                     minconn=min_connections,
