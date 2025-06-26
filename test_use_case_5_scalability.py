@@ -105,7 +105,10 @@ class ScalabilityTester(EnhancedTestBase):
         start_time = time.time()
         
         try:
-            response = requests.request(method, url, timeout=30, **kwargs)
+            # Set default timeout if not provided in kwargs
+            if 'timeout' not in kwargs:
+                kwargs['timeout'] = 30
+            response = requests.request(method, url, **kwargs)
             response_time = time.time() - start_time
             
             self.log(f"{method} {endpoint} - {response.status_code} ({response_time:.3f}s)")
@@ -290,8 +293,7 @@ class ScalabilityTester(EnhancedTestBase):
                     response = self.make_request(
                         "POST",
                         f"/api/v2/tenants/default_tenant/databases/default_database/collections",
-                        json={"name": collection_name},
-                        timeout=30
+                        json={"name": collection_name}
                     )
                     print(f"🔍 DEBUG: Collection creation response - {response.status_code}")
                     
