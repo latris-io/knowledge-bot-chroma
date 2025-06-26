@@ -540,10 +540,10 @@ class UnifiedWALLoadBalancer:
                         DELETE FROM upgrade_recommendations WHERE created_at < NOW() - INTERVAL '30 days';
                     """)
                     
-                    # Collection ID mapping table for distributed system
+                    # Collection ID mapping table for distributed system (COMPATIBILITY FIX)
                     cur.execute("""
                         CREATE TABLE IF NOT EXISTS collection_id_mapping (
-                            id SERIAL PRIMARY KEY,
+                            mapping_id SERIAL PRIMARY KEY,
                             collection_name VARCHAR(255) UNIQUE NOT NULL,
                             primary_collection_id VARCHAR(255),
                             replica_collection_id VARCHAR(255),
@@ -2066,6 +2066,75 @@ class UnifiedWALLoadBalancer:
         
         return False
 
+    def create_complete_collection_mapping_with_retry(self, collection_name: str, primary_uuid: str, replica_uuid: str, initiated_from: str, max_retries: int = 3) -> bool:
+        """
+        🔧 DISTRIBUTED SYSTEM FIX: Create complete collection mapping with both primary and replica UUIDs
+        """
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"🔧 COMPLETE MAPPING ATTEMPT {attempt + 1}/{max_retries}: Creating complete mapping for {collection_name}")
+                logger.info(f"   Primary UUID: {primary_uuid[:8] if primary_uuid else 'None'}")
+                logger.info(f"   Replica UUID: {replica_uuid[:8] if replica_uuid else 'None'}")
+                logger.info(f"   Initiated from: {initiated_from}")
+                
+                # 🔒 SCALABILITY: Use appropriate lock for collection mapping operations
+                with self._get_appropriate_lock('collection_mapping'):
+                    with self.get_db_connection_ctx() as conn:
+                        with conn.cursor() as cur:
+                            # BULLETPROOF: Create complete mapping with UPSERT
+                            cur.execute("""
+                                INSERT INTO collection_id_mapping 
+                                (collection_name, primary_collection_id, replica_collection_id, created_at) 
+                                VALUES (%s, %s, %s, NOW())
+                                ON CONFLICT (collection_name) DO UPDATE SET
+                                primary_collection_id = COALESCE(EXCLUDED.primary_collection_id, collection_id_mapping.primary_collection_id),
+                                replica_collection_id = COALESCE(EXCLUDED.replica_collection_id, collection_id_mapping.replica_collection_id),
+                                updated_at = NOW()
+                            """, (collection_name, primary_uuid, replica_uuid))
+                            
+                            conn.commit()
+                            
+                            # VALIDATION: Verify complete mapping was created
+                            cur.execute("""
+                                SELECT collection_name, primary_collection_id, replica_collection_id 
+                                FROM collection_id_mapping 
+                                WHERE collection_name = %s
+                            """, (collection_name,))
+                            result = cur.fetchone()
+                            
+                            if result:
+                                _, final_primary_id, final_replica_id = result
+                                logger.info(f"✅ COMPLETE MAPPING VERIFIED: {collection_name}")
+                                logger.info(f"   Final Primary: {final_primary_id[:8] if final_primary_id else 'None'}")
+                                logger.info(f"   Final Replica: {final_replica_id[:8] if final_replica_id else 'None'}")
+                                
+                                # Check if mapping is complete
+                                if final_primary_id and final_replica_id:
+                                    logger.info(f"🎉 COMPLETE MAPPING SUCCESS: {collection_name} fully mapped on both instances")
+                                    return True
+                                else:
+                                    logger.warning(f"⚠️ PARTIAL MAPPING: {collection_name} partially mapped (better than none)")
+                                    return True  # Partial is still success - other instance might be down
+                            else:
+                                logger.error(f"❌ MAPPING VALIDATION FAILED: No mapping found after creation for {collection_name}")
+                                return False
+                            
+            except Exception as e:
+                logger.error(f"❌ COMPLETE MAPPING ATTEMPT {attempt + 1} FAILED for {collection_name}: {e}")
+                
+                if attempt < max_retries - 1:
+                    # Exponential backoff: 0.1s, 0.2s, 0.4s
+                    delay = 0.1 * (2 ** attempt)
+                    logger.info(f"⏳ COMPLETE MAPPING RETRY: Waiting {delay}s before retry {attempt + 2}/{max_retries}")
+                    import time
+                    time.sleep(delay)
+                else:
+                    logger.error(f"💀 COMPLETE MAPPING FATAL: All {max_retries} attempts failed for {collection_name}")
+                    self.stats["mapping_failures"] = self.stats.get("mapping_failures", 0) + 1
+                    return False
+        
+        return False
+
     def optimize_connection_pool_for_rapid_operations(self):
         """🚀 Optimize connection pool configuration for rapid database operations"""
         if not self.pool_available or not self.connection_pool:
@@ -2943,48 +3012,113 @@ if __name__ == '__main__':
             logger.info(f"✅ PROXY_REQUEST: HTTP response received: {response.status_code}")
             logger.info(f"Response: {response.status_code}, Content: {response.text[:100]}")
             
-            # CRITICAL: Create collection mapping for distributed UUID tracking
+            # CRITICAL: Create collection on BOTH instances for distributed system (FIXED v2 functionality)
             if (request.method == 'POST' and 
                 '/collections' in final_path and 
                 response.status_code == 200 and 
                 data):
                 try:
-                    logger.info(f"🔍 PROXY_REQUEST: Creating collection mapping for distributed system...")
+                    logger.info(f"🔍 PROXY_REQUEST: DISTRIBUTED COLLECTION CREATION starting...")
                     
-                    # Parse response to get collection info
+                    # Parse response to get collection info from target instance
                     collection_info = response.json()
                     collection_name = collection_info.get('name')
-                    collection_uuid = collection_info.get('id')
+                    target_collection_uuid = collection_info.get('id')
                     
-                    if collection_name and collection_uuid:
-                        logger.info(f"✅ PROXY_REQUEST: Collection created - name: {collection_name}, UUID: {collection_uuid[:8]} on {target_instance.name}")
+                    if collection_name and target_collection_uuid:
+                        logger.info(f"✅ PROXY_REQUEST: Collection '{collection_name}' created on {target_instance.name} - UUID: {target_collection_uuid[:8]}")
                         
-                        # 🔧 BULLETPROOF: Use new retry-based mapping creation
-                        mapping_success = enhanced_wal.create_collection_mapping_with_retry(
-                            collection_name, 
-                            collection_uuid, 
-                            target_instance.name
-                        )
+                        # 🔧 CRITICAL FIX: Determine other instance correctly
+                        primary_instance = enhanced_wal.get_primary_instance()
+                        replica_instance = enhanced_wal.get_replica_instance()
                         
-                        if mapping_success:
-                            logger.info(f"🎉 PROXY_REQUEST: Collection mapping completed successfully for {collection_name}")
+                        # Determine which is the "other" instance
+                        if target_instance.name == "primary":
+                            other_instance = replica_instance
+                            other_instance_name = "replica"
                         else:
-                            logger.error(f"💀 PROXY_REQUEST: CRITICAL - Collection mapping failed permanently for {collection_name}")
-                            logger.error(f"   Impact: Collection {collection_name} exists but will be inaccessible via load balancer")
-                            logger.error(f"   Recovery: Manual mapping creation required via /admin/create_mapping")
-                            
-                            # CRITICAL: This is now a critical error that should be escalated
-                            # Don't fail the request, but ensure it's monitored and alerted
-                            enhanced_wal.stats["critical_mapping_failures"] = enhanced_wal.stats.get("critical_mapping_failures", 0) + 1
+                            other_instance = primary_instance
+                            other_instance_name = "primary"
                         
-                except Exception as mapping_error:
-                    logger.error(f"❌ PROXY_REQUEST: Collection mapping exception: {mapping_error}")
+                        logger.info(f"🔍 PROXY_REQUEST: Target={target_instance.name}, Other={other_instance_name}")
+                        logger.info(f"🔍 PROXY_REQUEST: Other instance healthy={other_instance.is_healthy if other_instance else 'None'}")
+                        
+                        other_collection_uuid = None
+                        if other_instance and other_instance.is_healthy:
+                            try:
+                                logger.info(f"🔍 PROXY_REQUEST: Creating collection '{collection_name}' on {other_instance_name}...")
+                                
+                                # Build the URL for the other instance
+                                other_url = f"{other_instance.url}{final_path}"
+                                logger.info(f"🔍 PROXY_REQUEST: Other instance URL: {other_url}")
+                                
+                                # Create collection on other instance with same data
+                                import requests
+                                other_response = requests.post(
+                                    other_url,
+                                    headers={'Content-Type': 'application/json'},
+                                    data=data,
+                                    timeout=15
+                                )
+                                
+                                logger.info(f"🔍 PROXY_REQUEST: Other instance response: {other_response.status_code}")
+                                
+                                if other_response.status_code == 200:
+                                    other_collection_info = other_response.json()
+                                    other_collection_uuid = other_collection_info.get('id')
+                                    logger.info(f"✅ PROXY_REQUEST: Collection '{collection_name}' created on {other_instance_name} - UUID: {other_collection_uuid[:8]}")
+                                else:
+                                    logger.warning(f"⚠️ PROXY_REQUEST: Failed to create collection on {other_instance_name}: {other_response.status_code} - {other_response.text[:200]}")
+                                    
+                            except Exception as other_error:
+                                logger.error(f"❌ PROXY_REQUEST: Error creating collection on {other_instance_name}: {other_error}")
+                                import traceback
+                                logger.error(f"Other instance error traceback: {traceback.format_exc()}")
+                        else:
+                            if other_instance:
+                                logger.warning(f"⚠️ PROXY_REQUEST: {other_instance_name} not healthy (healthy={other_instance.is_healthy}) - creating partial mapping")
+                            else:
+                                logger.error(f"❌ PROXY_REQUEST: {other_instance_name} instance not found - creating partial mapping")
+                        
+                        # 🔧 CREATE MAPPING: Create complete mapping with both UUIDs
+                        try:
+                            # Determine primary and replica UUIDs correctly
+                            if target_instance.name == "primary":
+                                primary_uuid = target_collection_uuid
+                                replica_uuid = other_collection_uuid
+                            else:
+                                primary_uuid = other_collection_uuid
+                                replica_uuid = target_collection_uuid
+                            
+                            logger.info(f"🔍 PROXY_REQUEST: Creating mapping - Primary UUID: {primary_uuid[:8] if primary_uuid else 'None'}, Replica UUID: {replica_uuid[:8] if replica_uuid else 'None'}")
+                            
+                            # Create the mapping entry
+                            mapping_success = enhanced_wal.create_complete_collection_mapping_with_retry(
+                                collection_name,
+                                primary_uuid,
+                                replica_uuid,
+                                target_instance.name
+                            )
+                            
+                            if mapping_success:
+                                logger.info(f"🎉 PROXY_REQUEST: Complete distributed collection mapping created for '{collection_name}'")
+                            else:
+                                logger.error(f"💀 PROXY_REQUEST: CRITICAL - Complete mapping failed for '{collection_name}'")
+                                enhanced_wal.stats["critical_mapping_failures"] = enhanced_wal.stats.get("critical_mapping_failures", 0) + 1
+                                
+                        except Exception as mapping_error:
+                            logger.error(f"❌ PROXY_REQUEST: Mapping creation failed: {mapping_error}")
+                            import traceback
+                            logger.error(f"Mapping error traceback: {traceback.format_exc()}")
+                        
+                except Exception as distributed_error:
+                    logger.error(f"❌ PROXY_REQUEST: Distributed collection creation failed: {distributed_error}")
                     import traceback
-                    logger.error(f"Mapping traceback: {traceback.format_exc()}")
+                    logger.error(f"Distributed creation traceback: {traceback.format_exc()}")
                     
                     # ESCALATION: Log critical infrastructure issue
                     enhanced_wal.stats["mapping_exceptions"] = enhanced_wal.stats.get("mapping_exceptions", 0) + 1
-                    logger.error(f"💀 CRITICAL: Collection {collection_info.get('name', 'UNKNOWN')} may be inaccessible via load balancer")
+                    logger.error(f"💀 CRITICAL: Collection {collection_name if 'collection_name' in locals() else 'UNKNOWN'} may be inaccessible via load balancer")
             
             # 🛡️ TRANSACTION SAFETY: Mark transaction as completed
             if transaction_id and enhanced_wal.transaction_safety:
