@@ -3120,6 +3120,105 @@ if __name__ == '__main__':
                     enhanced_wal.stats["mapping_exceptions"] = enhanced_wal.stats.get("mapping_exceptions", 0) + 1
                     logger.error(f"💀 CRITICAL: Collection {collection_name if 'collection_name' in locals() else 'UNKNOWN'} may be inaccessible via load balancer")
             
+            # 🗑️ CRITICAL: DELETE collection from BOTH instances for distributed system (FIX DELETE SYNC ISSUE)
+            elif (request.method == 'DELETE' and 
+                  '/collections/' in final_path and 
+                  response.status_code in [200, 204]):
+                try:
+                    logger.info(f"🔍 PROXY_REQUEST: DISTRIBUTED COLLECTION DELETION starting...")
+                    
+                    # Extract collection name/UUID from path
+                    collection_identifier = final_path.split('/collections/')[-1].split('/')[0] if '/collections/' in final_path else None
+                    
+                    if collection_identifier:
+                        logger.info(f"✅ PROXY_REQUEST: Collection '{collection_identifier}' deleted from {target_instance.name}")
+                        
+                        # 🔧 CRITICAL FIX: Determine other instance correctly
+                        primary_instance = enhanced_wal.get_primary_instance()
+                        replica_instance = enhanced_wal.get_replica_instance()
+                        
+                        # Determine which is the "other" instance
+                        if target_instance.name == "primary":
+                            other_instance = replica_instance
+                            other_instance_name = "replica"
+                        else:
+                            other_instance = primary_instance
+                            other_instance_name = "primary"
+                        
+                        logger.info(f"🔍 PROXY_REQUEST: Target={target_instance.name}, Other={other_instance_name}")
+                        logger.info(f"🔍 PROXY_REQUEST: Other instance healthy={other_instance.is_healthy if other_instance else 'None'}")
+                        
+                        # Delete from other instance as well
+                        if other_instance and other_instance.is_healthy:
+                            try:
+                                logger.info(f"🔍 PROXY_REQUEST: Deleting collection '{collection_identifier}' from {other_instance_name}...")
+                                
+                                # Build the URL for the other instance
+                                other_url = f"{other_instance.url}{final_path}"
+                                logger.info(f"🔍 PROXY_REQUEST: Other instance DELETE URL: {other_url}")
+                                
+                                # Delete collection from other instance
+                                import requests
+                                other_response = requests.delete(
+                                    other_url,
+                                    timeout=15
+                                )
+                                
+                                logger.info(f"🔍 PROXY_REQUEST: Other instance DELETE response: {other_response.status_code}")
+                                
+                                if other_response.status_code in [200, 204, 404]:  # 404 is OK - already deleted
+                                    logger.info(f"✅ PROXY_REQUEST: Collection '{collection_identifier}' deleted from {other_instance_name} - Status: {other_response.status_code}")
+                                else:
+                                    logger.warning(f"⚠️ PROXY_REQUEST: Failed to delete collection from {other_instance_name}: {other_response.status_code} - {other_response.text[:200]}")
+                                    
+                            except Exception as other_error:
+                                logger.error(f"❌ PROXY_REQUEST: Error deleting collection from {other_instance_name}: {other_error}")
+                                import traceback
+                                logger.error(f"Other instance DELETE error traceback: {traceback.format_exc()}")
+                        else:
+                            if other_instance:
+                                logger.warning(f"⚠️ PROXY_REQUEST: {other_instance_name} not healthy (healthy={other_instance.is_healthy}) - DELETE incomplete")
+                            else:
+                                logger.error(f"❌ PROXY_REQUEST: {other_instance_name} instance not found - DELETE incomplete")
+                        
+                        # 🔧 DELETE MAPPING: Remove collection mapping from database
+                        try:
+                            logger.info(f"🔍 PROXY_REQUEST: Removing collection mapping for '{collection_identifier}'...")
+                            
+                            # 🔒 SCALABILITY: Use appropriate lock for collection mapping operations
+                            with enhanced_wal._get_appropriate_lock('collection_mapping'):
+                                with enhanced_wal.get_db_connection_ctx() as conn:
+                                    with conn.cursor() as cur:
+                                        # Delete mapping by collection name or UUID
+                                        cur.execute("""
+                                            DELETE FROM collection_id_mapping 
+                                            WHERE collection_name = %s 
+                                               OR primary_collection_id = %s 
+                                               OR replica_collection_id = %s
+                                        """, (collection_identifier, collection_identifier, collection_identifier))
+                                        
+                                        deleted_count = cur.rowcount
+                                        conn.commit()
+                                        
+                                        if deleted_count > 0:
+                                            logger.info(f"✅ PROXY_REQUEST: Removed {deleted_count} collection mapping(s) for '{collection_identifier}'")
+                                        else:
+                                            logger.warning(f"⚠️ PROXY_REQUEST: No collection mapping found for '{collection_identifier}' to remove")
+                                
+                        except Exception as mapping_error:
+                            logger.error(f"❌ PROXY_REQUEST: Mapping deletion failed: {mapping_error}")
+                            import traceback
+                            logger.error(f"Mapping deletion error traceback: {traceback.format_exc()}")
+                        
+                except Exception as distributed_delete_error:
+                    logger.error(f"❌ PROXY_REQUEST: Distributed collection deletion failed: {distributed_delete_error}")
+                    import traceback
+                    logger.error(f"Distributed deletion traceback: {traceback.format_exc()}")
+                    
+                    # Log issue but don't fail the request - the primary deletion succeeded
+                    enhanced_wal.stats["delete_sync_failures"] = enhanced_wal.stats.get("delete_sync_failures", 0) + 1
+                    logger.warning(f"⚠️ DELETE SYNC: Collection may be orphaned on other instance")
+            
             # 🛡️ TRANSACTION SAFETY: Mark transaction as completed
             if transaction_id and enhanced_wal.transaction_safety:
                 try:
