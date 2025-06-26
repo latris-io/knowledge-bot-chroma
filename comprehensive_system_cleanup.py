@@ -193,19 +193,23 @@ class ComprehensiveSystemCleanup:
             return {'success': False, 'error': str(e)}
     
     def delete_collection_with_retry(self, instance_url, collection_name, instance_name, max_retries=2):
-        """Delete collection with retry logic for temporary server errors (502, timeouts, etc.)"""
+        """Delete collection with retry logic for temporary server errors (502, timeouts, etc.)
+        
+        CRITICAL FIX: Now uses load balancer for distributed DELETE operations
+        """
         import time
         
         for attempt in range(max_retries + 1):
             try:
-                # Try delete by name first (better for V2 API)
+                # CRITICAL FIX: Use load balancer URL instead of instance URL
+                # This triggers the distributed DELETE logic that removes collections from BOTH instances
                 delete_response = requests.delete(
-                    f"{instance_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}",
+                    f"{self.load_balancer_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}",
                     timeout=30
                 )
                 
                 if delete_response.status_code in [200, 404]:  # Success or already deleted
-                    logger.info(f"    ✅ Deleted test collection: {collection_name}")
+                    logger.info(f"    ✅ Deleted test collection via load balancer: {collection_name}")
                     return True
                     
                 elif delete_response.status_code == 502 and attempt < max_retries:
@@ -252,8 +256,11 @@ class ComprehensiveSystemCleanup:
         return False
     
     def cleanup_chromadb_collections(self, instance_url, instance_name):
-        """Clean up ONLY test collections from a ChromaDB instance - PROTECTS PRODUCTION DATA"""
-        logger.info(f"🧹 Cleaning {instance_name} ChromaDB collections...")
+        """Clean up ONLY test collections via load balancer - PROTECTS PRODUCTION DATA
+        
+        CRITICAL UPDATE: Now uses load balancer for distributed DELETE operations
+        """
+        logger.info(f"🧹 Cleaning test collections via load balancer (distributed DELETE)...")
         
         # 🚨 CRITICAL: PROTECTED PRODUCTION COLLECTIONS 🚨
         PROTECTED_COLLECTIONS = [
