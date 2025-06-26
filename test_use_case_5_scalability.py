@@ -243,182 +243,112 @@ class ScalabilityTester(EnhancedTestBase):
             return False
     
     def test_connection_pooling_optimization(self):
-        """🔗 Phase 2: Test connection pooling for DATABASE operations (not HTTP APIs)"""
-        print(f"\n🔗 Testing Connection Pooling Features...")
-        print(f"   💡 Testing ACTUAL database operations that use connection pooling")
-        print(f"   📍 HTTP API calls naturally bypass pooling - that's architectural")
+        """Test connection pooling optimization features"""
+        print("\n" + "="*80)
+        print("🔗 TESTING: Connection Pooling Optimization")
+        print("="*80)
+        
+        # 🔍 DEBUG: Check initial connection pooling status
+        print("🔍 DEBUG: Checking initial connection pooling status...")
+        try:
+            status_response = requests.get(f"{self.base_url}/admin/scalability_status", timeout=30)
+            if status_response.status_code == 200:
+                status_data = status_response.json()
+                print(f"🔍 DEBUG: Initial status - {status_data}")
+            else:
+                print(f"🔍 DEBUG: Status check failed - {status_response.status_code}")
+        except Exception as e:
+            print(f"🔍 DEBUG: Status check exception - {e}")
         
         try:
-            # Initialize variables for error handling
-            hit_rate = 0.0
-            test_total = 0
-            success_rate = 0.0
-            success = False
+            # Reset stats before testing
+            print("🔍 DEBUG: Resetting connection pool stats...")
+            reset_response = requests.post(f"{self.base_url}/admin/reset_stats", timeout=30)
+            print(f"🔍 DEBUG: Reset response - {reset_response.status_code}")
             
-            # 🧪 ENABLE TESTING MODE for high-frequency database connections
-            print(f"   🧪 Enabling testing mode for optimized database operations...")
-            enable_response = self.make_request("POST", "/admin/enable_testing_mode", json={})
-            if enable_response.status_code != 200:
-                print(f"   ⚠️ Testing mode enable failed: {enable_response.status_code}")
+            # Get baseline stats  
+            print("🔍 DEBUG: Getting baseline stats...")
+            baseline_response = requests.get(f"{self.base_url}/status", timeout=30)
+            if baseline_response.status_code == 200:
+                baseline_data = baseline_response.json()
+                baseline_hits = baseline_data.get('performance_stats', {}).get('connection_pool_hits', 0)
+                baseline_misses = baseline_data.get('performance_stats', {}).get('connection_pool_misses', 0)
+                print(f"🔍 DEBUG: Baseline - hits={baseline_hits}, misses={baseline_misses}")
             else:
-                print(f"   ✅ Testing mode enabled for database optimization")
+                print(f"🔍 DEBUG: Baseline check failed - {baseline_response.status_code}")
+                baseline_hits = baseline_misses = 0
             
-            # 🔧 OPTIMIZE CONNECTION POOL for high-frequency operations
-            print(f"   🔧 Optimizing connection pool for high database activity...")
-            optimize_response = self.make_request("POST", "/admin/optimize_connection_pool", json={})
-            if optimize_response.status_code == 200:
-                print(f"   ✅ Connection pool optimized for testing")
+            # Test database operations that should use connection pooling
+            print("🔍 DEBUG: Starting database operations test...")
+            operations_completed = 0
             
-            # 📊 GET BASELINE connection pool stats
-            baseline_status = self.make_request("GET", "/admin/scalability_status")
-            if baseline_status.status_code == 200:
-                baseline_data = baseline_status.json()
-                baseline_hits = baseline_data.get('performance_stats', {}).get('hits', 0)
-                baseline_misses = baseline_data.get('performance_stats', {}).get('misses', 0)
-                baseline_total = baseline_hits + baseline_misses
-                print(f"   📊 Baseline: {baseline_hits:,} hits, {baseline_misses:,} misses, {baseline_total:,} total")
-            else:
-                baseline_hits = baseline_misses = baseline_total = 0
-                print(f"   ⚠️ Could not get baseline stats")
-            
-            # 🎯 FORCE DATABASE OPERATIONS that actually use connection pooling
-            print(f"   🎯 Creating high-frequency database operations...")
-            database_operations = 0
-            successful_db_ops = 0
-            
-            # 🔧 FIX: Force rapid WAL operations that use database connections
-            for i in range(20):  # More operations to stress the pool
-                collection_name = f"{self.session_id}_POOL_TEST_{i}"
+            for i in range(5):
+                collection_name = f"pool_test_{int(time.time())}_{i}"
+                print(f"🔍 DEBUG: Creating collection {i+1}/5 - {collection_name}")
                 
-                # This creates: HTTP request + WAL logging + collection mapping (database operations)
-                response = self.make_request(
-                    "POST", 
-                    "/api/v2/tenants/default_tenant/databases/default_database/collections",
-                    json={"name": collection_name}
-                )
-                
-                database_operations += 2  # WAL + mapping operations per collection
-                
-                if response.status_code in [200, 201]:
-                    successful_db_ops += 2
-                    self.track_collection(collection_name)
-                
-                # 🔧 FIX: No delay to force rapid connection reuse
-                # time.sleep(0.05)  # Remove delay to stress the pool more
-            
-            # 🔧 FIX: Force multiple rapid document operations (more database activity)
-            print(f"   📄 Adding documents to trigger intensive database operations...")
-            # 🔧 FIX: Use collections created in this test instead of non-existent self.test_collections
-            recent_collections = [f"{self.session_id}_POOL_TEST_{i}" for i in range(max(0, database_operations-10), database_operations)]
-            for collection_name in recent_collections:
-                for doc_id in range(3):  # Multiple docs per collection
-                    doc_response = self.make_request(
+                try:
+                    response = self.make_request(
                         "POST",
-                        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/add",
-                        json={
-                            "documents": [f"Rapid test document {doc_id} for pool testing"],
-                            "metadatas": [{"test_type": "connection_pooling", "session": self.session_id, "doc_id": doc_id}],
-                            "ids": [f"pool_test_{doc_id}"]
-                        }
+                        f"/api/v2/tenants/default_tenant/databases/default_database/collections",
+                        json={"name": collection_name},
+                        timeout=30
                     )
+                    print(f"🔍 DEBUG: Collection creation response - {response.status_code}")
                     
-                    database_operations += 1  # WAL logging operation
-                    if doc_response.status_code in [200, 201]:
-                        successful_db_ops += 1
+                    if response.status_code in [200, 201]:
+                        operations_completed += 1
+                        print(f"🔍 DEBUG: Success - {operations_completed} operations completed")
+                    else:
+                        print(f"🔍 DEBUG: Failed - response: {response.text[:200]}")
+                        
+                except Exception as e:
+                    print(f"🔍 DEBUG: Collection creation exception - {e}")
                     
-                    # No delay between operations to stress connection reuse
+                # Brief pause between operations
+                time.sleep(1)
             
-            # 🔧 FIX: Force multiple WAL sync operations to stress database pool
-            print(f"   🔄 Triggering multiple WAL sync operations to stress connection pool...")
-            for i in range(3):  # Multiple sync operations
-                wal_trigger_response = self.make_request("POST", "/admin/test_wal", json={"force_sync": True})
-                if wal_trigger_response.status_code == 200:
-                    database_operations += 5  # Estimated DB operations during WAL sync
-                    successful_db_ops += 5
-                    print(f"   ✅ WAL sync {i+1}/3 triggered successfully")
-                # Brief pause between syncs to allow pool reuse
-                time.sleep(0.1)
+            print(f"🔍 DEBUG: Completed {operations_completed}/5 operations")
             
-            # Wait for all operations to complete
-            print(f"   ⏳ Waiting for database operations to complete...")
-            time.sleep(2)  # Reduced wait time
+            # Wait for operations to complete
+            print("🔍 DEBUG: Waiting 5 seconds for operations to complete...")
+            time.sleep(5)
             
-            # 📊 GET FINAL connection pool stats
-            final_status = self.make_request("GET", "/admin/scalability_status")
-            if final_status.status_code == 200:
-                final_data = final_status.json()
-                final_hits = final_data.get('performance_stats', {}).get('hits', 0)
-                final_misses = final_data.get('performance_stats', {}).get('misses', 0)
-                final_total = final_hits + final_misses
+            # Get final stats
+            print("🔍 DEBUG: Getting final stats...")
+            final_response = requests.get(f"{self.base_url}/status", timeout=30)
+            if final_response.status_code == 200:
+                final_data = final_response.json()
+                final_hits = final_data.get('performance_stats', {}).get('connection_pool_hits', 0)
+                final_misses = final_data.get('performance_stats', {}).get('connection_pool_misses', 0)
+                print(f"🔍 DEBUG: Final - hits={final_hits}, misses={final_misses}")
                 
-                # Calculate the change during our test
+                # Calculate test-specific stats
                 test_hits = final_hits - baseline_hits
                 test_misses = final_misses - baseline_misses
                 test_total = test_hits + test_misses
                 
-                # 🔧 FIX: Calculate hit rate for DATABASE operations only
+                print(f"🔍 DEBUG: Test period - hits={test_hits}, misses={test_misses}, total={test_total}")
+                
                 if test_total > 0:
                     hit_rate = (test_hits / test_total) * 100
+                    print(f"🔍 DEBUG: Test hit rate = {hit_rate:.1f}%")
                 else:
                     hit_rate = 0.0
-                
-                # 🔧 FIX: Calculate global hit rate for fallback validation
-                if final_total > 0:
-                    global_hit_rate = (final_hits / final_total) * 100
-                else:
-                    global_hit_rate = 0.0
-                
-                print(f"   📊 Final: {final_hits:,} hits, {final_misses:,} misses, {final_total:,} total")
-                print(f"   🎯 Test period: {test_hits} hits, {test_misses} misses, {test_total} total")
-                print(f"   📈 Database operations hit rate: {hit_rate:.1f}%")
-                print(f"   🔢 Expected database operations: {database_operations}")
-                print(f"   ✅ Successful database operations: {successful_db_ops}")
-                
-                # 🎯 REALISTIC SUCCESS CRITERIA for connection pooling
-                # Connection pooling should provide meaningful benefits, not just "any evidence"
-                if test_total >= 10:  # Ensure we had meaningful database activity
-                    if hit_rate >= 30.0:  # Minimum acceptable hit rate for effective pooling
-                        print(f"   🎉 CONNECTION POOLING SUCCESS: {hit_rate:.1f}% hit rate (good performance)")
-                        success_rate = 100.0
-                        success = True
-                    elif hit_rate >= 15.0:  # Marginal but acceptable
-                        print(f"   ⚠️ CONNECTION POOLING MARGINAL: {hit_rate:.1f}% hit rate (needs optimization)")
-                        success_rate = 70.0
-                        success = True
-                    elif hit_rate >= 5.0:  # Poor performance
-                        print(f"   ❌ CONNECTION POOLING POOR: {hit_rate:.1f}% hit rate (significant issues)")
-                        success_rate = 40.0
-                        success = False
-                    else:  # Effectively not working
-                        print(f"   ❌ CONNECTION POOLING FAILED: {hit_rate:.1f}% hit rate (pooling not working)")
-                        success_rate = 20.0
-                        success = False
-                else:
-                    print(f"   ⚠️ Insufficient database operations for meaningful testing: {test_total}")
-                    success_rate = 0.0
-                    success = False
-                
+                    print(f"🔍 DEBUG: No database operations detected during test")
+                    
             else:
-                print(f"   ❌ Could not get final scalability status: {final_status.status_code}")
-                success_rate = 0.0
-                success = False
+                print(f"🔍 DEBUG: Final stats check failed - {final_response.status_code}")
+                test_hits = test_misses = test_total = 0
+                hit_rate = 0.0
             
-            # 🧪 DISABLE TESTING MODE
-            print(f"   🧪 Disabling testing mode...")
-            disable_response = self.make_request("POST", "/admin/disable_testing_mode", json={})
-            if disable_response.status_code == 200:
-                print(f"   ✅ Testing mode disabled")
+            # Record test result
+            self.record_test_result("connection_pooling_optimization", hit_rate >= 30.0,
+                                  f"Success rate: {hit_rate:.1f}%")
             
-            # Record test result properly using the framework method
-            self.record_test_result("connection_pooling_optimization", success,
-                                  f"Success rate: {success_rate:.1f}%, Hit rate: {hit_rate:.1f}%, "
-                                  f"Database ops: {test_total}")
-            
-            print(f"   📊 Connection Pooling Test: {success_rate:.1f}% success")
-            return success
+            return hit_rate >= 30.0
             
         except Exception as e:
-            print(f"   ❌ Connection pooling test failed: {e}")
+            self.log(f"❌ Connection pooling test failed: {e}")
             import traceback
             print(f"   🔍 Traceback: {traceback.format_exc()}")
             self.record_test_result("connection_pooling_optimization", False, f"Test failed: {str(e)}")

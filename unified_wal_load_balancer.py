@@ -311,57 +311,59 @@ class UnifiedWALLoadBalancer:
 
     @contextlib.contextmanager
     def get_db_connection_ctx(self):
-        """🔗 Enhanced database connection with pooling support and improved reuse"""
+        """🔗 OPTIMIZED database connection with efficient pooling support"""
         conn = None
-        connection_source = "direct"
+        connection_source = "direct"  
+        start_time = time.time()
+        
+        # 🔍 DEBUG: Connection request initiated
+        logger.info(f"🔍 DEBUG: Connection request started - pool_available={self.pool_available}, enable_connection_pooling={self.enable_connection_pooling}")
+        
         try:
-            # 🚀 ENHANCED: Try pool first with better connection management
+            # 🚀 OPTIMIZED: Try pool first with minimal overhead
             if self.pool_available and self.connection_pool:
                 try:
+                    logger.info(f"🔍 DEBUG: Attempting to get connection from pool")
                     conn = self.connection_pool.getconn()
                     if conn:
-                        # ✅ NO CONNECTION TESTING - trust the pool for massive performance gain!
+                        # ✅ NO CONNECTION TESTING - trust the pool!
                         self.stats["connection_pool_hits"] += 1
                         connection_source = "pool"
-                        logger.debug(f"🔗 Using pooled connection (hits: {self.stats['connection_pool_hits']})")
+                        elapsed = time.time() - start_time
+                        logger.info(f"🔍 DEBUG: SUCCESS - Pool connection obtained in {elapsed:.3f}s (hits: {self.stats['connection_pool_hits']}, misses: {self.stats['connection_pool_misses']})")
                     else:
+                        logger.info(f"🔍 DEBUG: Pool returned None connection")
                         self.stats["connection_pool_misses"] += 1
-                        conn = None
                 except Exception as e:
-                    logger.debug(f"Pool connection failed: {e}")
+                    logger.info(f"🔍 DEBUG: Pool connection failed: {e}")
                     self.stats["connection_pool_misses"] += 1
-                    conn = None
-            
-            # Fallback to direct connection if pool failed
-            if conn is None:
-                conn = psycopg2.connect(
-                    self.database_url,
-                    connect_timeout=10,
-                    application_name='unified-wal-lb-direct'
-                )
-                # ❌ DON'T double-count misses - only count if pooling was supposed to work
+                    
+            # Direct connection fallback  
+            if not conn:
+                logger.info(f"🔍 DEBUG: Creating direct connection (pool_available={self.pool_available})")
+                conn = psycopg2.connect(self.db_url)
                 connection_source = "direct"
-                logger.debug(f"🔗 Using direct connection (misses: {self.stats['connection_pool_misses']})")
-            
+                if not self.pool_available:
+                    self.stats["connection_pool_misses"] += 1
+                    
+            elapsed = time.time() - start_time
+            logger.info(f"🔍 DEBUG: Connection established - source={connection_source}, time={elapsed:.3f}s")
             yield conn
             
         finally:
             if conn:
-                if connection_source == "pool" and self.pool_available and self.connection_pool:
-                    try:
+                try:
+                    if connection_source == "pool" and self.connection_pool:
                         # ✅ NO ARTIFICIAL DELAYS - return immediately for better reuse
+                        logger.info(f"🔍 DEBUG: Returning connection to pool")
                         self.connection_pool.putconn(conn)
-                        logger.debug(f"🔗 Returned connection to pool")
-                    except Exception as e:
-                        logger.debug(f"Pool return failed: {e}")
-                        try:
-                            conn.close()
-                        except:
-                            pass
-                else:
+                    else:
+                        logger.info(f"🔍 DEBUG: Closing direct connection")
+                        conn.close()
+                except Exception as e:
+                    logger.info(f"🔍 DEBUG: Error handling connection cleanup: {e}")
                     try:
                         conn.close()
-                        logger.debug(f"🔗 Closed direct connection")
                     except:
                         pass
 
