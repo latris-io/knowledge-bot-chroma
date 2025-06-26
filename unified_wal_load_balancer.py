@@ -2910,10 +2910,51 @@ if __name__ == '__main__':
             data = request.get_data() if request.method in ['POST', 'PUT', 'PATCH'] else None
             logger.info(f"✅ PROXY_REQUEST: Request data size: {len(data) if data else 0} bytes")
             
-            # CRITICAL: WAL logging for write operations (restores auto-mapping)
+            # CRITICAL: WAL logging for write operations (FIXED: Only log operations that need sync)
             logger.info(f"🔍 PROXY_REQUEST: Checking if write operation: {request.method}")
+            
+            # 🔧 CRITICAL FIX: Only log operations that NEED WAL sync
+            # Collection creation/deletion are handled by distributed system - DON'T log them
+            # Document operations need WAL sync - DO log them
+            should_log_to_wal = False
+            operation_type = "unknown"
+            
+            # 🔍 DEBUG: Log path analysis for troubleshooting
+            logger.info(f"🔍 WAL_DEBUG: Analyzing path '{final_path}' for method '{request.method}'")
+            logger.info(f"🔍 WAL_DEBUG: Path slash count: {final_path.count('/')}")
+            
             if request.method in ['POST', 'PUT', 'PATCH', 'DELETE']:
-                logger.info(f"🎯 PROXY_REQUEST: WRITE OPERATION DETECTED - Starting WAL logging")
+                # Determine operation type for WAL logging decision
+                if request.method == 'POST' and '/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
+                    operation_type = "collection_creation"
+                    should_log_to_wal = False  # Distributed creation handles this
+                    logger.info(f"🔍 PROXY_REQUEST: COLLECTION CREATION - Will use distributed creation (no WAL)")
+                
+                elif request.method == 'DELETE' and '/collections/' in final_path and final_path.count('/') <= 8:  # DELETE /collections/{id} - FIX: 8 slashes in V2 API
+                    operation_type = "collection_deletion"
+                    should_log_to_wal = False  # Distributed deletion handles this
+                    logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Will use distributed deletion (no WAL)")
+                
+                elif '/collections/' in final_path and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
+                    operation_type = "document_operation"
+                    should_log_to_wal = True  # Document operations need WAL sync
+                    logger.info(f"🔍 PROXY_REQUEST: DOCUMENT OPERATION - Will log to WAL for sync")
+                
+                elif request.method in ['PUT', 'PATCH']:
+                    operation_type = "update_operation"
+                    should_log_to_wal = True  # Update operations need WAL sync
+                    logger.info(f"🔍 PROXY_REQUEST: UPDATE OPERATION - Will log to WAL for sync")
+                
+                else:
+                    operation_type = "other_write"
+                    should_log_to_wal = True  # Other writes need WAL sync by default
+                    logger.info(f"🔍 PROXY_REQUEST: OTHER WRITE OPERATION - Will log to WAL for sync")
+            
+            # 🔍 DEBUG: Log final decision
+            logger.info(f"🔍 WAL_DEBUG: Final decision - operation_type='{operation_type}', should_log_to_wal={should_log_to_wal}")
+            
+            if should_log_to_wal:
+                logger.info(f"🎯 PROXY_REQUEST: WRITE OPERATION DETECTED - Starting WAL logging for {operation_type}")
                 try:
                     logger.info(f"🔍 WAL logging check: method={request.method}, target={target_instance.name}")
                     
@@ -2996,7 +3037,7 @@ if __name__ == '__main__':
                     logger.error(f"WAL error traceback: {traceback.format_exc()}")
                     # Continue anyway - don't fail request for WAL issues
             else:
-                logger.info(f"ℹ️ PROXY_REQUEST: READ OPERATION - No WAL logging needed")
+                logger.info(f"ℹ️ PROXY_REQUEST: {operation_type.upper()} - Using distributed system (no WAL logging needed)")
             
             # Make request with proven working approach
             logger.info(f"🔍 PROXY_REQUEST: Making HTTP request to target...")
