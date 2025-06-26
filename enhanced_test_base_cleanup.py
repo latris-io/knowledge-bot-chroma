@@ -300,32 +300,23 @@ class EnhancedTestBase:
                             cleanup_results['failed_cleanups'] += 1
                             logger.warning(f"     ⚠️ Error deleting documents from {collection_name}: {e}")
                 
-                # CRITICAL FIX: Clean collections from BOTH instances directly  
+                # FIXED: Use load balancer for distributed DELETE (triggers distributed DELETE logic)
                 for collection_name in test_info['collections']:
                     try:
-                        logger.debug(f"     Deleting collection from both instances: {collection_name}")
+                        logger.debug(f"     Deleting collection via load balancer: {collection_name}")
                         
-                        # Delete from primary instance
-                        primary_response = self.make_request(
+                        # Use load balancer DELETE - triggers distributed DELETE logic automatically
+                        response = self.make_request(
                             'DELETE',
-                            f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+                            f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
                         )
                         
-                        # Delete from replica instance  
-                        replica_response = self.make_request(
-                            'DELETE',
-                            f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
-                        )
-                        
-                        primary_success = primary_response.status_code in [200, 404]
-                        replica_success = replica_response.status_code in [200, 404]
-                        
-                        if primary_success and replica_success:
+                        if response.status_code in [200, 204, 404]:  # 404 = already deleted
                             cleanup_results['collections_deleted'] += 1
-                            logger.debug(f"     ✅ Deleted collection from both instances: {collection_name}")
+                            logger.debug(f"     ✅ Deleted collection via load balancer: {collection_name}")
                         else:
                             cleanup_results['failed_cleanups'] += 1
-                            logger.warning(f"     ⚠️ Partial deletion of {collection_name} - Primary: {primary_response.status_code}, Replica: {replica_response.status_code}")
+                            logger.warning(f"     ⚠️ Failed to delete collection {collection_name} via load balancer: {response.status_code}")
                             
                     except Exception as e:
                         cleanup_results['failed_cleanups'] += 1
@@ -428,30 +419,21 @@ class EnhancedTestBase:
                 except Exception as e:
                     cleanup_results['failed_cleanups'] += 1
         
-        # CRITICAL FIX: Clean collections from BOTH instances directly
+        # FIXED: Use load balancer for distributed DELETE (triggers distributed DELETE logic)
         for collection_name in all_collections:
             try:
-                # Delete from primary instance
-                primary_response = self.make_request(
+                # Use load balancer DELETE - triggers distributed DELETE logic automatically
+                response = self.make_request(
                     'DELETE',
-                    f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
                 )
                 
-                # Delete from replica instance
-                replica_response = self.make_request(
-                    'DELETE', 
-                    f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
-                )
-                
-                primary_success = primary_response.status_code in [200, 404]
-                replica_success = replica_response.status_code in [200, 404]
-                
-                if primary_success and replica_success:
+                if response.status_code in [200, 204, 404]:  # 404 = already deleted
                     cleanup_results['collections_deleted'] += 1
                     logger.info(f"  ✅ Deleted collection: {collection_name}")
                 else:
                     cleanup_results['failed_cleanups'] += 1
-                    logger.warning(f"  ⚠️ Partial deletion of {collection_name} - Primary: {primary_response.status_code}, Replica: {replica_response.status_code}")
+                    logger.warning(f"  ⚠️ Failed to delete collection {collection_name} via load balancer: {response.status_code}")
                     
             except Exception as e:
                 cleanup_results['failed_cleanups'] += 1
