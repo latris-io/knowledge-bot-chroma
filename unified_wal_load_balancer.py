@@ -341,7 +341,7 @@ class UnifiedWALLoadBalancer:
             # Direct connection fallback  
             if not conn:
                 logger.info(f"🔍 DEBUG: Creating direct connection (pool_available={self.pool_available})")
-                conn = psycopg2.connect(self.db_url)
+                conn = psycopg2.connect(self.database_url)
                 connection_source = "direct"
                 if not self.pool_available:
                     self.stats["connection_pool_misses"] += 1
