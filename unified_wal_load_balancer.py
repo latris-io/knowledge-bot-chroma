@@ -2935,10 +2935,15 @@ if __name__ == '__main__':
                     should_log_to_wal = False  # Distributed deletion handles this
                     logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Will use distributed deletion (no WAL)")
                 
-                elif '/collections/' in final_path and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
-                    operation_type = "document_operation"
-                    should_log_to_wal = True  # Document operations need WAL sync
-                    logger.info(f"🔍 PROXY_REQUEST: DOCUMENT OPERATION - Will log to WAL for sync")
+                elif '/collections/' in final_path and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update', '/delete']):  # FIXED: Only WRITE operations
+                    operation_type = "document_write_operation"
+                    should_log_to_wal = True  # Document WRITE operations need WAL sync
+                    logger.info(f"🔍 PROXY_REQUEST: DOCUMENT WRITE OPERATION - Will log to WAL for sync")
+                
+                elif '/collections/' in final_path and any(read_op in final_path for read_op in ['/get', '/query', '/count']):  # READ operations
+                    operation_type = "document_read_operation"
+                    should_log_to_wal = False  # Read operations don't need WAL sync
+                    logger.info(f"🔍 PROXY_REQUEST: DOCUMENT READ OPERATION - No WAL logging needed (read-only)")
                 
                 elif request.method in ['PUT', 'PATCH']:
                     operation_type = "update_operation"
