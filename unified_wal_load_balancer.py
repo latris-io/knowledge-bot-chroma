@@ -2413,7 +2413,7 @@ if __name__ == '__main__':
             if enhanced_wal is None:
                 return jsonify({"error": "WAL system not ready"}), 503
             
-            with enhanced_wal.get_db_connection() as conn:
+            with enhanced_wal.get_db_connection_ctx() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
                         SELECT collection_name, primary_collection_id, replica_collection_id, 
@@ -2452,7 +2452,7 @@ if __name__ == '__main__':
     def wal_errors():
         """Get recent WAL sync errors for debugging"""
         try:
-            with enhanced_wal.get_db_connection() as conn:
+            with enhanced_wal.get_db_connection_ctx() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
                         SELECT write_id, method, path, error_message, updated_at, retry_count
@@ -2675,7 +2675,7 @@ if __name__ == '__main__':
             # If available, get transaction statistics
             if transaction_safety_available:
                 try:
-                    with enhanced_wal.get_db_connection() as conn:
+                    with enhanced_wal.get_db_connection_ctx() as conn:
                         with conn.cursor() as cur:
                             # Check if table exists
                             cur.execute("""
@@ -2758,7 +2758,7 @@ if __name__ == '__main__':
             
             # 🔒 SCALABILITY: Use appropriate lock for collection mapping operations
             with enhanced_wal._get_appropriate_lock('collection_mapping'):
-                with enhanced_wal.get_db_connection() as conn:
+                with enhanced_wal.get_db_connection_ctx() as conn:
                     with conn.cursor() as cur:
                         # Try the same INSERT that's failing
                         cur.execute("""
@@ -2882,7 +2882,7 @@ if __name__ == '__main__':
                             logger.info(f"✅ PROXY_REQUEST: Database lock acquired")
                             
                             logger.info(f"🔍 PROXY_REQUEST: Getting database connection...")
-                            with enhanced_wal.get_db_connection() as conn:
+                            with enhanced_wal.get_db_connection_ctx() as conn:
                                 logger.info(f"✅ PROXY_REQUEST: Database connection established")
                                 
                                 logger.info(f"🔍 PROXY_REQUEST: Creating cursor...")
