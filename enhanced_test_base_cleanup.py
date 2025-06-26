@@ -233,7 +233,10 @@ class EnhancedTestBase:
     def make_request(self, method, url, **kwargs):
         """Make HTTP request with error handling and logging"""
         try:
-            response = requests.request(method, url, timeout=30, **kwargs)
+            # Set default timeout if not provided in kwargs
+            if 'timeout' not in kwargs:
+                kwargs['timeout'] = 30
+            response = requests.request(method, url, **kwargs)
             return response
         except Exception as e:
             logger.error(f"❌ Request failed: {method} {url} - {e}")
