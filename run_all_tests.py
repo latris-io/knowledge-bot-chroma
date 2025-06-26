@@ -165,6 +165,66 @@ class ProductionValidator(EnhancedTestBase):
         else:
             print("   ⚠️  Auto-mapping taking longer than 60 seconds, continuing with validation...")
         
+        # CRITICAL FIX: Verify distributed creation actually completed on BOTH instances
+        print("   🔍 ADDITIONAL VERIFICATION: Confirming collection exists on BOTH instances...")
+        print("   (This prevents cleanup racing against distributed creation)")
+        
+        primary_found = False
+        replica_found = False
+        
+        # Additional polling for distributed creation completion
+        for verification_attempt in range(20):  # 20 attempts × 3 seconds = 60 seconds max
+            time.sleep(3)  # Slightly longer intervals for instance polling
+            
+            # Check primary instance
+            if not primary_found:
+                try:
+                    primary_response = requests.get(
+                        f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
+                        timeout=10
+                    )
+                    if primary_response.status_code == 200:
+                        primary_collections = primary_response.json()
+                        primary_found = any(c['name'] == test_collection for c in primary_collections)
+                        if primary_found:
+                            print(f"   ✅ Collection found on primary after {(verification_attempt + 1) * 3} seconds")
+                except:
+                    pass
+            
+            # Check replica instance
+            if not replica_found:
+                try:
+                    replica_response = requests.get(
+                        f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections",
+                        timeout=10
+                    )
+                    if replica_response.status_code == 200:
+                        replica_collections = replica_response.json()
+                        replica_found = any(c['name'] == test_collection for c in replica_collections)
+                        if replica_found:
+                            print(f"   ✅ Collection found on replica after {(verification_attempt + 1) * 3} seconds")
+                except:
+                    pass
+            
+            # Success: Both instances have the collection
+            if primary_found and replica_found:
+                print(f"   🎉 DISTRIBUTED CREATION VERIFIED: Collection exists on BOTH instances")
+                break
+                
+            # Progress reporting
+            if verification_attempt % 5 == 0 and (not primary_found or not replica_found):
+                missing = []
+                if not primary_found: missing.append("primary")
+                if not replica_found: missing.append("replica") 
+                print(f"   ⏳ Still waiting for distributed creation... Missing on: {', '.join(missing)} ({(verification_attempt + 1) * 3}s/60s)")
+        
+        # Log final verification status
+        if primary_found and replica_found:
+            print("   ✅ Distributed creation verification successful - safe to proceed with testing")
+        else:
+            print("   ⚠️  Distributed creation verification incomplete - proceeding with standard validation")
+            print("   ⚠️  This may indicate a timing race condition or distributed creation issue")
+        
         # Verify collection exists BY NAME on primary instance (with different UUID)
         print("   Verifying collection exists on primary instance by name...")
         primary_response = requests.get(
@@ -983,6 +1043,32 @@ class ProductionValidator(EnhancedTestBase):
     def cleanup(self):
         """Enhanced cleanup - includes PostgreSQL data with selective lifecycle"""
         print("🧹 Enhanced cleanup: ChromaDB + PostgreSQL data with selective lifecycle...")
+        
+        # CRITICAL FIX: Wait for system stabilization before cleanup
+        print("   ⏳ Waiting for system stabilization before cleanup...")
+        print("   (This prevents cleanup racing against distributed operations)")
+        
+        # Wait for any pending WAL operations to complete
+        for stabilization_attempt in range(15):  # 15 attempts × 2 seconds = 30 seconds max
+            time.sleep(2)
+            try:
+                wal_check = requests.get(f"{self.base_url}/wal/status", timeout=10)
+                if wal_check.status_code == 200:
+                    wal_status = wal_check.json()
+                    pending = wal_status.get('wal_system', {}).get('pending_writes', 0)
+                    if pending == 0:
+                        print(f"   ✅ System stabilized after {(stabilization_attempt + 1) * 2} seconds")
+                        break
+                    elif stabilization_attempt % 5 == 0:
+                        print(f"   ⏳ Waiting for stabilization... {pending} pending operations ({(stabilization_attempt + 1) * 2}s/30s)")
+            except:
+                pass
+        else:
+            print("   ⚠️  System stabilization timeout - proceeding with cleanup anyway")
+        
+        # Additional wait to ensure distributed operations complete
+        print("   ⏳ Additional stabilization wait for distributed operations...")
+        time.sleep(5)
         
         # Use enhanced selective cleanup system
         # Only cleans data from PASSED tests, preserves FAILED test data for debugging
