@@ -949,7 +949,7 @@ class UnifiedWALLoadBalancer:
                     
                     # CRITICAL: Resolve collection names to UUIDs for document operations in WAL sync
                     final_path = normalized_path
-                    if '/collections/' in normalized_path and any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
+                    if '/collections/' in normalized_path and any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/update', '/delete']):
                         # Extract collection name from path
                         path_parts = normalized_path.split('/collections/')
                         if len(path_parts) > 1:
@@ -983,7 +983,7 @@ class UnifiedWALLoadBalancer:
                     collection_id = self.extract_collection_identifier(final_path)
                     
                     # CRITICAL: Map collection ID for proper sync (UUID resolution for document operations)
-                    if collection_id and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
+                    if collection_id and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update', '/delete']):
                         # This is a document operation - need to map collection UUID from source to target instance
                         logger.info(f"🔍 DOCUMENT OPERATION DETECTED: {method} {final_path}")
                         logger.info(f"   Source collection ID: {collection_id}")
@@ -1014,7 +1014,7 @@ class UnifiedWALLoadBalancer:
                     
                     # CRITICAL: Update collection mapping for successful collection creation
                     if (method == 'POST' and 
-                        ('/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete'])) and
+                        ('/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete', '/count'])) and
                         response.status_code == 200):
                         try:
                             # Parse response to get collection info
@@ -2924,8 +2924,14 @@ if __name__ == '__main__':
             logger.info(f"🔍 WAL_DEBUG: Path slash count: {final_path.count('/')}")
             
             if request.method in ['POST', 'PUT', 'PATCH', 'DELETE']:
+                # 🔧 CRITICAL FIX: Detect POST requests to read endpoints (ChromaDB uses POST for reads)
+                if request.method == 'POST' and '/collections/' in final_path and any(read_op in final_path for read_op in ['/get', '/query', '/count']):
+                    operation_type = "document_read_operation_via_post"
+                    should_log_to_wal = False  # POST to read endpoints don't need WAL sync
+                    logger.info(f"🔍 PROXY_REQUEST: DOCUMENT READ OPERATION (POST) - No WAL logging needed (ChromaDB read via POST)")
+                
                 # Determine operation type for WAL logging decision
-                if request.method == 'POST' and '/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete']):
+                elif request.method == 'POST' and '/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete', '/count']):
                     operation_type = "collection_creation"
                     should_log_to_wal = False  # Distributed creation handles this
                     logger.info(f"🔍 PROXY_REQUEST: COLLECTION CREATION - Will use distributed creation (no WAL)")
@@ -2935,15 +2941,10 @@ if __name__ == '__main__':
                     should_log_to_wal = False  # Distributed deletion handles this
                     logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Will use distributed deletion (no WAL)")
                 
-                elif '/collections/' in final_path and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update', '/delete']):  # FIXED: Only WRITE operations
+                elif '/collections/' in final_path and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update', '/delete']):  # WRITE operations only (removed /get, /query, /count)
                     operation_type = "document_write_operation"
                     should_log_to_wal = True  # Document WRITE operations need WAL sync
                     logger.info(f"🔍 PROXY_REQUEST: DOCUMENT WRITE OPERATION - Will log to WAL for sync")
-                
-                elif '/collections/' in final_path and any(read_op in final_path for read_op in ['/get', '/query', '/count']):  # READ operations
-                    operation_type = "document_read_operation"
-                    should_log_to_wal = False  # Read operations don't need WAL sync
-                    logger.info(f"🔍 PROXY_REQUEST: DOCUMENT READ OPERATION - No WAL logging needed (read-only)")
                 
                 elif request.method in ['PUT', 'PATCH']:
                     operation_type = "update_operation"
