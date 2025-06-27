@@ -50,7 +50,11 @@ class ComprehensiveSystemCleanup:
             'demo_', 'DEMO_', 'Demo_',
             'wal_fix_test_', 'WAL_FIX_TEST_', 'Wal_Fix_Test_',
             'pool_test_', 'POOL_TEST_', 'Pool_Test_',
-            'transaction_verify_', 'TRANSACTION_VERIFY_', 'Transaction_Verify_'
+            'transaction_verify_', 'TRANSACTION_VERIFY_', 'Transaction_Verify_',
+            # USE CASE manual testing patterns
+            'UC2_MANUAL_', 'UC3_MANUAL_', 'UC4_MANUAL_', 'UC5_MANUAL_',
+            'UC2_DELETE_', 'UC3_DELETE_', 'UC4_DELETE_', 'UC5_DELETE_',
+            'USE_CASE_', 'use_case_', 'Use_Case_'
         ]
         
         # BULLETPROOF PROTECTION: Never delete these collections
@@ -496,7 +500,7 @@ class ComprehensiveSystemCleanup:
                         'UC2_', 'UC3_', 'UC4_',  # USE CASE testing patterns
                         'UC2_DELETE_', 'UC3_MANUAL_', 'UC4_SAFETY_',  # Specific USE CASE patterns
                         'FIX_TEST_', 'DEBUG_MAPPING_', 'MAPPING_FIX_',  # Debug test patterns
-            'pool_test_', 'POOL_TEST_', 'Pool_Test_'  # Connection pooling test patterns
+                        'pool_test_', 'POOL_TEST_', 'Pool_Test_'  # Connection pooling test patterns
                     ]
                     
                     PROTECTED_COLLECTIONS = [
@@ -583,7 +587,11 @@ class DistributedTestCleanup:
             'demo_', 'DEMO_', 'Demo_',
             'wal_fix_test_', 'WAL_FIX_TEST_', 'Wal_Fix_Test_',
             'pool_test_', 'POOL_TEST_', 'Pool_Test_',
-            'transaction_verify_', 'TRANSACTION_VERIFY_', 'Transaction_Verify_'
+            'transaction_verify_', 'TRANSACTION_VERIFY_', 'Transaction_Verify_',
+            # USE CASE manual testing patterns
+            'UC2_MANUAL_', 'UC3_MANUAL_', 'UC4_MANUAL_', 'UC5_MANUAL_',
+            'UC2_DELETE_', 'UC3_DELETE_', 'UC4_DELETE_', 'UC5_DELETE_',
+            'USE_CASE_', 'use_case_', 'Use_Case_'
         ]
         
         # BULLETPROOF PROTECTION: Never delete these collections
