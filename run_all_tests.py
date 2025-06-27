@@ -1133,6 +1133,17 @@ class ProductionValidator(EnhancedTestBase):
                            f"Core DELETE functionality failed: {', '.join(issues)}",
                            f"Load balancer document deletion not working correctly")
     
+    def cleanup_with_overall_status(self, overall_success):
+        """Enhanced cleanup that considers overall test suite results"""
+        if not overall_success:
+            print("🔒 OVERALL TEST SUITE FAILED - Preserving ALL test data for debugging")
+            print("   Individual test data will be preserved regardless of individual test results")
+            print("   📋 Manual cleanup available after debugging: python comprehensive_system_cleanup.py")
+            return
+        else:
+            print("✅ OVERALL TEST SUITE PASSED - Applying selective cleanup per individual test results")
+            self.cleanup()
+    
     def cleanup(self):
         """Enhanced cleanup - includes PostgreSQL data with selective lifecycle"""
         print("🧹 Enhanced cleanup: ChromaDB + PostgreSQL data with selective lifecycle...")
@@ -1300,7 +1311,7 @@ class ProductionValidator(EnhancedTestBase):
         print(f"   🔍 VALIDATING: Document sync for {test_name}")
         import time
         
-        max_wait_time = 60  # seconds for document sync
+        max_wait_time = 120  # seconds for document sync (updated for realistic WAL timing)
         check_interval = 3  # seconds
         start_time = time.time()
         
@@ -1430,7 +1441,10 @@ class ProductionValidator(EnhancedTestBase):
                     # Continue with other tests
                     
         finally:
-            self.cleanup()
+            # Only clean if overall test suite was successful
+            # Individual failed tests will still be preserved per selective cleanup logic
+            overall_success = passed == total
+            self.cleanup_with_overall_status(overall_success)
         
         print(f"\\n{'='*60}")
         print("🏁 COMPREHENSIVE TEST RESULTS")

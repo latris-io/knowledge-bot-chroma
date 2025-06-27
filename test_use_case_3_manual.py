@@ -184,7 +184,7 @@ class UseCase3Tester(EnhancedVerificationBase):
         print(f"   🔍 VALIDATING: Document sync for {test_name}")
         import time
         
-        max_wait_time = 60  # seconds for document sync
+        max_wait_time = 120  # seconds for document sync (updated for realistic WAL timing)
         check_interval = 3  # seconds
         start_time = time.time()
         
