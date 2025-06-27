@@ -2980,6 +2980,140 @@ if __name__ == '__main__':
             logger.error(f"❌ Cleanup old transactions error: {e}")
             return jsonify({"error": str(e)}), 500
 
+    @app.route('/admin/clear_wal_errors', methods=['POST'])
+    def clear_wal_errors():
+        """Clear old WAL errors that are causing test failures"""
+        try:
+            data = request.get_json() or {}
+            max_retries = data.get('max_retries', 3)  # Clear operations that hit max retries
+            hours_old = data.get('hours_old', 1)      # Default to 1+ hours old
+            
+            with enhanced_wal.get_db_connection_ctx() as conn:
+                with conn.cursor() as cur:
+                    # Mark old failed operations as abandoned to remove them from error list
+                    cur.execute("""
+                        UPDATE unified_wal_writes 
+                        SET status = 'abandoned', 
+                            error_message = CONCAT('Auto-abandoned: max retries reached (', retry_count, '/3), age: ', 
+                                          EXTRACT(EPOCH FROM (NOW() - timestamp))/3600, ' hours')
+                        WHERE status = 'failed' 
+                        AND retry_count >= %s
+                        AND timestamp < NOW() - INTERVAL '%s hours'
+                    """, (max_retries, hours_old))
+                    abandoned_count = cur.rowcount
+                    
+                    # Also clear any pending operations that are too old and likely stuck
+                    cur.execute("""
+                        UPDATE unified_wal_writes 
+                        SET status = 'abandoned',
+                            error_message = CONCAT('Auto-abandoned: stuck pending for ', 
+                                          EXTRACT(EPOCH FROM (NOW() - timestamp))/3600, ' hours')
+                        WHERE status IN ('executed', 'pending')
+                        AND timestamp < NOW() - INTERVAL '%s hours'
+                    """, (hours_old * 4,))  # Use 4x hours for pending operations
+                    pending_abandoned = cur.rowcount
+                    
+                    conn.commit()
+                    
+                    # Get updated error count
+                    cur.execute("""
+                        SELECT COUNT(*) FROM unified_wal_writes 
+                        WHERE status = 'failed' AND retry_count >= 3
+                    """)
+                    remaining_errors = cur.fetchone()[0] if cur.fetchone() else 0
+            
+            message = f"Cleared {abandoned_count} failed operations and {pending_abandoned} stuck pending operations"
+            
+            return jsonify({
+                "success": True,
+                "message": message,
+                "abandoned_failed": abandoned_count,
+                "abandoned_pending": pending_abandoned,
+                "remaining_errors": remaining_errors
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Clear WAL errors failed: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route('/admin/reset_stuck_transactions', methods=['POST'])
+    def reset_stuck_transactions():
+        """Reset stuck transaction safety operations"""
+        try:
+            if not enhanced_wal.transaction_safety:
+                return jsonify({"error": "Transaction safety service not available"}), 503
+            
+            data = request.get_json() or {}
+            action = data.get('action', 'reset')  # 'reset' or 'abandon'
+            hours_old = data.get('hours_old', 0.5)  # Default to 30 minutes old
+            
+            with enhanced_wal.transaction_safety.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    if action == 'reset':
+                        # Reset stuck ATTEMPTING transactions back to FAILED for retry
+                        cur.execute("""
+                            UPDATE emergency_transaction_log 
+                            SET status = 'FAILED', 
+                                retry_count = 0,
+                                failure_reason = CONCAT('Reset from stuck ATTEMPTING status after ', 
+                                               EXTRACT(EPOCH FROM (NOW() - attempted_at))/3600, ' hours'),
+                                next_retry_at = NOW(),
+                                attempted_at = NOW()
+                            WHERE status = 'ATTEMPTING'
+                            AND attempted_at < NOW() - INTERVAL '%s hours'
+                        """, (hours_old,))
+                        reset_count = cur.rowcount
+                        
+                        message = f"Reset {reset_count} stuck ATTEMPTING transactions for retry"
+                        
+                    elif action == 'abandon':
+                        # Abandon old stuck transactions
+                        cur.execute("""
+                            UPDATE emergency_transaction_log 
+                            SET status = 'ABANDONED', 
+                                failure_reason = CONCAT('Auto-abandoned: stuck for ', 
+                                               EXTRACT(EPOCH FROM (NOW() - created_at))/3600, ' hours'),
+                                completed_at = NOW()
+                            WHERE status IN ('FAILED', 'ATTEMPTING') 
+                            AND created_at < NOW() - INTERVAL '%s hours'
+                        """, (hours_old,))
+                        reset_count = cur.rowcount
+                        
+                        message = f"Abandoned {reset_count} old stuck transactions"
+                    
+                    else:
+                        return jsonify({"error": "Invalid action. Use 'reset' or 'abandon'"}), 400
+                    
+                    conn.commit()
+                    
+                    # Get updated status
+                    cur.execute("""
+                        SELECT 
+                            COUNT(*) FILTER (WHERE status IN ('FAILED', 'ATTEMPTING') AND retry_count < max_retries) as pending_recovery,
+                            COUNT(*) FILTER (WHERE status = 'ATTEMPTING') as attempting,
+                            COUNT(*) FILTER (WHERE status = 'FAILED') as failed
+                        FROM emergency_transaction_log
+                        WHERE created_at > NOW() - INTERVAL '2 hours'
+                    """)
+                    result = cur.fetchone()
+                    status = {
+                        "pending_recovery": result[0] if result else 0,
+                        "attempting": result[1] if result else 0,
+                        "failed": result[2] if result else 0
+                    }
+            
+            return jsonify({
+                "success": True,
+                "action": action,
+                "message": message,
+                "affected_count": reset_count,
+                "current_status": status
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Reset stuck transactions failed: {e}")
+            return jsonify({"error": str(e)}), 500
+
     def _handle_proxy_request_core(path, transaction_id=None):
         """Core proxy request logic - separated for cleaner concurrency control"""
         

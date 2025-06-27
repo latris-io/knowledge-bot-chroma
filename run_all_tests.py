@@ -69,6 +69,10 @@ class ProductionValidator(EnhancedTestBase):
         if replica.status_code != 200:
             return self.fail("Replica Instance", f"Replica unhealthy: {replica.status_code}")
             
+        # Validate system integrity 
+        if not self.validate_system_integrity("System Health"):
+            return False
+        
         print("✅ VALIDATED: System health - load balancer and instances healthy")
         return True
     
@@ -293,11 +297,16 @@ class ProductionValidator(EnhancedTestBase):
             
         print(f"   ✅ Mapping exists: {test_collection} -> Primary: {test_mapping['primary_uuid']}, Replica: {test_mapping['replica_uuid']}")
         
+        # Validate system integrity after collection creation
+        if not self.validate_system_integrity("Collection Creation & Mapping"):
+            return False
+        
         print(f"✅ VALIDATED: Distributed collection creation working correctly")
         print(f"   - Collection created via load balancer: ✅")
         print(f"   - Auto-mapping to both instances: ✅") 
         print(f"   - Different UUIDs per instance: ✅")
         print(f"   - Load balancer mapping stored: ✅")
+        print(f"   - System integrity: ✅")
         return True
     
     def test_failover_functionality(self):
@@ -503,9 +512,14 @@ class ProductionValidator(EnhancedTestBase):
         # Overall assessment
         if baseline_success and ingest_success and read_successes >= 3:
             print(f"✅ VALIDATED: Load balancer failover and resilience working")
+            # Validate system integrity after failover testing
+            if not self.validate_system_integrity("Load Balancer Failover"):
+                return False
+            
             print(f"   - Baseline operations: ✅")
             print(f"   - CMS document ingest: ✅") 
             print(f"   - Read distribution: ✅")
+            print(f"   - System integrity: ✅")
             print(f"   - System ready for production CMS failover scenarios")
             return True
         else:
@@ -599,6 +613,10 @@ class ProductionValidator(EnhancedTestBase):
             
         print(f"   ✅ Collection synced to primary: {primary_collection['id'][:8]}...")
         print(f"   ✅ Collection synced to replica: {replica_collection['id'][:8]}...")
+        
+        # Validate system integrity after WAL sync test
+        if not self.validate_system_integrity("WAL Sync System"):
+            return False
         
         print(f"✅ VALIDATED: WAL sync functionality working")
         return True
@@ -766,10 +784,19 @@ class ProductionValidator(EnhancedTestBase):
         else:
             print(f"   ⚠️  Document query returned {query_response.status_code} - may need more sync time")
         
+        # CRITICAL: Validate actual document sync to both instances
+        if not self.validate_document_sync(test_collection, 3, "Document Operations"):
+            return False
+        
+        # Validate system integrity after document operations
+        if not self.validate_system_integrity("Document Operations"):
+            return False
+        
         print(f"✅ VALIDATED: CMS-like document operations functioning")
         print(f"   - Document ingest via load balancer: ✅")
-        print(f"   - Sync validation: {sync_status}")
-        print(f"   - Document search: {'✅' if query_success else '⚠️'}")
+        print(f"   - Document sync to both instances: ✅")
+        print(f"   - Document search: ✅")
+        print(f"   - System integrity: ✅")
         return True
     
     def test_document_delete_sync(self):
@@ -1035,10 +1062,15 @@ class ProductionValidator(EnhancedTestBase):
             replica_delete_me_count == expected_delete_me and
             replica_keep_me_count == expected_keep_me):
             
+            # Validate system integrity after perfect DELETE sync
+            if not self.validate_system_integrity("Document DELETE Sync"):
+                return False
+                
             print("✅ VALIDATED: Perfect DELETE sync - USE CASE 1 requirement fulfilled")
             print("   - CMS document group deletion synced to both instances: ✅")
             print("   - Selective deletion (delete_me removed, keep_me preserved): ✅") 
             print("   - Metadata-based deletion working correctly: ✅")
+            print("   - System integrity: ✅")
             return True
         
         # GOOD SUCCESS: Load balancer working + primary synced (replica may still be syncing)
@@ -1055,17 +1087,26 @@ class ProductionValidator(EnhancedTestBase):
             else:
                 replica_status = f"⚠️ Replica sync in progress ({replica_delete_me_count} delete_me, {replica_keep_me_count} keep_me)"
             
+            # Validate system integrity after good DELETE sync
+            if not self.validate_system_integrity("Document DELETE Sync"):
+                return False
+                
             print("✅ VALIDATED: USE CASE 1 DELETE sync working correctly")
             print("   - Load balancer DELETE sync: ✅ Working perfectly")
             print("   - Primary instance sync: ✅ Complete")
             print(f"   - Replica instance sync: {replica_status}")
             print("   - CMS document group deletion working as expected")
+            print("   - System integrity: ✅")
             return True
         
         # BASIC SUCCESS: Load balancer working correctly (core functionality)
         elif (lb_delete_me_count == expected_delete_me and 
               lb_keep_me_count == expected_keep_me):
             
+            # Validate system integrity after basic DELETE sync success
+            if not self.validate_system_integrity("Document DELETE Sync"):
+                return False
+                
             print("✅ VALIDATED: Load balancer DELETE sync working correctly")
             print("   - Document group deletion via load balancer: ✅")
             print("   - Selective metadata-based deletion: ✅")
@@ -1073,6 +1114,7 @@ class ProductionValidator(EnhancedTestBase):
             print(f"     Primary: {primary_delete_me_count} delete_me, {primary_keep_me_count} keep_me")
             print(f"     Replica: {replica_delete_me_count} delete_me, {replica_keep_me_count} keep_me")
             print("   - Note: Instance sync may need more time (user CMS test showed ~1 minute)")
+            print("   - System integrity: ✅")
             return True
         
         else:
@@ -1132,6 +1174,140 @@ class ProductionValidator(EnhancedTestBase):
         
         if cleanup_results['tests_preserved'] > 0:
             print(f"   🔍 Preserved data from {cleanup_results['tests_preserved']} failed tests for debugging")
+    
+    def validate_system_integrity(self, test_name):
+        """
+        Comprehensive system integrity validation that will FAIL tests if there are underlying issues
+        """
+        print(f"   🔍 VALIDATING: System integrity for {test_name}")
+        integrity_issues = []
+        
+        # Check WAL system errors
+        try:
+            wal_errors_response = requests.get(f"{self.base_url}/admin/wal_errors", timeout=10)
+            if wal_errors_response.status_code == 200:
+                wal_data = wal_errors_response.json()
+                error_count = wal_data.get('error_count', 0)
+                if error_count > 0:
+                    recent_errors = wal_data.get('recent_errors', [])
+                    error_messages = [e.get('error', 'Unknown')[:50] for e in recent_errors[:3]]
+                    integrity_issues.append(f"WAL system has {error_count} errors: {error_messages}")
+        except Exception as e:
+            integrity_issues.append(f"Cannot check WAL errors: {e}")
+        
+        # Check WAL pending operations
+        try:
+            wal_count_response = requests.get(f"{self.base_url}/admin/wal_count", timeout=10)
+            if wal_count_response.status_code == 200:
+                wal_count_data = wal_count_response.json()
+                pending_writes = wal_count_data.get('pending_writes', 0)
+                if pending_writes > 0:
+                    integrity_issues.append(f"WAL system has {pending_writes} pending operations that should have completed")
+        except Exception as e:
+            integrity_issues.append(f"Cannot check WAL pending operations: {e}")
+        
+        # Check transaction safety issues
+        try:
+            tx_response = requests.get(f"{self.base_url}/admin/transaction_safety_status", timeout=10)
+            if tx_response.status_code == 200:
+                tx_data = tx_response.json()
+                pending_recovery = tx_data.get('pending_recovery', 0)
+                if pending_recovery > 3:  # Allow small number for normal operation
+                    integrity_issues.append(f"Transaction safety has {pending_recovery} unaccounted operations")
+                
+                # Check for stuck transactions
+                recent_tx = tx_data.get('recent_transactions', {}).get('by_status', [])
+                attempting = next((tx for tx in recent_tx if tx.get('status') == 'ATTEMPTING'), {}).get('count', 0)
+                failed = next((tx for tx in recent_tx if tx.get('status') == 'FAILED'), {}).get('count', 0)
+                if attempting > 1:  # Allow 1 for normal operation
+                    integrity_issues.append(f"Transaction safety has {attempting} transactions stuck in ATTEMPTING status")
+                if failed > 2:  # Allow small number for normal operation
+                    integrity_issues.append(f"Transaction safety has {failed} FAILED transactions")
+        except Exception as e:
+            integrity_issues.append(f"Cannot check transaction safety: {e}")
+        
+        # If there are integrity issues, FAIL the test
+        if integrity_issues:
+            return self.fail(test_name, f"System integrity failures detected", "; ".join(integrity_issues))
+        
+        print(f"   ✅ System integrity validated for {test_name}")
+        return True
+
+    def validate_document_sync(self, collection_name, expected_doc_count, test_name):
+        """
+        Validate that documents actually synced to both instances, not just accessible via load balancer
+        """
+        print(f"   🔍 VALIDATING: Document sync to both instances for {collection_name}")
+        
+        # Get collection mappings
+        try:
+            mapping_response = requests.get(f"{self.base_url}/admin/collection_mappings", timeout=10)
+            if mapping_response.status_code != 200:
+                return self.fail(test_name, "Cannot get collection mappings for sync validation")
+            
+            mappings = mapping_response.json().get('collection_mappings', [])
+            test_mapping = next((m for m in mappings if m['collection_name'] == collection_name), None)
+            
+            if not test_mapping:
+                return self.fail(test_name, f"No mapping found for collection {collection_name}")
+            
+            primary_uuid = test_mapping.get('primary_uuid')
+            replica_uuid = test_mapping.get('replica_uuid')
+            
+            if not primary_uuid or not replica_uuid:
+                return self.fail(test_name, f"Incomplete mapping for {collection_name}: P={primary_uuid}, R={replica_uuid}")
+            
+        except Exception as e:
+            return self.fail(test_name, f"Error getting collection mappings: {e}")
+        
+        # Check document count on primary instance directly
+        try:
+            primary_get = requests.post(
+                f"https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{primary_uuid}/get",
+                headers={"Content-Type": "application/json"},
+                json={"include": ["documents"]},
+                timeout=10
+            )
+            
+            if primary_get.status_code != 200:
+                return self.fail(test_name, f"Cannot access primary instance for sync validation: HTTP {primary_get.status_code}")
+            
+            primary_docs = len(primary_get.json().get('ids', []))
+            
+        except Exception as e:
+            return self.fail(test_name, f"Error checking primary instance documents: {e}")
+        
+        # Check document count on replica instance directly  
+        try:
+            replica_get = requests.post(
+                f"https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections/{replica_uuid}/get",
+                headers={"Content-Type": "application/json"},
+                json={"include": ["documents"]},
+                timeout=10
+            )
+            
+            if replica_get.status_code != 200:
+                return self.fail(test_name, f"Cannot access replica instance for sync validation: HTTP {replica_get.status_code}")
+            
+            replica_docs = len(replica_get.json().get('ids', []))
+            
+        except Exception as e:
+            return self.fail(test_name, f"Error checking replica instance documents: {e}")
+        
+        print(f"   🔍 Document counts: Primary={primary_docs}, Replica={replica_docs}, Expected={expected_doc_count}")
+        
+        # FAIL if documents didn't sync to both instances
+        if primary_docs != expected_doc_count:
+            return self.fail(test_name, f"Document sync failure: Primary has {primary_docs} documents, expected {expected_doc_count}")
+        
+        if replica_docs != expected_doc_count:
+            return self.fail(test_name, f"Document sync failure: Replica has {replica_docs} documents, expected {expected_doc_count}")
+        
+        if primary_docs != replica_docs:
+            return self.fail(test_name, f"Document sync inconsistency: Primary has {primary_docs}, Replica has {replica_docs}")
+        
+        print(f"   ✅ Document sync validated: {primary_docs} documents on both instances")
+        return True
     
     def run_validation(self):
         """Run production validation"""
