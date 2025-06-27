@@ -26,6 +26,9 @@ class DatabaseCleanupService:
             'sync_tasks': int(os.getenv("SYNC_TASKS_RETENTION_DAYS", "30")),
             'upgrade_recommendations': int(os.getenv("UPGRADE_RECOMMENDATIONS_RETENTION_DAYS", "365")),
             'sync_workers': int(os.getenv("SYNC_WORKERS_RETENTION_DAYS", "7")),
+            'unified_wal_writes': int(os.getenv("WAL_WRITES_RETENTION_DAYS", "7")),  # WAL sync data
+            'emergency_transaction_log': int(os.getenv("TRANSACTION_LOG_RETENTION_DAYS", "30")),  # Transaction safety
+            'wal_performance_metrics': int(os.getenv("WAL_PERFORMANCE_RETENTION_DAYS", "30")),  # WAL performance data
         }
         
         logger.info(f"🧹 Cleanup Service initialized with retention policies: {self.retention_policies}")
@@ -43,7 +46,10 @@ class DatabaseCleanupService:
             'failover_events': 'occurred_at',
             'sync_tasks': 'created_at',
             'sync_workers': 'last_heartbeat',
-            'upgrade_recommendations': 'created_at'
+            'upgrade_recommendations': 'created_at',
+            'unified_wal_writes': 'created_at',  # WAL entries by creation time
+            'emergency_transaction_log': 'created_at',  # Transaction log by creation time
+            'wal_performance_metrics': 'timestamp',  # Performance metrics by timestamp
         }
         
         date_column = date_columns.get(table_name, 'created_at')
@@ -52,24 +58,75 @@ class DatabaseCleanupService:
         try:
             with psycopg2.connect(self.database_url) as conn:
                 with conn.cursor() as cursor:
-                    # Count records to delete
-                    cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE {date_column} < %s", [cutoff_date])
-                    count_to_delete = cursor.fetchone()[0]
+                    # 🔧 SPECIAL LOGIC: unified_wal_writes only delete completed operations
+                    if table_name == 'unified_wal_writes':
+                        # Only delete WAL entries that are completed (synced/failed with max retries)
+                        count_query = """
+                            SELECT COUNT(*) FROM unified_wal_writes 
+                            WHERE created_at < %s 
+                            AND (status = 'synced' OR (status = 'failed' AND retry_count >= 3))
+                        """
+                        delete_query = """
+                            DELETE FROM unified_wal_writes 
+                            WHERE created_at < %s 
+                            AND (status = 'synced' OR (status = 'failed' AND retry_count >= 3))
+                        """
+                        
+                        cursor.execute(count_query, [cutoff_date])
+                        count_to_delete = cursor.fetchone()[0]
+                        
+                        if count_to_delete == 0:
+                            logger.info(f"✅ {table_name}: No old completed WAL entries to clean")
+                            return {'deleted': 0, 'error': None}
+                        
+                        cursor.execute(delete_query, [cutoff_date])
+                        deleted_count = cursor.rowcount
+                        logger.info(f"🗑️ {table_name}: Deleted {deleted_count:,} old completed WAL entries (kept pending/active entries)")
                     
-                    if count_to_delete == 0:
-                        logger.info(f"✅ {table_name}: No old records to clean")
-                        return {'deleted': 0, 'error': None}
+                    # 🔧 SPECIAL LOGIC: emergency_transaction_log only delete completed/abandoned operations  
+                    elif table_name == 'emergency_transaction_log':
+                        # Only delete transaction log entries that are completed/abandoned (not failed entries being retried)
+                        count_query = """
+                            SELECT COUNT(*) FROM emergency_transaction_log 
+                            WHERE created_at < %s 
+                            AND status IN ('COMPLETED', 'ABANDONED', 'RECOVERED')
+                        """
+                        delete_query = """
+                            DELETE FROM emergency_transaction_log 
+                            WHERE created_at < %s 
+                            AND status IN ('COMPLETED', 'ABANDONED', 'RECOVERED')
+                        """
+                        
+                        cursor.execute(count_query, [cutoff_date])
+                        count_to_delete = cursor.fetchone()[0]
+                        
+                        if count_to_delete == 0:
+                            logger.info(f"✅ {table_name}: No old completed transactions to clean")
+                            return {'deleted': 0, 'error': None}
+                        
+                        cursor.execute(delete_query, [cutoff_date])
+                        deleted_count = cursor.rowcount
+                        logger.info(f"🗑️ {table_name}: Deleted {deleted_count:,} old completed transactions (kept active/retry entries)")
                     
-                    # Delete old records
-                    cursor.execute(f"DELETE FROM {table_name} WHERE {date_column} < %s", [cutoff_date])
-                    deleted_count = cursor.rowcount
+                    else:
+                        # Standard cleanup for other tables
+                        cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE {date_column} < %s", [cutoff_date])
+                        count_to_delete = cursor.fetchone()[0]
+                        
+                        if count_to_delete == 0:
+                            logger.info(f"✅ {table_name}: No old records to clean")
+                            return {'deleted': 0, 'error': None}
+                        
+                        cursor.execute(f"DELETE FROM {table_name} WHERE {date_column} < %s", [cutoff_date])
+                        deleted_count = cursor.rowcount
+                        logger.info(f"🗑️ {table_name}: Deleted {deleted_count:,} old records")
+                    
                     conn.commit()
                     
                     # Get remaining count
                     cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
                     remaining = cursor.fetchone()[0]
                     
-                    logger.info(f"🗑️ {table_name}: Deleted {deleted_count:,} old records, {remaining:,} remaining")
                     return {'deleted': deleted_count, 'remaining': remaining, 'error': None}
                     
         except Exception as e:
