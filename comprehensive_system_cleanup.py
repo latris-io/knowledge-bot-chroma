@@ -39,22 +39,18 @@ class ComprehensiveSystemCleanup:
         
         # Test collection patterns (bulletproof protection for production)
         self.test_patterns = [
-            r".*TEST.*",
-            r".*DEBUG.*", 
-            r".*AUTO_MAP.*",
-            r".*WAL_FIX.*",
-            r".*PATH_NORM.*",
-            r".*UUID_RES.*",
-            r".*ENHANCED_MAPPING.*",
-            r".*CMS_PRODUCTION_TEST.*",
-            r".*CMS_FAILOVER_TEST.*",
-            r".*WAL_SYNC_TEST.*",
-            r".*BASELINE_TEST.*",
-            r".*REAL_TEST.*",
-            r".*REPLICA_FIX.*",
-            r".*SIMPLIFIED_WAL.*",
-            r".*POST_DEPLOY.*",
-            r".*SCOPE_FIX.*"
+            'autotest_', 'AUTOTEST_', 'AutoTest_',
+            'test_', 'TEST_', 'Test_',
+            'debug_', 'DEBUG_', 'Debug_',
+            'patch_test_', 'PATCH_TEST_', 'Patch_Test_',
+            'delete_test_', 'DELETE_TEST_', 'Delete_Test_',
+            'temp_', 'TEMP_', 'Temp_',
+            'tmp_', 'TMP_', 'Tmp_',
+            'sample_', 'SAMPLE_', 'Sample_',
+            'demo_', 'DEMO_', 'Demo_',
+            'wal_fix_test_', 'WAL_FIX_TEST_', 'Wal_Fix_Test_',
+            'pool_test_', 'POOL_TEST_', 'Pool_Test_',
+            'transaction_verify_', 'TRANSACTION_VERIFY_', 'Transaction_Verify_'
         ]
         
         # BULLETPROOF PROTECTION: Never delete these collections
@@ -582,22 +578,18 @@ class DistributedTestCleanup:
         
         # Test collection patterns (bulletproof protection for production)
         self.test_patterns = [
-            r".*TEST.*",
-            r".*DEBUG.*", 
-            r".*AUTO_MAP.*",
-            r".*WAL_FIX.*",
-            r".*PATH_NORM.*",
-            r".*UUID_RES.*",
-            r".*ENHANCED_MAPPING.*",
-            r".*CMS_PRODUCTION_TEST.*",
-            r".*CMS_FAILOVER_TEST.*",
-            r".*WAL_SYNC_TEST.*",
-            r".*BASELINE_TEST.*",
-            r".*REAL_TEST.*",
-            r".*REPLICA_FIX.*",
-            r".*SIMPLIFIED_WAL.*",
-            r".*POST_DEPLOY.*",
-            r".*SCOPE_FIX.*"
+            'autotest_', 'AUTOTEST_', 'AutoTest_',
+            'test_', 'TEST_', 'Test_',
+            'debug_', 'DEBUG_', 'Debug_',
+            'patch_test_', 'PATCH_TEST_', 'Patch_Test_',
+            'delete_test_', 'DELETE_TEST_', 'Delete_Test_',
+            'temp_', 'TEMP_', 'Temp_',
+            'tmp_', 'TMP_', 'Tmp_',
+            'sample_', 'SAMPLE_', 'Sample_',
+            'demo_', 'DEMO_', 'Demo_',
+            'wal_fix_test_', 'WAL_FIX_TEST_', 'Wal_Fix_Test_',
+            'pool_test_', 'POOL_TEST_', 'Pool_Test_',
+            'transaction_verify_', 'TRANSACTION_VERIFY_', 'Transaction_Verify_'
         ]
         
         # BULLETPROOF PROTECTION: Never delete these collections
