@@ -258,7 +258,9 @@ class UnifiedWALLoadBalancer:
         if TRANSACTION_SAFETY_AVAILABLE:
             try:
                 self.transaction_safety = TransactionSafetyService(self.database_url)
-                logger.info("🛡️ Transaction Safety Service enabled - timing gaps protected")
+                # 🔧 CRITICAL FIX: Give transaction safety service reference to load balancer for recovery
+                self.transaction_safety.load_balancer = self
+                logger.info("🛡️ Transaction Safety Service enabled - timing gaps protected + recovery enabled")
             except Exception as e:
                 logger.error(f"❌ Failed to initialize Transaction Safety Service: {e}")
                 self.transaction_safety = None
