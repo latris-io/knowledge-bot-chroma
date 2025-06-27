@@ -3332,14 +3332,6 @@ if __name__ == '__main__':
             else:
                 logger.info(f"ℹ️ PROXY_REQUEST: {operation_type.upper()} - Using distributed system (no WAL logging needed)")
             
-            # 🔧 DOCUMENT ROUTING FIX: Use distributed approach for document operations
-            if '/collections/' in final_path and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update', '/delete', '/get', '/query', '/count']):
-                logger.info(f"🔍 DOCUMENT OPERATION: Using enhanced routing for {request.method} {final_path}")
-                
-                # Log the current approach but continue with working distributed logic
-                logger.info(f"📝 DOCUMENT: Proceeding with distributed system approach")
-                # Document operations will be handled by existing distributed WAL system
-            
             # Make request with proven working approach
             logger.info(f"🔍 PROXY_REQUEST: Making HTTP request to target...")
             import requests
@@ -3353,6 +3345,85 @@ if __name__ == '__main__':
             
             logger.info(f"✅ PROXY_REQUEST: HTTP response received: {response.status_code}")
             logger.info(f"Response: {response.status_code}, Content: {response.text[:100]}")
+            
+            # 🔧 CRITICAL FIX: Implement distributed document operations (restore v2 functionality)
+            if (request.method in ['POST', 'PUT', 'PATCH'] and 
+                '/collections/' in final_path and 
+                any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update']) and
+                response.status_code in [200, 201]):
+                
+                logger.info(f"🚀 DISTRIBUTED DOCUMENT OPERATION: {request.method} {final_path}")
+                
+                # Check if both instances are healthy for distributed operation
+                primary_instance = enhanced_wal.get_primary_instance()
+                replica_instance = enhanced_wal.get_replica_instance()
+                both_instances_healthy = (primary_instance and primary_instance.is_healthy and 
+                                        replica_instance and replica_instance.is_healthy)
+                
+                if both_instances_healthy:
+                    logger.info(f"🎯 DISTRIBUTED MODE: Both instances healthy - executing on both")
+                    
+                    # Target instance already executed successfully above
+                    target_success = True
+                    
+                    # Determine other instance and execute there too
+                    if target_instance.name == "primary":
+                        other_instance = replica_instance
+                        other_instance_name = "replica"
+                    else:
+                        other_instance = primary_instance  
+                        other_instance_name = "primary"
+                    
+                    logger.info(f"🔍 DISTRIBUTED: Target={target_instance.name} (success), Other={other_instance_name}")
+                    
+                    # Resolve collection name to UUID for other instance
+                    other_final_path = final_path
+                    if '/collections/' in normalized_path:
+                        path_parts = normalized_path.split('/collections/')
+                        if len(path_parts) > 1:
+                            collection_part = path_parts[1].split('/')[0]
+                            import re
+                            if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_part):
+                                logger.info(f"🔍 DISTRIBUTED: Resolving collection '{collection_part}' for {other_instance_name}")
+                                other_resolved_uuid = enhanced_wal.resolve_collection_name_to_uuid(collection_part, other_instance_name)
+                                if other_resolved_uuid:
+                                    other_final_path = normalized_path.replace(f'/collections/{collection_part}/', f'/collections/{other_resolved_uuid}/')
+                                    logger.info(f"✅ DISTRIBUTED: Resolved path for {other_instance_name}: {other_final_path}")
+                                else:
+                                    logger.warning(f"⚠️ DISTRIBUTED: Could not resolve collection for {other_instance_name} - using WAL instead")
+                                    other_final_path = None
+                    
+                    # Execute on other instance if we have a valid path
+                    if other_final_path:
+                        try:
+                            other_url = f"{other_instance.url}{other_final_path}"
+                            logger.info(f"🔄 DISTRIBUTED: Executing document operation on {other_instance_name}: {other_url}")
+                            
+                            other_response = requests.request(
+                                method=request.method,
+                                url=other_url,
+                                headers={'Content-Type': 'application/json'} if data else {},
+                                data=data,
+                                timeout=15
+                            )
+                            
+                            other_success = other_response.status_code in [200, 201]
+                            logger.info(f"🎯 DISTRIBUTED: {other_instance_name} response: {other_response.status_code}")
+                            
+                            if other_success:
+                                logger.info(f"✅ DISTRIBUTED DOCUMENT SUCCESS: Both instances executed successfully")
+                            else:
+                                logger.warning(f"⚠️ DISTRIBUTED DOCUMENT PARTIAL: Target success, {other_instance_name} failed ({other_response.status_code})")
+                                
+                        except Exception as distributed_error:
+                            logger.error(f"❌ DISTRIBUTED DOCUMENT ERROR on {other_instance_name}: {distributed_error}")
+                            logger.warning(f"📝 DISTRIBUTED: Document will sync via WAL instead")
+                    else:
+                        logger.warning(f"📝 DISTRIBUTED: No valid path for {other_instance_name} - document will sync via WAL")
+                        
+                else:
+                    logger.info(f"📝 FAILOVER MODE: Using WAL sync for document operation (target={target_instance.name})")
+                    # Will be handled by existing WAL logic
             
             # CRITICAL: Create collection on BOTH instances for distributed system (FIXED v2 functionality)
             if (request.method == 'POST' and 
