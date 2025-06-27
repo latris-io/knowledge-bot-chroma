@@ -3198,13 +3198,35 @@ if __name__ == '__main__':
                 # Determine operation type for WAL logging decision
                 elif request.method == 'POST' and '/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete', '/count']):
                     operation_type = "collection_creation"
-                    should_log_to_wal = False  # Distributed creation handles this
-                    logger.info(f"🔍 PROXY_REQUEST: COLLECTION CREATION - Will use distributed creation (no WAL)")
+                    # 🔧 CRITICAL FIX: Log collection operations when in failover mode (USE CASE 2)
+                    # Check if both instances are healthy - if not, we need WAL logging for sync
+                    primary_instance = enhanced_wal.get_primary_instance()
+                    replica_instance = enhanced_wal.get_replica_instance()
+                    both_instances_healthy = (primary_instance and primary_instance.is_healthy and 
+                                            replica_instance and replica_instance.is_healthy)
+                    
+                    if both_instances_healthy:
+                        should_log_to_wal = False  # Distributed creation handles this
+                        logger.info(f"🔍 PROXY_REQUEST: COLLECTION CREATION - Both instances healthy, using distributed creation (no WAL)")
+                    else:
+                        should_log_to_wal = True  # Need WAL for failover sync
+                        logger.info(f"🔍 PROXY_REQUEST: COLLECTION CREATION - Failover mode detected, logging to WAL for sync")
                 
                 elif request.method == 'DELETE' and '/collections/' in final_path and final_path.count('/') <= 8:  # DELETE /collections/{id} - FIX: 8 slashes in V2 API
                     operation_type = "collection_deletion"
-                    should_log_to_wal = False  # Distributed deletion handles this
-                    logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Will use distributed deletion (no WAL)")
+                    # 🔧 CRITICAL FIX: Log collection deletions when in failover mode (USE CASE 2)
+                    # Check if both instances are healthy - if not, we need WAL logging for sync
+                    primary_instance = enhanced_wal.get_primary_instance()
+                    replica_instance = enhanced_wal.get_replica_instance()
+                    both_instances_healthy = (primary_instance and primary_instance.is_healthy and 
+                                            replica_instance and replica_instance.is_healthy)
+                    
+                    if both_instances_healthy:
+                        should_log_to_wal = False  # Distributed deletion handles this
+                        logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Both instances healthy, using distributed deletion (no WAL)")
+                    else:
+                        should_log_to_wal = True  # Need WAL for failover sync
+                        logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Failover mode detected, logging to WAL for sync")
                 
                 elif '/collections/' in final_path and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update', '/delete']):  # WRITE operations only (removed /get, /query, /count)
                     operation_type = "document_write_operation"
