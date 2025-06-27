@@ -173,9 +173,8 @@ class UseCase2Tester(EnhancedVerificationBase):
             pass
             
         if final_pending:
-            print(f"   ⚠️ Recovery timeout reached with pending operations: {'; '.join(final_pending)}")
-            print(f"   ℹ️ Operations may complete in background - this indicates system stress, not failure")
-            return self.fail(test_name, "Recovery timeout", "System has pending operations")
+            print(f"   ❌ Recovery timeout reached with pending operations: {'; '.join(final_pending)}")
+            return self.fail(test_name, "Recovery timeout with pending operations", "; ".join(final_pending))
         else:
             print(f"   ✅ System integrity validated after recovery period")
             return True
@@ -387,31 +386,10 @@ class UseCase2Tester(EnhancedVerificationBase):
         self.test_results[test_name] = {'collections': self.test_results.get(test_name, {}).get('collections', []), 'success': success}
         if success:
             success_count += 1
-            
-        # Enhanced validation: Check system integrity after operations
-        if not self.validate_system_integrity("Operations During Failure"):
-            return 0, total_tests  # Fail all tests if system integrity compromised
-        
-        # Enhanced validation: Check document sync if documents were added
-        if self.documents_added_during_failure:
-            collection_name = list(self.documents_added_during_failure.keys())[0]
-            expected_docs = len(self.documents_added_during_failure[collection_name])
-            if not self.validate_document_sync(collection_name, expected_docs, "Document Operations"):
-                # Don't fail here - document sync may take longer than system operations
-                self.log("⚠️ Document sync validation incomplete - may complete in background")
+        # NOTE: Document sync validation will happen AFTER primary recovery and WAL sync
+        # in the verify_data_consistency() method. Cannot validate replica→primary sync
+        # while primary is still suspended!            
                     
-        # Enhanced validation: Check system integrity after operations
-        if not self.validate_system_integrity("Operations During Failure"):
-            self.log("❌ System integrity validation failed - critical issues detected")
-            return 0, total_tests  # Fail all tests if system integrity compromised
-        
-        # Enhanced validation: Check document sync if documents were added
-        if self.documents_added_during_failure:
-            collection_name = list(self.documents_added_during_failure.keys())[0]
-            expected_docs = len(self.documents_added_during_failure[collection_name])
-            if not self.validate_document_sync(collection_name, expected_docs, "Document Operations"):
-                # Don't fail here - document sync may take longer than system operations
-                self.log("⚠️ Document sync validation incomplete - may complete in background")
         
         self.log(f"📊 Operations during failure: {success_count}/{total_tests} successful ({success_count/total_tests*100:.1f}%)")
         return success_count, total_tests
@@ -498,6 +476,49 @@ class UseCase2Tester(EnhancedVerificationBase):
                 self.log(f"   Collection consistency: {len(found_collections)}/{len(self.test_collections)} = {len(found_collections)/len(self.test_collections)*100:.1f}%" if self.test_collections else "No test collections")
                 
                 collection_consistency = len(found_collections) == len(self.test_collections)
+                
+                # CRITICAL FIX: Verify collections actually exist on PRIMARY instance
+                # This is the core USE CASE 2 functionality - replica→primary sync
+                self.log(f"🔍 CORE VALIDATION: Checking if collections created during failure actually synced to PRIMARY...")
+                primary_sync_success = True
+                primary_collections_found = 0
+                
+                if self.test_collections:
+                    try:
+                        # Check PRIMARY instance directly 
+                        primary_response = requests.get(
+                            f"{self.primary_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                            timeout=10
+                        )
+                        
+                        if primary_response.status_code == 200:
+                            primary_collections = primary_response.json()
+                            primary_collection_names = [c['name'] for c in primary_collections]
+                            primary_found = [name for name in self.test_collections if name in primary_collection_names]
+                            primary_collections_found = len(primary_found)
+                            
+                            self.log(f"   📊 PRIMARY INSTANCE CHECK:")
+                            self.log(f"      Collections created during primary failure: {len(self.test_collections)}")
+                            self.log(f"      Collections found on primary after recovery: {primary_collections_found}")
+                            self.log(f"      Primary sync success: {primary_collections_found}/{len(self.test_collections)} = {primary_collections_found/len(self.test_collections)*100:.1f}%")
+                            
+                            if primary_collections_found == len(self.test_collections):
+                                self.log(f"   ✅ CORE SUCCESS: All collections synced from replica to primary!")
+                                primary_sync_success = True
+                            else:
+                                self.log(f"   ❌ CORE FAILURE: Only {primary_collections_found}/{len(self.test_collections)} collections synced to primary")
+                                self.log(f"      Collections missing from primary: {set(self.test_collections) - set(primary_found)}")
+                                primary_sync_success = False
+                        else:
+                            self.log(f"   ❌ Cannot check primary instance: HTTP {primary_response.status_code}")
+                            primary_sync_success = False
+                            
+                    except Exception as e:
+                        self.log(f"   ❌ Error checking primary instance: {e}")
+                        primary_sync_success = False
+                else:
+                    self.log(f"   ℹ️ No test collections to verify")
+                    primary_sync_success = True
                 
                 # Step 2: ENHANCED - Verify document-level sync between instances
                 document_sync_success = True
@@ -590,12 +611,20 @@ class UseCase2Tester(EnhancedVerificationBase):
                     self.log(f"   Content integrity success: {'✅ Complete' if document_sync_success and synced_docs == total_docs_checked else '❌ Incomplete'}")
                     self.log(f"   Verification level: ENHANCED (content + metadata + embeddings)")
                     
-                    # Overall consistency includes both collection and document sync
-                    overall_consistency = collection_consistency and document_sync_success and (synced_docs == total_docs_checked if total_docs_checked > 0 else True)
+                    # Overall consistency includes collection, primary sync, and document sync
+                    overall_consistency = collection_consistency and primary_sync_success and document_sync_success and (synced_docs == total_docs_checked if total_docs_checked > 0 else True)
                     
                 else:
                     self.log(f"📋 No documents were added during failure - only verifying collection sync")
-                    overall_consistency = collection_consistency
+                    # Overall consistency includes both collection access and PRIMARY sync
+                    overall_consistency = collection_consistency and primary_sync_success
+                
+                # CRITICAL: Fail immediately if core functionality (primary sync) failed
+                if not primary_sync_success:
+                    self.log(f"🚨 CRITICAL FAILURE: USE CASE 2 core functionality (replica→primary sync) failed")
+                    self.log(f"   Collections created during primary failure were NOT synced to primary after recovery")
+                    self.log(f"   This means WAL sync system is broken - data recovery failed")
+                    return False
                 
                 # If we have complete consistency, return success immediately
                 if overall_consistency:
