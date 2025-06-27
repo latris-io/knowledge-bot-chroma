@@ -2901,6 +2901,85 @@ if __name__ == '__main__':
             logger.error(f"❌ Force recovery error: {e}")
             return jsonify({"error": str(e)}), 500
 
+    @app.route('/admin/cleanup_old_transactions', methods=['POST'])
+    def cleanup_old_transactions():
+        """Cleanup old stuck transactions that are preventing recovery"""
+        try:
+            if not enhanced_wal.transaction_safety:
+                return jsonify({"error": "Transaction safety service not available"}), 503
+            
+            data = request.get_json() or {}
+            action = data.get('action', 'abandon')  # 'abandon' or 'reset'
+            hours_old = data.get('hours_old', 4)    # Default to 4+ hours old
+            
+            with enhanced_wal.transaction_safety.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    if action == 'abandon':
+                        # Abandon old stuck transactions
+                        cur.execute("""
+                            UPDATE emergency_transaction_log 
+                            SET status = 'ABANDONED', 
+                                failure_reason = CONCAT('Auto-abandoned: stuck for ', %s, '+ hours'),
+                                completed_at = NOW()
+                            WHERE status IN ('FAILED', 'ATTEMPTING') 
+                            AND retry_count < max_retries
+                            AND created_at < NOW() - INTERVAL '%s hours'
+                        """, (hours_old, hours_old))
+                        affected_count = cur.rowcount
+                        conn.commit()
+                        
+                        message = f"Abandoned {affected_count} old transactions (>{hours_old}h old)"
+                        
+                    elif action == 'reset':
+                        # Reset old transactions for fresh retry
+                        cur.execute("""
+                            UPDATE emergency_transaction_log 
+                            SET status = 'FAILED', 
+                                retry_count = 0,
+                                failure_reason = CONCAT('Reset for recovery: was stuck for ', %s, '+ hours'),
+                                next_retry_at = NOW(),
+                                attempted_at = NOW()
+                            WHERE status IN ('FAILED', 'ATTEMPTING') 
+                            AND retry_count >= max_retries
+                            AND created_at < NOW() - INTERVAL '%s hours'
+                        """, (hours_old, hours_old))
+                        affected_count = cur.rowcount
+                        conn.commit()
+                        
+                        message = f"Reset {affected_count} old transactions for fresh retry (>{hours_old}h old)"
+                    
+                    else:
+                        return jsonify({"error": "Invalid action. Use 'abandon' or 'reset'"}), 400
+                    
+                    # Get updated status
+                    cur.execute("""
+                        SELECT 
+                            COUNT(*) FILTER (WHERE status IN ('FAILED', 'ATTEMPTING') AND retry_count < max_retries) as pending_recovery,
+                            COUNT(*) FILTER (WHERE status = 'COMPLETED') as completed,
+                            COUNT(*) FILTER (WHERE status = 'RECOVERED') as recovered,
+                            COUNT(*) FILTER (WHERE status = 'ABANDONED') as abandoned
+                        FROM emergency_transaction_log
+                    """)
+                    result = cur.fetchone()
+                    status = {
+                        "pending_recovery": result[0] if result else 0,
+                        "completed": result[1] if result else 0,
+                        "recovered": result[2] if result else 0,
+                        "abandoned": result[3] if result else 0
+                    }
+            
+            return jsonify({
+                "success": True,
+                "action": action,
+                "message": message,
+                "affected_count": affected_count,
+                "current_status": status
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Cleanup old transactions error: {e}")
+            return jsonify({"error": str(e)}), 500
+
     def _handle_proxy_request_core(path, transaction_id=None):
         """Core proxy request logic - separated for cleaner concurrency control"""
         
