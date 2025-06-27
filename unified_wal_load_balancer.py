@@ -2858,6 +2858,43 @@ if __name__ == '__main__':
                 "traceback": traceback.format_exc()
             }), 500
 
+    @app.route('/admin/force_transaction_recovery', methods=['POST'])
+    def force_transaction_recovery():
+        """Force restart transaction recovery processing"""
+        try:
+            if not enhanced_wal.transaction_safety:
+                return jsonify({"error": "Transaction safety service not available"}), 503
+            
+            # Reset stuck transactions first
+            reset_count = enhanced_wal.transaction_safety.reset_stuck_transactions()
+            
+            # Force recovery restart with proper load balancer reference
+            enhanced_wal.transaction_safety.force_recovery_restart(enhanced_wal)
+            
+            # Get updated status
+            with enhanced_wal.transaction_safety.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT 
+                            COUNT(*) FILTER (WHERE status IN ('FAILED', 'ATTEMPTING') AND retry_count < max_retries) as pending_recovery,
+                            COUNT(*) FILTER (WHERE status = 'COMPLETED') as completed,
+                            COUNT(*) FILTER (WHERE status = 'RECOVERED') as recovered,
+                            COUNT(*) FILTER (WHERE status = 'ABANDONED') as abandoned
+                        FROM emergency_transaction_log
+                    """)
+                    status = dict(cur.fetchone())
+            
+            return jsonify({
+                "success": True,
+                "message": "Transaction recovery restarted",
+                "reset_count": reset_count,
+                "current_status": status
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Force recovery error: {e}")
+            return jsonify({"error": str(e)}), 500
+
     def _handle_proxy_request_core(path, transaction_id=None):
         """Core proxy request logic - separated for cleaner concurrency control"""
         
@@ -3421,3 +3458,4 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"❌ Flask server failed to start: {e}")
         sys.exit(1) 
+

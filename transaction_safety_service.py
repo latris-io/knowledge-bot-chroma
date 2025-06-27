@@ -445,7 +445,8 @@ class TransactionSafetyService:
             load_balancer = getattr(self, 'load_balancer', None)
         
         if not load_balancer:
-            # No load balancer available for recovery
+            # 🔧 ENHANCED: Try to get load balancer from global context or wait
+            logger.warning("⚠️ Load balancer reference not available for recovery - will retry next cycle")
             return
             
         pending = self.get_pending_recovery_transactions()
@@ -482,6 +483,47 @@ class TransactionSafetyService:
         
         if recovered > 0 or failed > 0 or abandoned > 0:
             logger.info(f"📊 Recovery results: ✅{recovered} recovered, ❌{failed} failed, 🚫{abandoned} abandoned")
+    
+    def force_recovery_restart(self, load_balancer=None):
+        """Force restart recovery processing with load balancer reference"""
+        if load_balancer:
+            self.load_balancer = load_balancer
+            logger.info("🔧 Load balancer reference updated for recovery service")
+        
+        # Process recovery queue immediately
+        try:
+            self.process_recovery_queue(load_balancer)
+            logger.info("✅ Force recovery processing completed")
+        except Exception as e:
+            logger.error(f"❌ Force recovery failed: {e}")
+
+    def reset_stuck_transactions(self):
+        """Reset transactions that have been stuck in ATTEMPTING status for too long"""
+        try:
+            with self.db_lock:
+                with self.get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        # Reset transactions stuck in ATTEMPTING for more than 10 minutes
+                        cur.execute("""
+                            UPDATE emergency_transaction_log 
+                            SET status = 'FAILED', 
+                                failure_reason = 'Reset stuck transaction for recovery',
+                                retry_count = LEAST(retry_count, 1),
+                                next_retry_at = NOW()
+                            WHERE status = 'ATTEMPTING' 
+                            AND attempted_at < NOW() - INTERVAL '10 minutes'
+                            AND retry_count < max_retries
+                        """)
+                        reset_count = cur.rowcount
+                        conn.commit()
+                        
+                        if reset_count > 0:
+                            logger.info(f"🔄 Reset {reset_count} stuck transactions for recovery")
+                        
+                        return reset_count
+        except Exception as e:
+            logger.error(f"❌ Failed to reset stuck transactions: {e}")
+            return 0
     
     def get_transaction_status(self, transaction_id: str) -> Optional[Dict]:
         """Get current status of a transaction"""
