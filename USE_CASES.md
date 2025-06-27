@@ -280,7 +280,9 @@ elif replica and replica.is_healthy:  # WRITE FAILOVER
 
 #### **🎉 NEW: Enhanced Manual Testing Script with Selective Auto-Cleanup** ⭐
 
-**✅ RECOMMENDED: Enhanced Guided Manual Testing** (`test_use_case_2_manual.py`) ⭐ **ENHANCED**
+**✅ RECOMMENDED: Fixed Validation Testing** (`test_use_case_2_fixed_validation.py`) ⭐ **ENHANCED** 
+
+⚠️ **CRITICAL**: Use the fixed validation test that properly detects WAL sync failures. The original `test_use_case_2_manual.py` has false success issues.
 - ✅ **Complete lifecycle guidance**: Step-by-step manual infrastructure failure simulation
 - ✅ **Automated testing during failure**: Comprehensive operation testing while primary is down
 - ✅ **Recovery verification**: Automatic monitoring of primary restoration and sync completion
@@ -292,7 +294,7 @@ elif replica and replica.is_healthy:  # WRITE FAILOVER
 
 **Run Command:**
 ```bash
-python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
+python test_use_case_2_fixed_validation.py --url https://chroma-load-balancer.onrender.com
 ```
 
 **Testing Flow:**
@@ -335,9 +337,9 @@ python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
 
 ### **Manual Validation - ENHANCED SCRIPT AVAILABLE** ⭐
 
-**✅ RECOMMENDED**: Use the enhanced testing script for guided validation:
+**✅ RECOMMENDED**: Use the fixed validation script for guided validation:
 ```bash
-python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
+python test_use_case_2_fixed_validation.py --url https://chroma-load-balancer.onrender.com
 ```
 
 **The script automates all validation steps with:**
@@ -389,9 +391,9 @@ USE CASE 2 now provides **bulletproof protection** against primary instance fail
 
 ### **🔥 PRODUCTION TESTING PROTOCOL - ENHANCED SCRIPT** ⭐
 
-**✅ RECOMMENDED**: Use the enhanced testing script which automates the protocol below:
+**✅ RECOMMENDED**: Use the fixed validation script which automates the protocol below:
 ```bash
-python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
+python test_use_case_2_fixed_validation.py --url https://chroma-load-balancer.onrender.com
 ```
 
 **❌ LEGACY APPROACH**: Manual step-by-step protocol (automated by script above)
