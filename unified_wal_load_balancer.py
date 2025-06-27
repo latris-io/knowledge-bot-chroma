@@ -845,15 +845,19 @@ class UnifiedWALLoadBalancer:
             with self.get_db_connection_ctx() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     # Get writes that need to be synced to this instance
-                    # CRITICAL FIX: Include both 'executed' and 'failed' status for retry
+                    # 🔧 CRITICAL FIX FOR USE CASE 2: Correct replica→primary sync logic
+                    # When looking for operations to sync TO primary, we want:
+                    # 1. Operations that were executed on replica (executed_on = 'replica') 
+                    # 2. Operations with target_instance = 'primary' or 'both'
                     cur.execute("""
                         SELECT write_id, method, path, data, headers, collection_id, 
                                timestamp, retry_count, data_size_bytes, priority
                         FROM unified_wal_writes 
                         WHERE (status = 'executed' OR status = 'failed') 
-                        AND (target_instance = 'both' OR 
-                             (target_instance = %s AND executed_on != %s) OR
-                             (target_instance != %s AND executed_on != %s))
+                        AND (
+                            (target_instance = 'both') OR
+                            (target_instance = %s AND executed_on != %s)
+                        )
                         AND retry_count < 3
                         AND (
                             status = 'executed' OR 
@@ -861,7 +865,7 @@ class UnifiedWALLoadBalancer:
                         )
                         ORDER BY priority DESC, retry_count ASC, timestamp ASC
                         LIMIT %s
-                    """, (target_instance, target_instance, target_instance, target_instance, batch_size * 3))
+                    """, (target_instance, target_instance, batch_size * 3))
                     
                     all_writes = cur.fetchall()
                     
