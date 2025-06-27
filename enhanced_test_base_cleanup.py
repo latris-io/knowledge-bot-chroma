@@ -51,6 +51,9 @@ class EnhancedTestBase:
         self.test_results = []
         self.current_test = None
         
+        # Data preservation flag for emergency cleanup control
+        self.preserve_data_for_debugging = False
+        
         # Register emergency cleanup
         atexit.register(self.emergency_cleanup)
         
@@ -457,7 +460,17 @@ class EnhancedTestBase:
         return cleanup_results
 
     def emergency_cleanup(self):
-        """Emergency cleanup that runs on exit"""
+        """Emergency cleanup that runs on exit - respects data preservation flag"""
+        # Check if data should be preserved for debugging
+        if hasattr(self, 'preserve_data_for_debugging') and self.preserve_data_for_debugging:
+            if hasattr(self, 'test_data') and self.test_data:
+                total_collections = sum(len(test_info['collections']) for test_info in self.test_data.values())
+                if total_collections > 0:
+                    logger.warning(f"🔒 Emergency cleanup SKIPPED: Preserving {total_collections} test collections for debugging")
+                    logger.warning(f"   Data preserved as requested - manual cleanup available with comprehensive_system_cleanup.py")
+                    return
+        
+        # Normal emergency cleanup behavior
         if hasattr(self, 'test_data') and self.test_data:
             total_collections = sum(len(test_info['collections']) for test_info in self.test_data.values())
             if total_collections > 0:

@@ -15,6 +15,7 @@ class ProductionValidator(EnhancedTestBase):
     def __init__(self, base_url):
         # Initialize enhanced test base with PostgreSQL cleanup + selective lifecycle
         super().__init__(base_url, test_prefix="PRODUCTION")
+        self.preserve_data_for_debugging = False  # Flag to control emergency cleanup
         self.session_id = int(time.time())
         self.failures = []
         
@@ -1139,10 +1140,40 @@ class ProductionValidator(EnhancedTestBase):
             print("🔒 OVERALL TEST SUITE FAILED - Preserving ALL test data for debugging")
             print("   Individual test data will be preserved regardless of individual test results")
             print("   📋 Manual cleanup available after debugging: python comprehensive_system_cleanup.py")
+            
+            # CRITICAL: Disable emergency cleanup to actually preserve data
+            self.preserve_data_for_debugging = True
+            
+            # Validate that data is actually preserved
+            self.validate_data_preservation()
             return
         else:
             print("✅ OVERALL TEST SUITE PASSED - Applying selective cleanup per individual test results")
             self.cleanup()
+    
+    def validate_data_preservation(self):
+        """Validate that test data is actually preserved for failed tests"""
+        print("   🔍 VALIDATING: Test data preservation...")
+        
+        # Get current collections
+        try:
+            response = requests.get(f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections", timeout=10)
+            if response.status_code == 200:
+                collections = response.json()
+                preserved_collections = [c['name'] for c in collections if 'TEST' in c['name'].upper()]
+                
+                if preserved_collections:
+                    print(f"   ✅ VALIDATED: {len(preserved_collections)} test collections preserved:")
+                    for collection in preserved_collections:
+                        print(f"      - {collection}")
+                        print(f"        URL: {self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection}")
+                else:
+                    print("   ❌ VALIDATION FAILED: No test collections found - data was NOT preserved!")
+                    
+            else:
+                print(f"   ⚠️ Cannot validate preservation: HTTP {response.status_code}")
+        except Exception as e:
+            print(f"   ⚠️ Cannot validate preservation: {e}")
     
     def cleanup(self):
         """Enhanced cleanup - includes PostgreSQL data with selective lifecycle"""
