@@ -3332,6 +3332,39 @@ if __name__ == '__main__':
             else:
                 logger.info(f"ℹ️ PROXY_REQUEST: {operation_type.upper()} - Using distributed system (no WAL logging needed)")
             
+            # 🔧 CRITICAL FIX: Handle document operations with proper UUID resolution
+            if '/collections/' in final_path and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update', '/delete', '/get', '/query', '/count']):
+                logger.info(f"🔍 PROXY_REQUEST: DOCUMENT OPERATION DETECTED - Resolving collection name to UUID")
+                
+                # Extract collection identifier from path
+                path_parts = final_path.split('/collections/')
+                if len(path_parts) > 1:
+                    collection_part = path_parts[1].split('/')[0]
+                    logger.info(f"🔍 PROXY_REQUEST: Extracted collection identifier: {collection_part}")
+                    
+                    # Check if it's already a UUID (36 chars with hyphens) or a collection name
+                    import re
+                    is_uuid = bool(re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_part, re.I))
+                    
+                    if not is_uuid:
+                        # Collection name - need to resolve to UUID for this instance
+                        logger.info(f"🔍 PROXY_REQUEST: Collection name detected: {collection_part} - resolving to UUID for {target_instance.name}")
+                        
+                        # Get UUID for this collection on the target instance
+                        collection_uuid = enhanced_wal.resolve_collection_name_to_uuid(collection_part, target_instance.name)
+                        
+                        if collection_uuid:
+                            # Replace collection name with UUID in the URL
+                            original_url = url
+                            url = url.replace(f'/collections/{collection_part}/', f'/collections/{collection_uuid}/')
+                            logger.info(f"✅ PROXY_REQUEST: UUID resolved - {collection_part} → {collection_uuid[:8]}...")
+                            logger.info(f"🔍 PROXY_REQUEST: URL updated: {original_url} → {url}")
+                        else:
+                            logger.error(f"❌ PROXY_REQUEST: Cannot resolve collection '{collection_part}' to UUID on {target_instance.name}")
+                            logger.error(f"💀 CRITICAL: Document operation will fail - collection not found or mapping missing")
+                    else:
+                        logger.info(f"✅ PROXY_REQUEST: UUID detected in path: {collection_part[:8]}...")
+            
             # Make request with proven working approach
             logger.info(f"🔍 PROXY_REQUEST: Making HTTP request to target...")
             import requests
