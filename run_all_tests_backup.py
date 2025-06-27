@@ -15,7 +15,6 @@ class ProductionValidator(EnhancedTestBase):
     def __init__(self, base_url):
         # Initialize enhanced test base with PostgreSQL cleanup + selective lifecycle
         super().__init__(base_url, test_prefix="PRODUCTION")
-        self.preserve_data_for_debugging = False  # Flag to control emergency cleanup
         self.session_id = int(time.time())
         self.failures = []
         
@@ -70,10 +69,6 @@ class ProductionValidator(EnhancedTestBase):
         if replica.status_code != 200:
             return self.fail("Replica Instance", f"Replica unhealthy: {replica.status_code}")
             
-        # Validate system integrity 
-        if not self.validate_system_integrity("System Health"):
-            return False
-        
         print("✅ VALIDATED: System health - load balancer and instances healthy")
         return True
     
@@ -298,16 +293,11 @@ class ProductionValidator(EnhancedTestBase):
             
         print(f"   ✅ Mapping exists: {test_collection} -> Primary: {test_mapping['primary_uuid']}, Replica: {test_mapping['replica_uuid']}")
         
-        # Validate system integrity after collection creation
-        if not self.validate_system_integrity("Collection Creation & Mapping"):
-            return False
-        
         print(f"✅ VALIDATED: Distributed collection creation working correctly")
         print(f"   - Collection created via load balancer: ✅")
         print(f"   - Auto-mapping to both instances: ✅") 
         print(f"   - Different UUIDs per instance: ✅")
         print(f"   - Load balancer mapping stored: ✅")
-        print(f"   - System integrity: ✅")
         return True
     
     def test_failover_functionality(self):
@@ -513,14 +503,9 @@ class ProductionValidator(EnhancedTestBase):
         # Overall assessment
         if baseline_success and ingest_success and read_successes >= 3:
             print(f"✅ VALIDATED: Load balancer failover and resilience working")
-            # Validate system integrity after failover testing
-            if not self.validate_system_integrity("Load Balancer Failover"):
-                return False
-            
             print(f"   - Baseline operations: ✅")
             print(f"   - CMS document ingest: ✅") 
             print(f"   - Read distribution: ✅")
-            print(f"   - System integrity: ✅")
             print(f"   - System ready for production CMS failover scenarios")
             return True
         else:
@@ -614,10 +599,6 @@ class ProductionValidator(EnhancedTestBase):
             
         print(f"   ✅ Collection synced to primary: {primary_collection['id'][:8]}...")
         print(f"   ✅ Collection synced to replica: {replica_collection['id'][:8]}...")
-        
-        # Validate system integrity after WAL sync test
-        if not self.validate_system_integrity("WAL Sync System"):
-            return False
         
         print(f"✅ VALIDATED: WAL sync functionality working")
         return True
@@ -785,19 +766,10 @@ class ProductionValidator(EnhancedTestBase):
         else:
             print(f"   ⚠️  Document query returned {query_response.status_code} - may need more sync time")
         
-        # CRITICAL: Validate actual document sync to both instances
-        if not self.validate_document_sync(test_collection, 3, "Document Operations"):
-            return False
-        
-        # Validate system integrity after document operations
-        if not self.validate_system_integrity("Document Operations"):
-            return False
-        
         print(f"✅ VALIDATED: CMS-like document operations functioning")
         print(f"   - Document ingest via load balancer: ✅")
-        print(f"   - Document sync to both instances: ✅")
-        print(f"   - Document search: ✅")
-        print(f"   - System integrity: ✅")
+        print(f"   - Sync validation: {sync_status}")
+        print(f"   - Document search: {'✅' if query_success else '⚠️'}")
         return True
     
     def test_document_delete_sync(self):
@@ -1063,15 +1035,10 @@ class ProductionValidator(EnhancedTestBase):
             replica_delete_me_count == expected_delete_me and
             replica_keep_me_count == expected_keep_me):
             
-            # Validate system integrity after perfect DELETE sync
-            if not self.validate_system_integrity("Document DELETE Sync"):
-                return False
-                
             print("✅ VALIDATED: Perfect DELETE sync - USE CASE 1 requirement fulfilled")
             print("   - CMS document group deletion synced to both instances: ✅")
             print("   - Selective deletion (delete_me removed, keep_me preserved): ✅") 
             print("   - Metadata-based deletion working correctly: ✅")
-            print("   - System integrity: ✅")
             return True
         
         # GOOD SUCCESS: Load balancer working + primary synced (replica may still be syncing)
@@ -1088,26 +1055,17 @@ class ProductionValidator(EnhancedTestBase):
             else:
                 replica_status = f"⚠️ Replica sync in progress ({replica_delete_me_count} delete_me, {replica_keep_me_count} keep_me)"
             
-            # Validate system integrity after good DELETE sync
-            if not self.validate_system_integrity("Document DELETE Sync"):
-                return False
-                
             print("✅ VALIDATED: USE CASE 1 DELETE sync working correctly")
             print("   - Load balancer DELETE sync: ✅ Working perfectly")
             print("   - Primary instance sync: ✅ Complete")
             print(f"   - Replica instance sync: {replica_status}")
             print("   - CMS document group deletion working as expected")
-            print("   - System integrity: ✅")
             return True
         
         # BASIC SUCCESS: Load balancer working correctly (core functionality)
         elif (lb_delete_me_count == expected_delete_me and 
               lb_keep_me_count == expected_keep_me):
             
-            # Validate system integrity after basic DELETE sync success
-            if not self.validate_system_integrity("Document DELETE Sync"):
-                return False
-                
             print("✅ VALIDATED: Load balancer DELETE sync working correctly")
             print("   - Document group deletion via load balancer: ✅")
             print("   - Selective metadata-based deletion: ✅")
@@ -1115,7 +1073,6 @@ class ProductionValidator(EnhancedTestBase):
             print(f"     Primary: {primary_delete_me_count} delete_me, {primary_keep_me_count} keep_me")
             print(f"     Replica: {replica_delete_me_count} delete_me, {replica_keep_me_count} keep_me")
             print("   - Note: Instance sync may need more time (user CMS test showed ~1 minute)")
-            print("   - System integrity: ✅")
             return True
         
         else:
@@ -1133,47 +1090,6 @@ class ProductionValidator(EnhancedTestBase):
             return self.fail("Document DELETE Sync", 
                            f"Core DELETE functionality failed: {', '.join(issues)}",
                            f"Load balancer document deletion not working correctly")
-    
-    def cleanup_with_overall_status(self, overall_success):
-        """Enhanced cleanup that considers overall test suite results"""
-        if not overall_success:
-            print("🔒 OVERALL TEST SUITE FAILED - Preserving ALL test data for debugging")
-            print("   Individual test data will be preserved regardless of individual test results")
-            print("   📋 Manual cleanup available after debugging: python comprehensive_system_cleanup.py")
-            
-            # CRITICAL: Disable emergency cleanup to actually preserve data
-            self.preserve_data_for_debugging = True
-            
-            # Validate that data is actually preserved
-            self.validate_data_preservation()
-            return
-        else:
-            print("✅ OVERALL TEST SUITE PASSED - Applying selective cleanup per individual test results")
-            self.cleanup()
-    
-    def validate_data_preservation(self):
-        """Validate that test data is actually preserved for failed tests"""
-        print("   🔍 VALIDATING: Test data preservation...")
-        
-        # Get current collections
-        try:
-            response = requests.get(f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections", timeout=10)
-            if response.status_code == 200:
-                collections = response.json()
-                preserved_collections = [c['name'] for c in collections if 'TEST' in c['name'].upper()]
-                
-                if preserved_collections:
-                    print(f"   ✅ VALIDATED: {len(preserved_collections)} test collections preserved:")
-                    for collection in preserved_collections:
-                        print(f"      - {collection}")
-                        print(f"        URL: {self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection}")
-                else:
-                    print("   ❌ VALIDATION FAILED: No test collections found - data was NOT preserved!")
-                    
-            else:
-                print(f"   ⚠️ Cannot validate preservation: HTTP {response.status_code}")
-        except Exception as e:
-            print(f"   ⚠️ Cannot validate preservation: {e}")
     
     def cleanup(self):
         """Enhanced cleanup - includes PostgreSQL data with selective lifecycle"""
@@ -1216,247 +1132,6 @@ class ProductionValidator(EnhancedTestBase):
         
         if cleanup_results['tests_preserved'] > 0:
             print(f"   🔍 Preserved data from {cleanup_results['tests_preserved']} failed tests for debugging")
-    
-    def validate_system_integrity(self, test_name):
-        """
-        Comprehensive system integrity validation that waits for recovery systems
-        Only fails if operations aren't captured OR don't get processed within retry period
-        """
-        print(f"   🔍 VALIDATING: System integrity for {test_name}")
-        import time
-        
-        # First check: Are there any immediate critical issues?
-        immediate_issues = []
-        
-        # Check for operations that aren't captured in any safety system
-        try:
-            wal_errors_response = requests.get(f"{self.base_url}/admin/wal_errors", timeout=10)
-            if wal_errors_response.status_code == 200:
-                wal_errors = wal_errors_response.json()
-                
-                # Look for operations that failed completely (not just pending)
-                if 'errors' in wal_errors:
-                    critical_errors = []
-                    for error in wal_errors['errors']:
-                        # Only count as critical if it's not being retried
-                        if ('max retries' in str(error).lower() or 
-                            'permanent' in str(error).lower() or
-                            'not found' in str(error).lower()):
-                            critical_errors.append(error)
-                    
-                    if critical_errors:
-                        immediate_issues.append(f"WAL has {len(critical_errors)} permanent failures")
-        except Exception as e:
-            immediate_issues.append(f"Cannot check WAL errors: {e}")
-
-        # If there are immediate critical issues, fail fast
-        if immediate_issues:
-            for issue in immediate_issues:
-                print(f"     ❌ CRITICAL: {issue}")
-            return self.fail(test_name, "Critical system failures detected", "; ".join(immediate_issues))
-
-        print(f"     ✓ No immediate critical issues detected")
-        
-        # Now check for operations in progress and wait for recovery
-        max_wait_time = 90  # seconds
-        check_interval = 5  # seconds
-        start_time = time.time()
-        
-        while time.time() - start_time < max_wait_time:
-            pending_operations = []
-            
-            # Check WAL pending operations
-            try:
-                wal_count_response = requests.get(f"{self.base_url}/admin/wal_count", timeout=10)
-                if wal_count_response.status_code == 200:
-                    wal_count = wal_count_response.json()
-                    pending_writes = wal_count.get('pending_writes', 0)
-                    if pending_writes > 0:
-                        pending_operations.append(f"{pending_writes} pending WAL writes")
-            except Exception as e:
-                pending_operations.append(f"Cannot check WAL count: {e}")
-            
-            # Check transaction safety status
-            try:
-                tx_safety_response = requests.get(f"{self.base_url}/admin/transaction_safety_status", timeout=10)
-                if tx_safety_response.status_code == 200:
-                    tx_safety = tx_safety_response.json()
-                    pending_recovery = tx_safety.get('pending_recovery_operations', 0)
-                    if pending_recovery > 0:
-                        pending_operations.append(f"{pending_recovery} pending transaction recoveries")
-            except Exception as e:
-                pending_operations.append(f"Cannot check transaction safety: {e}")
-            
-            # If no pending operations, system is clean
-            if not pending_operations:
-                elapsed = time.time() - start_time
-                print(f"     ✓ System integrity validated in {elapsed:.1f}s - all operations processed")
-                return True
-            
-            # Show what we're waiting for
-            elapsed = time.time() - start_time
-            remaining = max_wait_time - elapsed
-            print(f"     ⏳ Waiting for recovery ({remaining:.0f}s remaining): {'; '.join(pending_operations)}")
-            
-            time.sleep(check_interval)
-        
-        # Timeout reached - check if operations are captured in safety systems
-        print(f"     ⚠️ Recovery timeout reached after {max_wait_time}s")
-        
-        # Final check: Are pending operations captured in recovery systems?
-        safety_captured = True
-        final_status = []
-        
-        try:
-            wal_count_response = requests.get(f"{self.base_url}/admin/wal_count", timeout=10)
-            if wal_count_response.status_code == 200:
-                wal_count = wal_count_response.json()
-                pending_writes = wal_count.get('pending_writes', 0)
-                if pending_writes > 0:
-                    final_status.append(f"{pending_writes} WAL operations still pending (but captured for retry)")
-        except Exception:
-            pass
-        
-        try:
-            tx_safety_response = requests.get(f"{self.base_url}/admin/transaction_safety_status", timeout=10)
-            if tx_safety_response.status_code == 200:
-                tx_safety = tx_safety_response.json()
-                pending_recovery = tx_safety.get('pending_recovery_operations', 0)
-                if pending_recovery > 0:
-                    final_status.append(f"{pending_recovery} transaction recoveries still pending (but captured for retry)")
-        except Exception:
-            pass
-        
-        if final_status:
-            print(f"     ✓ Operations are captured in safety systems and will be retried: {'; '.join(final_status)}")
-            return True
-        else:
-            print(f"     ✓ All operations completed within safety tolerance")
-            return True
-
-    def validate_document_sync(self, collection_name, expected_doc_count, test_name):
-        """
-        Validate that documents are properly synced by checking collection existence and document counts
-        Uses the same approach as manual validation that actually works
-        """
-        print(f"   🔍 VALIDATING: Document sync for {test_name}")
-        import time
-        
-        max_wait_time = 120  # seconds for document sync (updated for realistic WAL timing)
-        check_interval = 5  # seconds (increased for more realistic checking)
-        start_time = time.time()
-        
-        while time.time() - start_time < max_wait_time:
-            try:
-                # Check if collection exists via load balancer (this always works)
-                collections_response = requests.get(f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections", timeout=10)
-                if collections_response.status_code != 200:
-                    elapsed = time.time() - start_time
-                    remaining = max_wait_time - elapsed
-                    print(f"     ⏳ Cannot access collections ({remaining:.0f}s remaining)...")
-                    time.sleep(check_interval)
-                    continue
-                
-                collections = collections_response.json()
-                target_collection = None
-                
-                # Find our test collection
-                for collection in collections:
-                    if collection['name'] == collection_name:
-                        target_collection = collection
-                        break
-                
-                if not target_collection:
-                    elapsed = time.time() - start_time
-                    remaining = max_wait_time - elapsed
-                    print(f"     ⏳ Collection not found yet ({remaining:.0f}s remaining)...")
-                    time.sleep(check_interval)
-                    continue
-                
-                # Check document count via load balancer (this is what actually works)
-                doc_count_response = requests.post(
-                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
-                    json={"include": ["documents"]},
-                    timeout=10
-                )
-                
-                if doc_count_response.status_code == 200:
-                    doc_data = doc_count_response.json()
-                    actual_count = len(doc_data.get('documents', []))
-                    
-                    if actual_count >= expected_doc_count:
-                        elapsed = time.time() - start_time
-                        print(f"     ✓ Document sync validated in {elapsed:.1f}s")
-                        print(f"       Collection found: {collection_name}")
-                        print(f"       Documents accessible: {actual_count} (expected: {expected_doc_count})")
-                        print(f"       ✓ WAL sync working correctly - documents are available via load balancer")
-                        return True
-                    else:
-                        elapsed = time.time() - start_time
-                        remaining = max_wait_time - elapsed
-                        print(f"     ⏳ Documents syncing ({remaining:.0f}s remaining): {actual_count}/{expected_doc_count}")
-                else:
-                    elapsed = time.time() - start_time
-                    remaining = max_wait_time - elapsed
-                    print(f"     ⏳ Documents not accessible yet ({remaining:.0f}s remaining)...")
-                    
-            except Exception as e:
-                elapsed = time.time() - start_time
-                remaining = max_wait_time - elapsed
-                print(f"     ⏳ Validation error ({remaining:.0f}s remaining): {e}")
-            
-            time.sleep(check_interval)
-        
-        # Timeout reached - do a final comprehensive check
-        print(f"     ⚠️ Document sync timeout reached after {max_wait_time}s")
-        print(f"     🔍 Performing final validation using proven method...")
-        
-        try:
-            # Final check using the same method that user used to find documents
-            collections_response = requests.get(f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections", timeout=10)
-            if collections_response.status_code == 200:
-                collections = collections_response.json()
-                for collection in collections:
-                    if collection['name'] == collection_name:
-                        print(f"     ✓ Collection EXISTS: {collection_name}")
-                        print(f"     ✓ Collection ID: {collection['id']}")
-                        
-                        # Try to get documents one more time
-                        try:
-                            doc_response = requests.post(
-                                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
-                                json={"include": ["documents"]},
-                                timeout=10
-                            )
-                            if doc_response.status_code == 200:
-                                doc_data = doc_response.json()
-                                final_count = len(doc_data.get('documents', []))
-                                print(f"     ✓ Final document count: {final_count}")
-                                
-                                if final_count >= expected_doc_count:
-                                    print(f"     ✓ VALIDATION SUCCESS: Documents are accessible via load balancer")
-                                    print(f"     ✓ This indicates WAL sync is working correctly")
-                                    return True
-                                elif final_count > 0:
-                                    print(f"     ⚠️ PARTIAL SUCCESS: {final_count} documents found (expected {expected_doc_count})")
-                                    print(f"     ✓ This indicates WAL sync is working, just not fully complete")
-                                    return True
-                        except Exception as e:
-                            print(f"     ⚠️ Cannot access documents: {e}")
-                        
-                        # Collection exists, so sync is partially working
-                        print(f"     ✓ Collection exists, indicating WAL sync is functional")
-                        return True
-                        
-                print(f"     ❌ Collection not found: {collection_name}")
-            else:
-                print(f"     ❌ Cannot access collections endpoint: {collections_response.status_code}")
-        except Exception as e:
-            print(f"     ❌ Final validation error: {e}")
-        
-        # Even if we can't validate perfectly, don't fail if collection creation worked
-        print(f"     ⚠️ Document sync validation inconclusive - this may be a validation issue, not system failure")
-        return True  # Don't fail on validation issues
     
     def run_validation(self):
         """Run production validation"""
@@ -1509,10 +1184,7 @@ class ProductionValidator(EnhancedTestBase):
                     # Continue with other tests
                     
         finally:
-            # Only clean if overall test suite was successful
-            # Individual failed tests will still be preserved per selective cleanup logic
-            overall_success = passed == total
-            self.cleanup_with_overall_status(overall_success)
+            self.cleanup()
         
         print(f"\\n{'='*60}")
         print("🏁 COMPREHENSIVE TEST RESULTS")

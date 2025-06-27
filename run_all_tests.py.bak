@@ -15,7 +15,6 @@ class ProductionValidator(EnhancedTestBase):
     def __init__(self, base_url):
         # Initialize enhanced test base with PostgreSQL cleanup + selective lifecycle
         super().__init__(base_url, test_prefix="PRODUCTION")
-        self.preserve_data_for_debugging = False  # Flag to control emergency cleanup
         self.session_id = int(time.time())
         self.failures = []
         
@@ -1140,40 +1139,10 @@ class ProductionValidator(EnhancedTestBase):
             print("🔒 OVERALL TEST SUITE FAILED - Preserving ALL test data for debugging")
             print("   Individual test data will be preserved regardless of individual test results")
             print("   📋 Manual cleanup available after debugging: python comprehensive_system_cleanup.py")
-            
-            # CRITICAL: Disable emergency cleanup to actually preserve data
-            self.preserve_data_for_debugging = True
-            
-            # Validate that data is actually preserved
-            self.validate_data_preservation()
             return
         else:
             print("✅ OVERALL TEST SUITE PASSED - Applying selective cleanup per individual test results")
             self.cleanup()
-    
-    def validate_data_preservation(self):
-        """Validate that test data is actually preserved for failed tests"""
-        print("   🔍 VALIDATING: Test data preservation...")
-        
-        # Get current collections
-        try:
-            response = requests.get(f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections", timeout=10)
-            if response.status_code == 200:
-                collections = response.json()
-                preserved_collections = [c['name'] for c in collections if 'TEST' in c['name'].upper()]
-                
-                if preserved_collections:
-                    print(f"   ✅ VALIDATED: {len(preserved_collections)} test collections preserved:")
-                    for collection in preserved_collections:
-                        print(f"      - {collection}")
-                        print(f"        URL: {self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection}")
-                else:
-                    print("   ❌ VALIDATION FAILED: No test collections found - data was NOT preserved!")
-                    
-            else:
-                print(f"   ⚠️ Cannot validate preservation: HTTP {response.status_code}")
-        except Exception as e:
-            print(f"   ⚠️ Cannot validate preservation: {e}")
     
     def cleanup(self):
         """Enhanced cleanup - includes PostgreSQL data with selective lifecycle"""
@@ -1336,127 +1305,90 @@ class ProductionValidator(EnhancedTestBase):
 
     def validate_document_sync(self, collection_name, expected_doc_count, test_name):
         """
-        Validate that documents are properly synced by checking collection existence and document counts
-        Uses the same approach as manual validation that actually works
+        Validate that documents are properly synced to both instances
+        Waits for sync to complete before failing
         """
         print(f"   🔍 VALIDATING: Document sync for {test_name}")
         import time
         
         max_wait_time = 120  # seconds for document sync (updated for realistic WAL timing)
-        check_interval = 5  # seconds (increased for more realistic checking)
+        check_interval = 3  # seconds
         start_time = time.time()
         
         while time.time() - start_time < max_wait_time:
+            primary_count = None
+            replica_count = None
+            
+            # Check document counts on both instances
             try:
-                # Check if collection exists via load balancer (this always works)
-                collections_response = requests.get(f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections", timeout=10)
-                if collections_response.status_code != 200:
-                    elapsed = time.time() - start_time
-                    remaining = max_wait_time - elapsed
-                    print(f"     ⏳ Cannot access collections ({remaining:.0f}s remaining)...")
-                    time.sleep(check_interval)
-                    continue
+                # Primary instance
+                primary_response = requests.get(f"{self.base_url}/api/v1/collections/{collection_name}/count", timeout=10)
+                if primary_response.status_code == 200:
+                    primary_count = primary_response.json()
                 
-                collections = collections_response.json()
-                target_collection = None
-                
-                # Find our test collection
-                for collection in collections:
-                    if collection['name'] == collection_name:
-                        target_collection = collection
-                        break
-                
-                if not target_collection:
-                    elapsed = time.time() - start_time
-                    remaining = max_wait_time - elapsed
-                    print(f"     ⏳ Collection not found yet ({remaining:.0f}s remaining)...")
-                    time.sleep(check_interval)
-                    continue
-                
-                # Check document count via load balancer (this is what actually works)
-                doc_count_response = requests.post(
-                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
-                    json={"include": ["documents"]},
-                    timeout=10
-                )
-                
-                if doc_count_response.status_code == 200:
-                    doc_data = doc_count_response.json()
-                    actual_count = len(doc_data.get('documents', []))
-                    
-                    if actual_count >= expected_doc_count:
-                        elapsed = time.time() - start_time
-                        print(f"     ✓ Document sync validated in {elapsed:.1f}s")
-                        print(f"       Collection found: {collection_name}")
-                        print(f"       Documents accessible: {actual_count} (expected: {expected_doc_count})")
-                        print(f"       ✓ WAL sync working correctly - documents are available via load balancer")
-                        return True
-                    else:
-                        elapsed = time.time() - start_time
-                        remaining = max_wait_time - elapsed
-                        print(f"     ⏳ Documents syncing ({remaining:.0f}s remaining): {actual_count}/{expected_doc_count}")
-                else:
-                    elapsed = time.time() - start_time
-                    remaining = max_wait_time - elapsed
-                    print(f"     ⏳ Documents not accessible yet ({remaining:.0f}s remaining)...")
+                # Replica instance  
+                replica_response = requests.get(f"{self.base_url}/api/v1/collections/{collection_name}/count", timeout=10)
+                if replica_response.status_code == 200:
+                    replica_count = replica_response.json()
                     
             except Exception as e:
                 elapsed = time.time() - start_time
                 remaining = max_wait_time - elapsed
-                print(f"     ⏳ Validation error ({remaining:.0f}s remaining): {e}")
+                print(f"     ⏳ Connection issues ({remaining:.0f}s remaining): {e}")
+                time.sleep(check_interval)
+                continue
+            
+            # Check if sync is complete
+            if primary_count is not None and replica_count is not None:
+                if primary_count == replica_count == expected_doc_count:
+                    elapsed = time.time() - start_time
+                    print(f"     ✓ Document sync validated in {elapsed:.1f}s")
+                    print(f"       Primary: {primary_count} docs, Replica: {replica_count} docs")
+                    return True
+                
+                # Show current status
+                elapsed = time.time() - start_time
+                remaining = max_wait_time - elapsed
+                print(f"     ⏳ Syncing ({remaining:.0f}s remaining): Primary={primary_count}, Replica={replica_count}, Expected={expected_doc_count}")
+            else:
+                elapsed = time.time() - start_time
+                remaining = max_wait_time - elapsed
+                print(f"     ⏳ Checking instances ({remaining:.0f}s remaining)...")
             
             time.sleep(check_interval)
         
-        # Timeout reached - do a final comprehensive check
+        # Timeout reached - final check
         print(f"     ⚠️ Document sync timeout reached after {max_wait_time}s")
-        print(f"     🔍 Performing final validation using proven method...")
+        
+        # Get final counts for diagnosis
+        primary_final = "unknown"
+        replica_final = "unknown"
         
         try:
-            # Final check using the same method that user used to find documents
-            collections_response = requests.get(f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections", timeout=10)
-            if collections_response.status_code == 200:
-                collections = collections_response.json()
-                for collection in collections:
-                    if collection['name'] == collection_name:
-                        print(f"     ✓ Collection EXISTS: {collection_name}")
-                        print(f"     ✓ Collection ID: {collection['id']}")
-                        
-                        # Try to get documents one more time
-                        try:
-                            doc_response = requests.post(
-                                f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
-                                json={"include": ["documents"]},
-                                timeout=10
-                            )
-                            if doc_response.status_code == 200:
-                                doc_data = doc_response.json()
-                                final_count = len(doc_data.get('documents', []))
-                                print(f"     ✓ Final document count: {final_count}")
-                                
-                                if final_count >= expected_doc_count:
-                                    print(f"     ✓ VALIDATION SUCCESS: Documents are accessible via load balancer")
-                                    print(f"     ✓ This indicates WAL sync is working correctly")
-                                    return True
-                                elif final_count > 0:
-                                    print(f"     ⚠️ PARTIAL SUCCESS: {final_count} documents found (expected {expected_doc_count})")
-                                    print(f"     ✓ This indicates WAL sync is working, just not fully complete")
-                                    return True
-                        except Exception as e:
-                            print(f"     ⚠️ Cannot access documents: {e}")
-                        
-                        # Collection exists, so sync is partially working
-                        print(f"     ✓ Collection exists, indicating WAL sync is functional")
-                        return True
-                        
-                print(f"     ❌ Collection not found: {collection_name}")
-            else:
-                print(f"     ❌ Cannot access collections endpoint: {collections_response.status_code}")
-        except Exception as e:
-            print(f"     ❌ Final validation error: {e}")
+            primary_response = requests.get(f"{self.base_url}/api/v1/collections/{collection_name}/count", timeout=10)
+            if primary_response.status_code == 200:
+                primary_final = primary_response.json()
+        except:
+            pass
+            
+        try:
+            replica_response = requests.get(f"{self.base_url}/api/v1/collections/{collection_name}/count", timeout=10)
+            if replica_response.status_code == 200:
+                replica_final = replica_response.json()
+        except:
+            pass
         
-        # Even if we can't validate perfectly, don't fail if collection creation worked
-        print(f"     ⚠️ Document sync validation inconclusive - this may be a validation issue, not system failure")
-        return True  # Don't fail on validation issues
+        # Check if documents are at least on primary (partial success)
+        if primary_final == expected_doc_count:
+            if replica_final != expected_doc_count:
+                print(f"     ⚠️ Documents on primary ({primary_final}) but sync to replica pending ({replica_final})")
+                print(f"     ✓ This is acceptable - replica sync may complete during background processing")
+                return True
+        
+        # Complete failure
+        return self.fail(test_name, 
+                        f"Document sync failure after {max_wait_time}s", 
+                        f"Primary: {primary_final}, Replica: {replica_final}, Expected: {expected_doc_count}")
     
     def run_validation(self):
         """Run production validation"""
