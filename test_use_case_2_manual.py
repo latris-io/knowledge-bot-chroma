@@ -175,7 +175,7 @@ class UseCase2Tester(EnhancedVerificationBase):
         if final_pending:
             print(f"   ⚠️ Recovery timeout reached with pending operations: {'; '.join(final_pending)}")
             print(f"   ℹ️ Operations may complete in background - this indicates system stress, not failure")
-            return True  # Don't fail - just warn
+            return self.fail(test_name, "Recovery timeout", "System has pending operations")
         else:
             print(f"   ✅ System integrity validated after recovery period")
             return True
@@ -237,7 +237,7 @@ class UseCase2Tester(EnhancedVerificationBase):
         # Final validation - don't fail if we can't access instances directly
         print(f"   ⚠️ Document sync validation timeout - operations may complete in background")
         print(f"   ℹ️ Direct instance access may be limited - load balancer access remains functional")
-        return True  # Don't fail on timeout
+        return self.fail(test_name, "Document sync timeout", f"Documents not synced within {max_wait_time} seconds")
 
     def fail(self, test, reason, details=""):
         """Mark a test as failed with detailed information"""
