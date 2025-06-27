@@ -112,7 +112,8 @@ class ComprehensiveSystemCleanup:
                             'REAL_TEST_', 'WAL_SYNC_TEST_', 'USE_CASE_',
                             'UC2_', 'UC3_', 'UC4_',  # USE CASE testing patterns
                             'UC2_DELETE_', 'UC3_MANUAL_', 'UC4_SAFETY_',  # Specific USE CASE patterns
-                            'FIX_TEST_', 'DEBUG_MAPPING_', 'MAPPING_FIX_'  # Debug test patterns
+                            'FIX_TEST_', 'DEBUG_MAPPING_', 'MAPPING_FIX_',  # Debug test patterns
+                            'TRANSACTION_VERIFY_', 'WAL_FIX_TEST_', 'POOL_TEST_'  # Additional test patterns
                         ])
                         
                         if is_protected:
@@ -265,17 +266,9 @@ class ComprehensiveSystemCleanup:
             'client_production', 'live'     # Additional protection patterns
         ]
         
-        # 🧪 CONFIRMED TEST PATTERNS 🧪
-        TEST_PATTERNS = [
-            'AUTOTEST_', 'test_collection_', 'TEST_', 'temp_', 'debug_',
-            'SYNC_FIX_', 'LIVE_SYNC_', 'CMS_PRODUCTION_TEST_',
-            'REAL_TEST_', 'WAL_SYNC_TEST_', 'USE_CASE_', 'BASELINE_TEST_',
-            'CMS_FAILOVER_TEST_', 'client_test_',
-            'UC2_', 'UC3_', 'UC4_',  # USE CASE testing patterns
-            'UC2_DELETE_', 'UC3_MANUAL_', 'UC4_SAFETY_',  # Specific USE CASE patterns
-            'STRESS_', 'SAFETY_', 'MANUAL_',  # Additional test patterns
-            'FIX_TEST_', 'DEBUG_MAPPING_', 'MAPPING_FIX_'  # Debug test patterns
-        ]
+        # 🧪 USE CONSISTENT TEST PATTERNS FROM CLASS INITIALIZATION 🧪
+        # FIX: Use self.test_patterns to ensure consistency and include pool_test_
+        TEST_PATTERNS = self.test_patterns
         
         try:
             # Get all collections
@@ -502,7 +495,8 @@ class ComprehensiveSystemCleanup:
                         'CMS_FAILOVER_TEST_', 'client_test_',
                         'UC2_', 'UC3_', 'UC4_',  # USE CASE testing patterns
                         'UC2_DELETE_', 'UC3_MANUAL_', 'UC4_SAFETY_',  # Specific USE CASE patterns
-                        'FIX_TEST_', 'DEBUG_MAPPING_', 'MAPPING_FIX_'  # Debug test patterns
+                        'FIX_TEST_', 'DEBUG_MAPPING_', 'MAPPING_FIX_',  # Debug test patterns
+            'pool_test_', 'POOL_TEST_', 'Pool_Test_'  # Connection pooling test patterns
                     ]
                     
                     PROTECTED_COLLECTIONS = [
