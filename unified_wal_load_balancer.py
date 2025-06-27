@@ -2882,7 +2882,13 @@ if __name__ == '__main__':
                             COUNT(*) FILTER (WHERE status = 'ABANDONED') as abandoned
                         FROM emergency_transaction_log
                     """)
-                    status = dict(cur.fetchone())
+                    result = cur.fetchone()
+                    status = {
+                        "pending_recovery": result[0] if result else 0,
+                        "completed": result[1] if result else 0,
+                        "recovered": result[2] if result else 0,
+                        "abandoned": result[3] if result else 0
+                    }
             
             return jsonify({
                 "success": True,
