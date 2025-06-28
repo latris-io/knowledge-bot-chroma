@@ -32,6 +32,11 @@ class UseCase3Tester(EnhancedVerificationBase):
         self.start_time = None
         # ENHANCED: Track documents added during replica failure for sync verification
         self.documents_added_during_failure = {}
+        # CRITICAL FIX: Track collections that were deleted to validate negative sync
+        self.deleted_collections = []
+        # CRITICAL FIX: Direct instance URLs for DELETE validation
+        self.primary_url = "https://chroma-primary.onrender.com"
+        self.replica_url = "https://chroma-replica.onrender.com"
 
     def log(self, message, level="INFO"):
         """Log message with timestamp"""
@@ -415,9 +420,10 @@ class UseCase3Tester(EnhancedVerificationBase):
                 delete_success = delete_response.status_code in [200, 204]
                 self.log(f"   DELETE operations: {'✅ Success' if delete_success else '❌ Failed'} (Status: {delete_response.status_code}, Time: {delete_response.elapsed.total_seconds():.3f}s)")
                 
-                # If delete was successful, remove from cleanup tracking
+                # CRITICAL FIX: Track deleted collection for validation (don't remove from test_collections yet)
                 if delete_success:
-                    self.test_collections.remove(delete_test_collection)
+                    self.deleted_collections.append(delete_test_collection)
+                    self.log(f"   📋 Tracked for DELETE sync validation: '{delete_test_collection}'")
                 
                 return delete_success, delete_test_collection
             else:
@@ -722,12 +728,12 @@ class UseCase3Tester(EnhancedVerificationBase):
                     self.log(f"   Content integrity success: {'✅ Complete' if document_sync_success and synced_docs == total_docs_checked else '❌ Incomplete'}")
                     self.log(f"   Verification level: ENHANCED (content + metadata + embeddings)")
                     
-                    # Overall consistency includes both collection and document sync
-                    overall_consistency = collection_consistency and replica_sync_success and document_sync_success and (synced_docs == total_docs_checked if total_docs_checked > 0 else True)
+                    # Overall consistency includes collection, document, AND DELETE sync
+                    overall_consistency = collection_consistency and replica_sync_success and document_sync_success and delete_sync_success and (synced_docs == total_docs_checked if total_docs_checked > 0 else True)
                     
                 else:
-                    self.log(f"📋 No documents were added during failure - only verifying collection sync")
-                    overall_consistency = collection_consistency and replica_sync_success
+                    self.log(f"📋 No documents were added during failure - verifying collection and DELETE sync only")
+                    overall_consistency = collection_consistency and replica_sync_success and delete_sync_success
                 
                 
                 # CRITICAL: Fail immediately if core functionality (replica sync) failed
@@ -736,6 +742,67 @@ class UseCase3Tester(EnhancedVerificationBase):
                     self.log(f"   Collections created during replica failure were NOT synced to replica after recovery")
                     self.log(f"   This means WAL sync system is broken - data recovery failed")
                     return False
+                
+                # CRITICAL FIX: Validate DELETE operations (negative sync validation)
+                delete_sync_success = True
+                if self.deleted_collections:
+                    self.log(f"🔍 CRITICAL DELETE VALIDATION: Checking that deleted collections are NOT present on both instances...")
+                    
+                    for deleted_collection in self.deleted_collections:
+                        primary_exists = False
+                        replica_exists = False
+                        
+                        # Check if deleted collection still exists on primary
+                        try:
+                            primary_response = requests.get(
+                                f"{self.primary_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                                timeout=10
+                            )
+                            if primary_response.status_code == 200:
+                                primary_collections = primary_response.json()
+                                primary_collection_names = [c['name'] for c in primary_collections]
+                                primary_exists = deleted_collection in primary_collection_names
+                        except Exception as e:
+                            self.log(f"   ❌ Error checking primary for deleted collection: {e}")
+                            delete_sync_success = False
+                            continue
+                        
+                        # Check if deleted collection still exists on replica
+                        try:
+                            replica_response = requests.get(
+                                f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                                timeout=10
+                            )
+                            if replica_response.status_code == 200:
+                                replica_collections = replica_response.json()
+                                replica_collection_names = [c['name'] for c in replica_collections]
+                                replica_exists = deleted_collection in replica_collection_names
+                        except Exception as e:
+                            self.log(f"   ❌ Error checking replica for deleted collection: {e}")
+                            delete_sync_success = False
+                            continue
+                        
+                        # Validation logic: Deleted collections should NOT exist on either instance
+                        if not primary_exists and not replica_exists:
+                            self.log(f"   ✅ DELETE SYNC SUCCESS: '{deleted_collection}' properly deleted from both instances")
+                        elif primary_exists and replica_exists:
+                            self.log(f"   ❌ DELETE SYNC FAILED: '{deleted_collection}' still exists on BOTH instances")
+                            delete_sync_success = False
+                        elif primary_exists and not replica_exists:
+                            self.log(f"   ❌ DELETE SYNC FAILED: '{deleted_collection}' still exists on PRIMARY only")
+                            delete_sync_success = False
+                        elif not primary_exists and replica_exists:
+                            self.log(f"   ❌ DELETE SYNC CRITICAL FAILURE: '{deleted_collection}' still exists on REPLICA only")
+                            self.log(f"       This is the exact issue you identified - DELETE didn't sync to replica!")
+                            delete_sync_success = False
+                    
+                    if delete_sync_success:
+                        self.log(f"📊 DELETE sync validation: ✅ All {len(self.deleted_collections)} deleted collections properly removed from both instances")
+                    else:
+                        self.log(f"📊 DELETE sync validation: ❌ DELETE sync failures detected - WAL system not working properly")
+                else:
+                    self.log(f"📋 No DELETE operations to validate")
+                    delete_sync_success = True
                 # If we have complete consistency, return success immediately
                 if overall_consistency:
                     self.log(f"🎯 Overall data consistency: ✅ Complete (achieved on attempt {attempt + 1}/{max_retries})")
@@ -836,6 +903,15 @@ class UseCase3Tester(EnhancedVerificationBase):
         
         # Check for any collections not tracked by individual tests
         untracked_collections = [col for col in self.test_collections if col not in successful_collections and col not in failed_collections]
+        
+        # CRITICAL FIX: Remove deleted collections from cleanup tracking (they're already deleted)
+        collections_still_existing = [col for col in self.test_collections if col not in self.deleted_collections]
+        self.log(f"📋 DELETE tracking: {len(self.deleted_collections)} collections were deleted, {len(collections_still_existing)} still exist")
+        
+        # Update tracking to exclude deleted collections
+        successful_collections = [col for col in successful_collections if col not in self.deleted_collections]
+        failed_collections = [col for col in failed_collections if col not in self.deleted_collections]
+        untracked_collections = [col for col in untracked_collections if col not in self.deleted_collections]
         
         # Clean successful collections only
         collections_to_clean = successful_collections
