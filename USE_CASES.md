@@ -564,7 +564,7 @@ curl https://chroma-load-balancer.onrender.com/collection/mappings
 
 ---
 
-## 🔴 **USE CASE 3: Replica Instance Down (Read Failover)** ✅ **COMPLETE SUCCESS**
+## 🔴 **USE CASE 3: Replica Instance Down (Read Failover)** ⚠️ **CRITICAL DELETE SYNC BUG DISCOVERED**
 
 ### **🔴 CRITICAL TESTING REQUIREMENT: MANUAL INFRASTRUCTURE FAILURE ONLY**
 
@@ -576,6 +576,62 @@ To properly test USE CASE 3, you **MUST**:
 3. **Manually resume replica and verify sync**
 
 **❌ Running `run_enhanced_tests.py` is NOT USE CASE 3 testing** - it only tests failover logic while both instances remain healthy.
+
+### **🚨 CRITICAL DELETE SYNC BUG DISCOVERED (June 28, 2025)**
+
+**PRODUCTION-CRITICAL ISSUE IDENTIFIED**: Enhanced test validation revealed that **DELETE operations do NOT sync from primary to replica** during USE CASE 3 scenarios.
+
+**Evidence of Broken DELETE Sync:**
+- ✅ **Collection creation operations**: Sync correctly from primary→replica during recovery ✅
+- ✅ **Document addition operations**: Sync correctly with perfect content integrity ✅
+- ❌ **DELETE operations**: **DO NOT SYNC** - collections deleted during replica failure remain on replica ❌
+
+**Real Test Results (Latest):**
+```bash
+❌ DELETE SYNC CRITICAL FAILURE: 'UC3_MANUAL_1751127291_DELETE_TEST' still exists on REPLICA only
+    This is the exact issue you identified - DELETE didn't sync to replica!
+📊 DELETE sync validation: ❌ DELETE sync failures detected - WAL system not working properly
+```
+
+**Production Impact:**
+- **CMS file deletion**: Files deleted during replica failure won't be removed from replica storage
+- **Data inconsistency**: Primary and replica will have different data after DELETE operations during failures
+- **Storage bloat**: Deleted data accumulates on replica instance over time
+
+**Status**: ❌ **CRITICAL BUG** - DELETE sync component of WAL system requires immediate attention
+
+**Enhanced Test Validation**: New test validation now properly detects this issue instead of falsely claiming success
+
+### **🔧 ENHANCED TEST VALIDATION IMPLEMENTED (June 28, 2025)**
+
+**MAJOR TESTING IMPROVEMENT**: Enhanced the manual testing script to properly validate DELETE sync operations.
+
+**Previous Test Validation Gap:**
+- ❌ **Only validated "positive sync"**: Checked that collections created during failure appeared on both instances
+- ❌ **Missing "negative sync" validation**: Never checked that collections deleted during failure were removed from both instances
+- ❌ **False success reporting**: Would claim "100% data consistency" while DELETE sync was broken
+
+**New Enhanced Validation:**
+- ✅ **Tracks deleted collections**: `self.deleted_collections[]` tracks all DELETE operations during failure
+- ✅ **Validates negative sync**: Checks that deleted collections are NOT present on both instances after recovery
+- ✅ **Comprehensive consistency check**: Includes CREATE sync + DOCUMENT sync + DELETE sync in overall validation
+- ✅ **Honest failure reporting**: Test fails when DELETE sync broken instead of claiming false success
+- ✅ **Data preservation**: Failed tests preserve all data for debugging instead of cleaning up evidence
+
+**Technical Implementation:**
+```python
+# NEW: DELETE sync validation in verify_data_consistency()
+for deleted_collection in self.deleted_collections:
+    primary_exists = check_if_exists_on_primary(deleted_collection)
+    replica_exists = check_if_exists_on_replica(deleted_collection)
+    
+    if not primary_exists and not replica_exists:
+        ✅ DELETE SYNC SUCCESS
+    elif replica_exists:
+        ❌ DELETE SYNC CRITICAL FAILURE - exactly the bug we discovered!
+```
+
+**Result**: Tests now provide **honest validation** of both positive and negative sync operations
 
 ### **🎉 PRODUCTION TESTING BREAKTHROUGH ACHIEVED** 
 **100% DATA CONSISTENCY VALIDATED**: USE CASE 3 has been rigorously tested with actual infrastructure failure simulation, achieving complete success with our enhanced systems.
@@ -765,22 +821,25 @@ curl -s "https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/datab
 - ✅ **Collection counts match** → Both instances have identical data
 - ✅ **100% data consistency confirmed** → Zero data loss achieved
 
-### **Success Criteria** ✅ **ALL CRITERIA ACHIEVED**
+### **Success Criteria** ⚠️ **PARTIAL SUCCESS - CRITICAL DELETE SYNC ISSUE**
 - ✅ **Read queries continue during replica downtime** ← **SEAMLESS (0.48-0.89s response times)**
 - ✅ **Response times remain acceptable** ← **SUB-SECOND PERFORMANCE MAINTAINED**
 - ✅ **Write operations completely unaffected** ← **ZERO IMPACT (0.60-0.68s normal performance)**
-- ✅ **DELETE operations succeed with primary available** ← **CONFIRMED WORKING**
+- ⚠️ **DELETE operations succeed with primary available** ← **OPERATION SUCCEEDS, BUT SYNC FAILS**
 - ✅ **Load balancer detects and routes around unhealthy replica** ← **2-4 SECOND DETECTION**
-- ✅ **WAL sync catches up replica when restored** ← **100% DATA CONSISTENCY (5/5 collections)**
+- ❌ **WAL sync catches up replica when restored** ← **DELETE OPERATIONS DO NOT SYNC**
 - ✅ **No user-visible service degradation** ← **TRANSPARENT FAILOVER ACHIEVED**
 
-### **🎯 ENTERPRISE-GRADE RELIABILITY ACHIEVED**
-USE CASE 3 now provides **seamless replica failure handling** with:
-- **100% data consistency** after replica recovery  
-- **Minimal performance impact** (only read load shift to primary)
-- **Sub-second response times** maintained throughout failure
-- **Enhanced health monitoring** with fast detection/recovery
-- **Improved retry logic** ensures complete data synchronization
+**CRITICAL FINDING**: DELETE operations work during failure but **do not sync to replica during recovery**
+
+### **🎯 ENTERPRISE-GRADE RELIABILITY STATUS**
+USE CASE 3 provides **partial enterprise-grade replica failure handling** with:
+- ✅ **Perfect read failover performance** (0.48-0.89s response times)  
+- ✅ **Minimal performance impact** (only read load shift to primary)
+- ✅ **Sub-second response times** maintained throughout failure
+- ✅ **Enhanced health monitoring** with fast detection/recovery
+- ❌ **CRITICAL ISSUE**: DELETE operations do not sync during recovery
+- ⚠️ **Data consistency**: Perfect for CREATE/UPDATE operations, broken for DELETE operations
 
 ### **🚨 CRITICAL BUG DISCOVERED AND RESOLVED**
 
@@ -806,7 +865,7 @@ USE CASE 3 now provides **seamless replica failure handling** with:
 
 **Latest Production Testing (Full Replica Infrastructure Failure Lifecycle):**
 
-**🎉 BREAKTHROUGH: 5/5 TESTS PASSED (100% SUCCESS) - ZERO TRANSACTION LOSS**
+**⚠️ CRITICAL DISCOVERY: 5/5 OPERATIONS SUCCESSFUL BUT DELETE SYNC BROKEN**
 
 **Phase 1: Replica Infrastructure Failure Testing:**
 - ✅ **Perfect health monitoring**: Immediate replica failure detection with real-time health checking
@@ -823,11 +882,12 @@ USE CASE 3 now provides **seamless replica failure handling** with:
 - ✅ **Perfect sync success**: Complete WAL processing with zero failures
 
 **Phase 3: Data Consistency Validation (ENHANCED):**
-- ✅ **Collection consistency**: 1/1 = 100.0% (perfect)
+- ✅ **Collection creation consistency**: 1/1 = 100.0% (perfect)
 - ✅ **Document integrity**: 1/1 = 100.0% (perfect)
 - ✅ **Content verification**: Byte-level identical (content + metadata + embeddings)
-- ✅ **Cross-instance consistency**: 100% data consistency achieved
-- ✅ **Zero transaction loss confirmed**: All operations completed successfully
+- ❌ **DELETE sync consistency**: 0/1 = 0.0% (DELETE operations do not sync)
+- ⚠️ **Overall data consistency**: Partial success - CREATE/UPDATE work, DELETE sync broken
+- ✅ **Zero transaction loss for tracked operations**: Operations succeed but DELETE sync fails
 
 **🔧 REAL-TIME HEALTH CHECKING SUCCESS:**
 - **Immediate health detection**: Real-time verification bypasses 30+ second cache delays
@@ -836,15 +896,15 @@ USE CASE 3 now provides **seamless replica failure handling** with:
 - **Enterprise-grade reliability**: Sub-second response times maintained during infrastructure failures
 
 **🎯 CURRENT PERFORMANCE METRICS (VERIFIED - LATEST TEST):**
-- **Operations during failure**: 5/5 successful (100.0%) - **PERFECT SCORE**
-- **Collection creation**: Status 200, 1.075s (routes to primary) - **WORKING**
-- **Read operations**: Collection listing (Status 200, 0.365s) + Document queries (Status 200, 0.926s) - **FIXED**
-- **Write operations**: Status 201, 0.683s (document addition with embeddings) - **WORKING**
-- **DELETE operations**: Status 200, 0.486s (graceful degradation) - **WORKING**
+- **Operations during failure**: 5/5 successful (100.0%) - **ALL OPERATIONS WORK DURING FAILURE**
+- **Collection creation**: Status 200, 1.075s (routes to primary) - **WORKING + SYNCS CORRECTLY**
+- **Read operations**: Collection listing (Status 200, 0.365s) + Document queries (Status 200, 0.926s) - **WORKING**
+- **Write operations**: Status 201, 0.683s (document addition with embeddings) - **WORKING + SYNCS CORRECTLY**
+- **DELETE operations**: Status 200, 0.486s (graceful degradation) - **WORKS DURING FAILURE, SYNC BROKEN**
 - **Health detection**: Real-time detection (1/2 healthy instances) - **WORKING**
-- **Recovery time**: ~6 minutes for complete WAL sync and verification (0 pending writes)
-- **Data integrity**: 100% perfect (content + metadata + embeddings verified)
-- **Total test time**: 9.6 minutes (complete infrastructure failure lifecycle)
+- **Recovery time**: ~6 minutes for partial WAL sync (CREATE/UPDATE sync, DELETE sync fails)
+- **Data integrity**: Perfect for CREATE/UPDATE operations, broken for DELETE operations
+- **Total test time**: 9.6 minutes (complete infrastructure failure lifecycle with enhanced validation)
 
 ### **Performance Impact (LATEST MEASUREMENTS)**
 - **Read Load**: Primary handled 100% of reads during failure (0.365-0.926s response times)
@@ -853,7 +913,7 @@ USE CASE 3 now provides **seamless replica failure handling** with:
 - **Collection Creation**: Continues normally during replica failure (1.075s)
 - **Failure Detection**: Real-time (immediate detection with ?realtime=true)
 - **Recovery Detection**: Real-time (immediate detection)
-- **Data Consistency**: 100% perfect consistency (zero transaction loss)
+- **Data Consistency**: Partial consistency (CREATE/UPDATE: perfect, DELETE: broken)
 - **Response Times**: Sub-second performance maintained throughout failure
 
 ### **Validation Commands**
@@ -925,11 +985,11 @@ curl -X POST https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/d
 ### **🎯 Production Readiness Status:**
 1. **USE CASE 1**: ✅ **100% Working** - Normal operations **BREAKTHROUGH SUCCESS ACHIEVED**
 2. **USE CASE 2**: ✅ **100% Working** - Primary failure scenarios **COMPLETELY FIXED**  
-3. **USE CASE 3**: ✅ **100% Working** - Replica failure scenarios **BULLETPROOF TESTED**
+3. **USE CASE 3**: ⚠️ **Partial Success** - Replica failure scenarios **DELETE SYNC BROKEN**
 4. **USE CASE 4**: ✅ **100% Working** - High load performance **TRANSACTION SAFETY VERIFIED**
-5. **High Availability**: ✅ **COMPLETE** - All use cases working with enterprise-grade reliability
+5. **High Availability**: ⚠️ **PARTIAL** - USE CASE 3 DELETE sync issue affects complete reliability
 6. **Collection Operations**: ✅ **FULLY WORKING** - Surface and underlying operations successful
-7. **WAL System**: ✅ **OPTIMIZED** - 0% failure rate **ARCHITECTURAL FIX APPLIED**
+7. **WAL System**: ⚠️ **PARTIAL** - CREATE/UPDATE operations work, DELETE sync broken
 8. **Transaction Safety**: ✅ **BULLETPROOF** - **ZERO DATA LOSS REQUIREMENT ACHIEVED**
 
 ### **🔧 Recent Critical Fixes Applied:**
