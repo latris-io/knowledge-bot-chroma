@@ -803,6 +803,10 @@ class UseCase3Tester(EnhancedVerificationBase):
                         self.log(f"📊 DELETE sync validation: ✅ All {len(self.deleted_collections)} deleted collections properly removed from both instances")
                     else:
                         self.log(f"📊 DELETE sync validation: ❌ DELETE sync failures detected - WAL system not working properly")
+                        # CRITICAL FIX: Update test results to reflect DELETE sync failure
+                        if 'delete_operations' in self.test_results:
+                            self.log(f"🔧 UPDATING TEST RESULT: Marking delete_operations as FAILED due to sync validation failure")
+                            self.test_results['delete_operations']['success'] = False
                 else:
                     self.log(f"📋 No DELETE operations to validate")
                     delete_sync_success = True
@@ -907,14 +911,30 @@ class UseCase3Tester(EnhancedVerificationBase):
         # Check for any collections not tracked by individual tests
         untracked_collections = [col for col in self.test_collections if col not in successful_collections and col not in failed_collections]
         
-        # CRITICAL FIX: Remove deleted collections from cleanup tracking (they're already deleted)
-        collections_still_existing = [col for col in self.test_collections if col not in self.deleted_collections]
-        self.log(f"📋 DELETE tracking: {len(self.deleted_collections)} collections were deleted, {len(collections_still_existing)} still exist")
+        # CRITICAL FIX: Handle DELETE collections based on whether DELETE sync succeeded or failed
+        delete_operations_success = self.test_results.get('delete_operations', {}).get('success', True)
         
-        # Update tracking to exclude deleted collections
-        successful_collections = [col for col in successful_collections if col not in self.deleted_collections]
-        failed_collections = [col for col in failed_collections if col not in self.deleted_collections]
-        untracked_collections = [col for col in untracked_collections if col not in self.deleted_collections]
+        if delete_operations_success:
+            # DELETE sync was successful - collections were properly deleted, exclude from cleanup
+            collections_still_existing = [col for col in self.test_collections if col not in self.deleted_collections]
+            self.log(f"📋 DELETE tracking: {len(self.deleted_collections)} collections successfully deleted, {len(collections_still_existing)} still exist")
+            
+            # Update tracking to exclude successfully deleted collections
+            successful_collections = [col for col in successful_collections if col not in self.deleted_collections]
+            failed_collections = [col for col in failed_collections if col not in self.deleted_collections]
+            untracked_collections = [col for col in untracked_collections if col not in self.deleted_collections]
+        else:
+            # DELETE sync FAILED - collections still exist and should be preserved as evidence
+            self.log(f"📋 DELETE tracking: {len(self.deleted_collections)} collections FAILED to delete properly (still exist on replica)")
+            self.log(f"   These collections will be preserved as evidence of DELETE sync failure")
+            
+            # Don't exclude deleted collections from tracking - they still exist and need proper handling
+            # But move them to failed_collections since DELETE test failed
+            for deleted_col in self.deleted_collections:
+                if deleted_col in successful_collections:
+                    successful_collections.remove(deleted_col)
+                if deleted_col not in failed_collections:
+                    failed_collections.append(deleted_col)
         
         # Clean successful collections only
         collections_to_clean = successful_collections
