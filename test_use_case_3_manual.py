@@ -857,7 +857,34 @@ class UseCase3Tester(EnhancedVerificationBase):
         elif healthy_instances == 2:
             self.log("⚠️ Replica suspension not yet detected - both instances still healthy")
             self.log("   Please verify replica was suspended and wait for health detection")
-            self.log("   Will proceed anyway in case of timing delays...")
+            # 🔧 FIX: Wait longer for health detection instead of proceeding with invalid test
+            self.log("   Waiting additional 30 seconds for health detection...")
+            time.sleep(30)
+            
+            # Re-check health after waiting
+            retry_status = self.check_system_health(True)
+            if retry_status:
+                retry_healthy = retry_status.get('healthy_instances', 0)
+                retry_replica_healthy = len(retry_status.get('instances', [])) > 1 and retry_status.get('instances', [{}])[1].get('healthy', False)
+                
+                if retry_healthy == 1 and not retry_replica_healthy:
+                    self.log("✅ Replica failure now detected after waiting")
+                elif retry_healthy == 2:
+                    self.log("❌ BOTH instances still healthy after 43+ seconds")
+                    self.log("   This indicates replica was NOT suspended or came back up immediately")
+                    self.log("   Cannot proceed with replica failure test - both instances working")
+                    self.log("")
+                    self.log("🔧 TROUBLESHOOTING:")
+                    self.log("   1. Verify replica service is actually suspended on Render dashboard")
+                    self.log("   2. Check for auto-restart policies that might restore the service")
+                    self.log("   3. Health detection may have a configuration issue")
+                    return False
+                else:
+                    self.log(f"⚠️ Unexpected state after retry: {retry_healthy}/2 healthy")
+                    self.log("   Proceeding with testing to gather diagnostic information...")
+            else:
+                self.log("❌ Cannot re-check system status")
+                return False
         elif healthy_instances == 0:
             self.log("❌ Both instances down - cannot proceed with testing")
             return False

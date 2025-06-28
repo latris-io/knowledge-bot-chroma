@@ -782,6 +782,21 @@ USE CASE 3 now provides **seamless replica failure handling** with:
 - **Enhanced health monitoring** with fast detection/recovery
 - **Improved retry logic** ensures complete data synchronization
 
+### **🚨 CRITICAL BUG DISCOVERED AND RESOLVED**
+
+**CRITICAL DISCOVERY (Latest Session)**: A critical logic bug in the test script was discovered where the test would proceed with "replica failure" testing even when both instances remained healthy, creating invalid test results.
+
+**Root Cause**: Lines 856-867 contained logic that said "Will proceed anyway in case of timing delays..." instead of stopping or waiting longer for health detection. Evidence: Test said "both instances still healthy" but proceeded anyway, resulting in impossible single-instance collection distribution.
+
+**User Validation**: User correctly followed all suspension instructions via Render dashboard - the bug was in test logic, not user actions or system functionality.
+
+**🔧 COMPLETE BUG RESOLUTION IMPLEMENTED**: 
+- ✅ **Enhanced retry logic**: Now waits additional 30 seconds for health detection
+- ✅ **Proper validation**: Only proceeds if replica failure is actually detected after retry
+- ✅ **Clear error messaging**: Provides troubleshooting guidance when replica suspension not detected
+- ✅ **System integrity**: Prevents invalid test execution with both instances healthy
+- ✅ **Root cause analysis**: Identifies potential auto-restart policies or configuration issues
+
 ### **🏆 PRODUCTION TESTING RESULTS - COMPLETE SUCCESS ACHIEVED**
 
 **Latest Production Testing (Full Replica Infrastructure Failure Lifecycle):**
