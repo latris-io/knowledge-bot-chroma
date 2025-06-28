@@ -197,21 +197,21 @@ class ComprehensiveSystemCleanup:
     def delete_collection_with_retry(self, instance_url, collection_name, instance_name, max_retries=2):
         """Delete collection with retry logic for temporary server errors (502, timeouts, etc.)
         
-        CRITICAL FIX: Now uses load balancer for distributed DELETE operations
+        CRITICAL FIX: Now deletes directly from instance to avoid WAL logging
         """
         import time
         
         for attempt in range(max_retries + 1):
             try:
-                # CRITICAL FIX: Use load balancer URL instead of instance URL
-                # This triggers the distributed DELETE logic that removes collections from BOTH instances
+                # CRITICAL FIX: Delete directly from instance to avoid triggering WAL
+                # Cleanup operations should NOT create WAL entries
                 delete_response = requests.delete(
-                    f"{self.load_balancer_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}",
+                    f"{instance_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}",
                     timeout=30
                 )
                 
                 if delete_response.status_code in [200, 404]:  # Success or already deleted
-                    logger.info(f"    ✅ Deleted test collection via load balancer: {collection_name}")
+                    logger.info(f"    ✅ Deleted test collection from {instance_name}: {collection_name}")
                     return True
                     
                 elif delete_response.status_code == 502 and attempt < max_retries:
@@ -258,11 +258,11 @@ class ComprehensiveSystemCleanup:
         return False
     
     def cleanup_chromadb_collections(self, instance_url, instance_name):
-        """Clean up ONLY test collections via load balancer - PROTECTS PRODUCTION DATA
+        """Clean up ONLY test collections directly from instance - PROTECTS PRODUCTION DATA
         
-        CRITICAL UPDATE: Now uses load balancer for distributed DELETE operations
+        CRITICAL UPDATE: Now deletes directly from instance to avoid WAL logging
         """
-        logger.info(f"🧹 Cleaning test collections via load balancer (distributed DELETE)...")
+        logger.info(f"🧹 Cleaning test collections directly from {instance_name}...")
         
         # 🚨 CRITICAL: PROTECTED PRODUCTION COLLECTIONS 🚨
         PROTECTED_COLLECTIONS = [
