@@ -3350,62 +3350,36 @@ if __name__ == '__main__':
                     
                     logger.info(f"🎯 Sync target determined: {sync_target_value}")
                     
-                    # SIMPLIFIED WAL LOGGING - bypassing complex add_wal_write method
-                    logger.info(f"🔍 PROXY_REQUEST: Starting SIMPLIFIED WAL logging...")
+                    # ENHANCED WAL LOGGING - using proper add_wal_write method with UUID resolution
+                    logger.info(f"🔍 PROXY_REQUEST: Starting ENHANCED WAL logging with UUID resolution...")
                     try:
-                        import uuid
-                        write_id = str(uuid.uuid4())
-                        logger.info(f"✅ PROXY_REQUEST: Generated write_id: {write_id[:8]}")
+                        # Convert sync_target_value string to TargetInstance enum
+                        if sync_target_value == "primary":
+                            target_enum = TargetInstance.PRIMARY
+                        elif sync_target_value == "replica":
+                            target_enum = TargetInstance.REPLICA
+                        elif sync_target_value == "both":
+                            target_enum = TargetInstance.BOTH
+                        else:
+                            logger.warning(f"⚠️ Unknown sync target '{sync_target_value}', defaulting to BOTH")
+                            target_enum = TargetInstance.BOTH
                         
-                        logger.info(f"🔍 PROXY_REQUEST: Extracting collection identifier...")
-                        collection_id = enhanced_wal.extract_collection_identifier(final_path)
-                        logger.info(f"✅ PROXY_REQUEST: Collection ID: {collection_id}")
+                        # Use enhanced add_wal_write method with UUID resolution
+                        write_id = enhanced_wal.add_wal_write(
+                            method=request.method,
+                            path=final_path,
+                            data=data or b'',
+                            headers={'Content-Type': 'application/json'},
+                            target_instance=target_enum,
+                            executed_on=target_instance.name
+                        )
                         
-                        # Direct database insert without complex logic
-                        logger.info(f"🔍 PROXY_REQUEST: Acquiring database lock...")
-                        # 🔒 SCALABILITY: Use appropriate lock for WAL operations
-                        with enhanced_wal._get_appropriate_lock('wal_write'):
-                            logger.info(f"✅ PROXY_REQUEST: Database lock acquired")
-                            
-                            logger.info(f"🔍 PROXY_REQUEST: Getting database connection...")
-                            with enhanced_wal.get_db_connection_ctx() as conn:
-                                logger.info(f"✅ PROXY_REQUEST: Database connection established")
-                                
-                                logger.info(f"🔍 PROXY_REQUEST: Creating cursor...")
-                                with conn.cursor() as cur:
-                                    logger.info(f"✅ PROXY_REQUEST: Cursor created")
-                                    
-                                    logger.info(f"🔍 PROXY_REQUEST: Executing WAL insert SQL...")
-                                    cur.execute("""
-                                        INSERT INTO unified_wal_writes 
-                                        (write_id, method, path, data, headers, target_instance, 
-                                         collection_id, timestamp, executed_on, status, data_size_bytes, priority)
-                                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s)
-                                    """, (
-                                        write_id,
-                                        request.method,
-                                        final_path,
-                                        data or b'',
-                                        '{"Content-Type": "application/json"}',
-                                        sync_target_value,
-                                        collection_id,
-                                        target_instance.name,
-                                        'executed',
-                                        len(data) if data else 0,
-                                        1 if request.method == 'DELETE' else 0
-                                    ))
-                                    logger.info(f"✅ PROXY_REQUEST: SQL executed successfully")
-                                    
-                                    logger.info(f"🔍 PROXY_REQUEST: Committing transaction...")
-                                    conn.commit()
-                                    logger.info(f"✅ PROXY_REQUEST: Transaction committed")
+                        logger.info(f"✅ ENHANCED WAL logged with UUID resolution: write_id={write_id[:8]}, method={request.method}, target={sync_target_value}")
                         
-                        logger.info(f"✅ SIMPLIFIED WAL logged: write_id={write_id[:8]}, method={request.method}, target={sync_target_value}")
-                        
-                    except Exception as simple_wal_error:
-                        logger.error(f"❌ SIMPLIFIED WAL logging failed: {simple_wal_error}")
+                    except Exception as enhanced_wal_error:
+                        logger.error(f"❌ ENHANCED WAL logging failed: {enhanced_wal_error}")
                         import traceback
-                        logger.error(f"Simplified WAL traceback: {traceback.format_exc()}")
+                        logger.error(f"Enhanced WAL traceback: {traceback.format_exc()}")
                     
                 except Exception as wal_error:
                     import traceback
