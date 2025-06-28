@@ -656,36 +656,8 @@ class UnifiedWALLoadBalancer:
         """Add write to unified WAL with intelligent deletion handling for ChromaDB ID issues"""
         write_id = str(uuid.uuid4())
         
-        # CRITICAL FIX: Resolve collection names to UUIDs for WAL storage
-        collection_name = self.extract_collection_identifier(path)
-        collection_id = None
-        
-        if collection_name:
-            # For sync operations, we need the UUID from the TARGET instance
-            if target_instance == TargetInstance.PRIMARY:
-                collection_id = self.resolve_collection_name_to_uuid(collection_name, "primary")
-            elif target_instance == TargetInstance.REPLICA:
-                collection_id = self.resolve_collection_name_to_uuid(collection_name, "replica")
-            elif target_instance == TargetInstance.BOTH:
-                # For BOTH operations, resolve based on where it was NOT executed
-                if executed_on == "primary":
-                    # Executed on primary, needs to sync to replica
-                    collection_id = self.resolve_collection_name_to_uuid(collection_name, "replica")
-                elif executed_on == "replica":
-                    # Executed on replica, needs to sync to primary
-                    collection_id = self.resolve_collection_name_to_uuid(collection_name, "primary")
-                else:
-                    # Fallback: use collection name for backward compatibility
-                    collection_id = collection_name
-                    logger.warning(f"⚠️ WAL: Could not determine target instance for collection UUID resolution, using name: {collection_name}")
-            
-            # If UUID resolution failed, log warning but continue with name for backward compatibility
-            if not collection_id:
-                collection_id = collection_name
-                logger.warning(f"⚠️ WAL: Failed to resolve collection '{collection_name}' to UUID for {target_instance.value}, using name")
-            elif collection_id != collection_name:
-                logger.info(f"✅ WAL: Resolved collection '{collection_name}' to UUID {collection_id[:8]}... for {target_instance.value}")
-        
+        # Store collection name in WAL - will resolve to UUID during sync when instances are healthy
+        collection_id = self.extract_collection_identifier(path)
         data_size = len(data) if data else 0
         
         # INTELLIGENT DELETION HANDLING FOR CHROMADB ID SYNCHRONIZATION
@@ -983,8 +955,33 @@ class UnifiedWALLoadBalancer:
                     if normalized_path != path:
                         logger.info(f"🔧 WAL SYNC PATH CONVERSION: {path} → {normalized_path}")
                     
-                    # CRITICAL: Resolve collection names to UUIDs for document operations in WAL sync
+                    # CRITICAL FIX: Resolve collection names to UUIDs for collection-level operations (DELETE)
                     final_path = normalized_path
+                    if (method == "DELETE" and '/collections/' in normalized_path and 
+                        not any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/update', '/delete', '/get', '/query', '/count'])):
+                        # This is a collection-level DELETE operation
+                        path_parts = normalized_path.split('/collections/')
+                        if len(path_parts) > 1:
+                            collection_name = path_parts[1].split('/')[0]  # Extract collection name
+                            # Check if it's a name (not UUID) - UUIDs have specific format
+                            import re
+                            if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_name):
+                                logger.info(f"🔍 WAL SYNC: Collection DELETE detected - resolving name '{collection_name}' to UUID for {instance.name}")
+                                
+                                # Resolve collection name to UUID for target instance
+                                resolved_uuid = self.resolve_collection_name_to_uuid(collection_name, instance.name)
+                                if resolved_uuid:
+                                    # Replace collection name with UUID in path
+                                    final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{resolved_uuid}')
+                                    logger.info(f"✅ WAL SYNC: Collection DELETE path resolved for {instance.name}: {normalized_path} -> {final_path}")
+                                else:
+                                    logger.warning(f"⚠️ WAL SYNC: Could not resolve collection name '{collection_name}' to UUID for {instance.name}")
+                                    # This might be expected if collection was already deleted from target
+                                    logger.info(f"ℹ️ Skipping DELETE sync - collection '{collection_name}' may not exist on {instance.name}")
+                                    self.mark_write_synced(write_id)  # Mark as synced since target doesn't have collection anyway
+                                    continue
+                    
+                    # CRITICAL: Resolve collection names to UUIDs for document operations in WAL sync
                     if '/collections/' in normalized_path and any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/update', '/delete']):
                         # Extract collection name from path
                         path_parts = normalized_path.split('/collections/')
