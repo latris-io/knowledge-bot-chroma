@@ -533,6 +533,49 @@ class UseCase3Tester(EnhancedVerificationBase):
                 self.log(f"   Collection consistency: {len(found_collections)}/{len(self.test_collections)} = {len(found_collections)/len(self.test_collections)*100:.1f}%" if self.test_collections else "No test collections")
                 
                 collection_consistency = len(found_collections) == len(self.test_collections)
+
+                # CRITICAL FIX: Verify collections actually exist on REPLICA instance
+                # This is the core USE CASE 3 functionality - primary→replica sync
+                self.log(f"🔍 CORE VALIDATION: Checking if collections created during failure actually synced to REPLICA...")
+                replica_sync_success = True
+                replica_collections_found = 0
+                
+                if self.test_collections:
+                    try:
+                        # Check REPLICA instance directly 
+                        replica_response = requests.get(
+                            f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                            timeout=10
+                        )
+                        
+                        if replica_response.status_code == 200:
+                            replica_collections = replica_response.json()
+                            replica_collection_names = [c['name'] for c in replica_collections]
+                            replica_found = [name for name in self.test_collections if name in replica_collection_names]
+                            replica_collections_found = len(replica_found)
+                            
+                            self.log(f"   📊 REPLICA INSTANCE CHECK:")
+                            self.log(f"      Collections created during replica failure: {len(self.test_collections)}")
+                            self.log(f"      Collections found on replica after recovery: {replica_collections_found}")
+                            self.log(f"      Replica sync success: {replica_collections_found}/{len(self.test_collections)} = {replica_collections_found/len(self.test_collections)*100:.1f}%")
+                            
+                            if replica_collections_found == len(self.test_collections):
+                                self.log(f"   ✅ CORE SUCCESS: All collections synced from primary to replica!")
+                                replica_sync_success = True
+                            else:
+                                self.log(f"   ❌ CORE FAILURE: Only {replica_collections_found}/{len(self.test_collections)} collections synced to replica")
+                                self.log(f"      Collections missing from replica: {set(self.test_collections) - set(replica_found)}")
+                                replica_sync_success = False
+                        else:
+                            self.log(f"   ❌ Cannot check replica instance: HTTP {replica_response.status_code}")
+                            replica_sync_success = False
+                            
+                    except Exception as e:
+                        self.log(f"   ❌ Error checking replica instance: {e}")
+                        replica_sync_success = False
+                else:
+                    self.log(f"   ℹ️ No test collections to verify")
+                    replica_sync_success = True
                 
                 # Step 2: ENHANCED - Verify document-level sync between instances
                 document_sync_success = True
@@ -626,12 +669,19 @@ class UseCase3Tester(EnhancedVerificationBase):
                     self.log(f"   Verification level: ENHANCED (content + metadata + embeddings)")
                     
                     # Overall consistency includes both collection and document sync
-                    overall_consistency = collection_consistency and document_sync_success and (synced_docs == total_docs_checked if total_docs_checked > 0 else True)
+                    overall_consistency = collection_consistency and replica_sync_success and document_sync_success and (synced_docs == total_docs_checked if total_docs_checked > 0 else True)
                     
                 else:
                     self.log(f"📋 No documents were added during failure - only verifying collection sync")
-                    overall_consistency = collection_consistency
+                    overall_consistency = collection_consistency and replica_sync_success
                 
+                
+                # CRITICAL: Fail immediately if core functionality (replica sync) failed
+                if not replica_sync_success:
+                    self.log(f"🚨 CRITICAL FAILURE: USE CASE 3 core functionality (primary→replica sync) failed")
+                    self.log(f"   Collections created during replica failure were NOT synced to replica after recovery")
+                    self.log(f"   This means WAL sync system is broken - data recovery failed")
+                    return False
                 # If we have complete consistency, return success immediately
                 if overall_consistency:
                     self.log(f"🎯 Overall data consistency: ✅ Complete (achieved on attempt {attempt + 1}/{max_retries})")
