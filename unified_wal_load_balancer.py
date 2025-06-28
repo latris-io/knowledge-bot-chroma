@@ -1025,12 +1025,44 @@ class UnifiedWALLoadBalancer:
                                                 logger.error(f"   Forcing DELETE with discovered UUID: {actual_uuid}")
                                                 final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{actual_uuid}')
                                             else:
-                                                logger.info(f"✅ DELETE SYNC: Collection '{collection_name}' confirmed NOT on {instance.name} - DELETE goal achieved")
-                                                # CRITICAL FIX: This is actually SUCCESS for DELETE operations
-                                                # DELETE sync goal: ensure collection doesn't exist on target
-                                                # If collection doesn't exist, the DELETE goal is already achieved
-                                                self.mark_write_synced(write_id)
-                                                continue
+                                                # CRITICAL FIX: Verify collection actually doesn't exist before claiming success
+                                                logger.warning(f"⚠️ DELETE SYNC: UUID resolution failed for '{collection_name}' - verifying actual existence")
+                                                
+                                                try:
+                                                    # Double-check if collection actually exists with direct verification
+                                                    verification_response = requests.get(
+                                                        f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                                                        timeout=5
+                                                    )
+                                                    
+                                                    if verification_response.status_code == 200:
+                                                        collections = verification_response.json()
+                                                        found_collection = next((c for c in collections if c.get('name') == collection_name), None)
+                                                        
+                                                        if found_collection:
+                                                            # CRITICAL: Collection EXISTS but UUID resolution failed - this is a resolution bug, NOT a missing collection
+                                                            actual_uuid = found_collection.get('id')
+                                                            logger.error(f"❌ RESOLUTION BUG DETECTED: Collection '{collection_name}' EXISTS with UUID {actual_uuid[:8]} but resolution failed!")
+                                                            logger.info(f"🔧 FIXING: Force DELETE execution with discovered UUID")
+                                                            # Replace collection name with discovered UUID and continue with DELETE execution
+                                                            final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{actual_uuid}')
+                                                            logger.info(f"   Corrected DELETE path: {final_path}")
+                                                            # Continue with DELETE execution using corrected path (don't continue/skip)
+                                                        else:
+                                                            # Collection truly doesn't exist - DELETE goal legitimately achieved
+                                                            logger.info(f"✅ DELETE VERIFIED: Collection '{collection_name}' confirmed NOT on {instance.name} - DELETE goal achieved")
+                                                            self.mark_write_synced(write_id)
+                                                            continue
+                                                    else:
+                                                        # Cannot verify collections - fail the DELETE operation
+                                                        logger.error(f"❌ VERIFICATION FAILED: Cannot list collections on {instance.name} (HTTP {verification_response.status_code})")
+                                                        self.mark_write_failed(write_id, f"DELETE verification failed - cannot list collections on {instance.name}")
+                                                        continue
+                                                        
+                                                except Exception as verify_error:
+                                                    logger.error(f"❌ VERIFICATION ERROR during DELETE sync: {verify_error}")
+                                                    self.mark_write_failed(write_id, f"DELETE verification error on {instance.name}: {verify_error}")
+                                                    continue
                                         else:
                                             logger.error(f"❌ VERIFICATION FAILED: Cannot verify collections on {instance.name} (HTTP {verification_response.status_code})")
                                             self.mark_write_failed(write_id, f"Verification failed for collection '{collection_name}' on {instance.name}")
