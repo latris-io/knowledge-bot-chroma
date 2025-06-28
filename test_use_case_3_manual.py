@@ -497,16 +497,12 @@ class UseCase3Tester(EnhancedVerificationBase):
                 self.test_results[test_name]['success'] = False
             return self.test_results
         
-        # Enhanced validation: Check document sync if documents were added
+        # NOTE: Document sync validation happens AFTER replica recovery in verify_data_consistency()
+        # During replica failure, there's no point validating sync - replica is down!
         if self.documents_added_during_failure:
-            collection_name = list(self.documents_added_during_failure.keys())[0]
-            expected_docs = len(self.documents_added_during_failure[collection_name])
-            if not self.validate_document_sync(collection_name, expected_docs, "Document Operations"):
-                # CRITICAL FIX: Mark ALL tests as failed if document sync validation fails
-                self.log("🚨 CRITICAL: Document sync validation FAILED - marking all tests as failed")
-                for test_name in self.test_results:
-                    self.test_results[test_name]['success'] = False
-                return self.test_results
+            self.log("📋 Documents tracked for sync verification after replica recovery")
+            total_docs = sum(len(docs) for docs in self.documents_added_during_failure.values())
+            self.log(f"   📊 {total_docs} documents will be verified after replica restart")
         
         return self.test_results
 
