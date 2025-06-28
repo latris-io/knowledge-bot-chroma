@@ -1104,7 +1104,20 @@ class UnifiedWALLoadBalancer:
                     # Make the sync request with normalized path
                     response = self.make_direct_request(instance, method, final_path, data=data, headers=headers)
                     
-                    # CRITICAL: Update collection mapping for successful collection creation
+                    # CRITICAL FIX: Handle collection creation sync with proper error handling
+                    if (method == 'POST' and 
+                        ('/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete', '/count'])) and
+                        response.status_code == 200):
+                        logger.info(f"🎯 WAL SYNC: Collection creation successful on {instance.name} - updating mapping")
+                    elif (method == 'POST' and 
+                          '/collections' in final_path and 
+                          response.status_code != 200):
+                        logger.error(f"❌ WAL SYNC: Collection creation failed on {instance.name} - Status: {response.status_code}")
+                        logger.error(f"   Response: {response.text[:200]}")
+                        self.mark_write_failed(write_id, f"Collection creation failed: HTTP {response.status_code}")
+                        continue
+                    
+                    # Update collection mapping for successful collection creation
                     if (method == 'POST' and 
                         ('/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete', '/count'])) and
                         response.status_code == 200):
