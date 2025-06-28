@@ -51,7 +51,7 @@ class ComprehensiveSystemCleanup:
             'wal_fix_test_', 'WAL_FIX_TEST_', 'Wal_Fix_Test_',
             'pool_test_', 'POOL_TEST_', 'Pool_Test_',
             'transaction_verify_', 'TRANSACTION_VERIFY_', 'Transaction_Verify_',
-            # USE CASE manual testing patterns
+            # USE CASE manual testing patterns - FIX for UC2_MANUAL_ cleanup issue
             'UC2_MANUAL_', 'UC3_MANUAL_', 'UC4_MANUAL_', 'UC5_MANUAL_',
             'UC2_DELETE_', 'UC3_DELETE_', 'UC4_DELETE_', 'UC5_DELETE_',
             'USE_CASE_', 'use_case_', 'Use_Case_'
@@ -116,6 +116,7 @@ class ComprehensiveSystemCleanup:
                             'REAL_TEST_', 'WAL_SYNC_TEST_', 'USE_CASE_',
                             'UC2_', 'UC3_', 'UC4_',  # USE CASE testing patterns
                             'UC2_DELETE_', 'UC3_MANUAL_', 'UC4_SAFETY_',  # Specific USE CASE patterns
+                            'UC2_MANUAL_', 'UC3_MANUAL_', 'UC4_MANUAL_', 'UC5_MANUAL_',  # FIXED: Manual testing patterns
                             'FIX_TEST_', 'DEBUG_MAPPING_', 'MAPPING_FIX_',  # Debug test patterns
                             'TRANSACTION_VERIFY_', 'WAL_FIX_TEST_', 'POOL_TEST_'  # Additional test patterns
                         ])
@@ -499,6 +500,7 @@ class ComprehensiveSystemCleanup:
                         'CMS_FAILOVER_TEST_', 'client_test_',
                         'UC2_', 'UC3_', 'UC4_',  # USE CASE testing patterns
                         'UC2_DELETE_', 'UC3_MANUAL_', 'UC4_SAFETY_',  # Specific USE CASE patterns
+                        'UC2_MANUAL_', 'UC3_MANUAL_', 'UC4_MANUAL_', 'UC5_MANUAL_',  # FIXED: Manual testing patterns
                         'FIX_TEST_', 'DEBUG_MAPPING_', 'MAPPING_FIX_',  # Debug test patterns
                         'pool_test_', 'POOL_TEST_', 'Pool_Test_'  # Connection pooling test patterns
                     ]
@@ -591,6 +593,7 @@ class DistributedTestCleanup:
             # USE CASE manual testing patterns
             'UC2_MANUAL_', 'UC3_MANUAL_', 'UC4_MANUAL_', 'UC5_MANUAL_',
             'UC2_DELETE_', 'UC3_DELETE_', 'UC4_DELETE_', 'UC5_DELETE_',
+            'UC4_SAFETY_', 'uc4_safety_', 'UC4_safety_',  # USE CASE 4 transaction safety patterns
             'USE_CASE_', 'use_case_', 'Use_Case_'
         ]
         
