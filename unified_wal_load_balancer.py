@@ -1025,7 +1025,10 @@ class UnifiedWALLoadBalancer:
                                                 logger.error(f"   Forcing DELETE with discovered UUID: {actual_uuid}")
                                                 final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{actual_uuid}')
                                             else:
-                                                logger.info(f"✅ VERIFICATION: Collection '{collection_name}' confirmed NOT on {instance.name} - DELETE not needed")
+                                                logger.info(f"✅ DELETE SYNC: Collection '{collection_name}' confirmed NOT on {instance.name} - DELETE goal achieved")
+                                                # CRITICAL FIX: This is actually SUCCESS for DELETE operations
+                                                # DELETE sync goal: ensure collection doesn't exist on target
+                                                # If collection doesn't exist, the DELETE goal is already achieved
                                                 self.mark_write_synced(write_id)
                                                 continue
                                         else:

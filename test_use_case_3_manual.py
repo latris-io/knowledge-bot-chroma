@@ -571,6 +571,9 @@ class UseCase3Tester(EnhancedVerificationBase):
                 time.sleep(30)
         
             try:
+                # Initialize all success flags
+                delete_sync_success = True
+                document_sync_success = True
                 # Step 1: Check collections exist via load balancer
                 response = requests.get(
                     f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
