@@ -655,7 +655,37 @@ class UnifiedWALLoadBalancer:
                      target_instance: TargetInstance, executed_on: Optional[str] = None) -> str:
         """Add write to unified WAL with intelligent deletion handling for ChromaDB ID issues"""
         write_id = str(uuid.uuid4())
-        collection_id = self.extract_collection_identifier(path)
+        
+        # CRITICAL FIX: Resolve collection names to UUIDs for WAL storage
+        collection_name = self.extract_collection_identifier(path)
+        collection_id = None
+        
+        if collection_name:
+            # For sync operations, we need the UUID from the TARGET instance
+            if target_instance == TargetInstance.PRIMARY:
+                collection_id = self.resolve_collection_name_to_uuid(collection_name, "primary")
+            elif target_instance == TargetInstance.REPLICA:
+                collection_id = self.resolve_collection_name_to_uuid(collection_name, "replica")
+            elif target_instance == TargetInstance.BOTH:
+                # For BOTH operations, resolve based on where it was NOT executed
+                if executed_on == "primary":
+                    # Executed on primary, needs to sync to replica
+                    collection_id = self.resolve_collection_name_to_uuid(collection_name, "replica")
+                elif executed_on == "replica":
+                    # Executed on replica, needs to sync to primary
+                    collection_id = self.resolve_collection_name_to_uuid(collection_name, "primary")
+                else:
+                    # Fallback: use collection name for backward compatibility
+                    collection_id = collection_name
+                    logger.warning(f"⚠️ WAL: Could not determine target instance for collection UUID resolution, using name: {collection_name}")
+            
+            # If UUID resolution failed, log warning but continue with name for backward compatibility
+            if not collection_id:
+                collection_id = collection_name
+                logger.warning(f"⚠️ WAL: Failed to resolve collection '{collection_name}' to UUID for {target_instance.value}, using name")
+            elif collection_id != collection_name:
+                logger.info(f"✅ WAL: Resolved collection '{collection_name}' to UUID {collection_id[:8]}... for {target_instance.value}")
+        
         data_size = len(data) if data else 0
         
         # INTELLIGENT DELETION HANDLING FOR CHROMADB ID SYNCHRONIZATION
