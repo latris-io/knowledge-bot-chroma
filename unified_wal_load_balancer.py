@@ -653,11 +653,27 @@ class UnifiedWALLoadBalancer:
 
     def add_wal_write(self, method: str, path: str, data: bytes, headers: Dict[str, str], 
                      target_instance: TargetInstance, executed_on: Optional[str] = None) -> str:
-        """Add write to unified WAL with intelligent deletion handling for ChromaDB ID issues"""
+        """Add write to unified WAL with proper collection UUID resolution"""
         write_id = str(uuid.uuid4())
         
-        # Store collection name in WAL - will resolve to UUID during sync when instances are healthy
-        collection_id = self.extract_collection_identifier(path)
+        # CRITICAL FIX: Store proper collection identifier - resolve names to UUIDs when possible
+        collection_identifier = self.extract_collection_identifier(path)
+        
+        # CRITICAL: For collection-level operations, try to resolve name to UUID immediately if executed_on is known
+        resolved_collection_id = collection_identifier
+        if collection_identifier and executed_on:
+            # Check if this is a collection name (not UUID) that needs resolution
+            import re
+            if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_identifier):
+                # This is a collection name, try to resolve to UUID for the executed instance
+                resolved_uuid = self.resolve_collection_name_to_uuid(collection_identifier, executed_on)
+                if resolved_uuid:
+                    resolved_collection_id = resolved_uuid
+                    logger.info(f"✅ WAL WRITE: Resolved collection name '{collection_identifier}' to UUID {resolved_uuid[:8]} for {executed_on}")
+                else:
+                    logger.warning(f"⚠️ WAL WRITE: Could not resolve collection name '{collection_identifier}' to UUID for {executed_on} - storing name for later resolution")
+                    # Keep the collection name for later resolution during sync
+                    resolved_collection_id = collection_identifier
         data_size = len(data) if data else 0
         
         # INTELLIGENT DELETION HANDLING FOR CHROMADB ID SYNCHRONIZATION
@@ -722,7 +738,7 @@ class UnifiedWALLoadBalancer:
                             converted_data,  # Use converted data
                             json.dumps(headers) if headers else None,
                             target_instance.value,
-                            collection_id,
+                            resolved_collection_id,  # CRITICAL FIX: Use resolved UUID instead of raw collection name
                             executed_on,
                             WALWriteStatus.EXECUTED.value if executed_on else WALWriteStatus.PENDING.value,
                             data_size,
@@ -736,7 +752,14 @@ class UnifiedWALLoadBalancer:
             if conversion_type:
                 self.stats["deletion_conversions"] = self.stats.get("deletion_conversions", 0) + 1
                 
-            logger.info(f"📝 WAL write {write_id[:8]} added ({WALWriteStatus.EXECUTED.value if executed_on else WALWriteStatus.PENDING.value}) for {target_instance.value}")
+            # Enhanced logging with collection info
+            if resolved_collection_id != collection_identifier:
+                logger.info(f"📝 WAL write {write_id[:8]} added ({WALWriteStatus.EXECUTED.value if executed_on else WALWriteStatus.PENDING.value}) for {target_instance.value}")
+                logger.info(f"   Collection: {collection_identifier} → {resolved_collection_id[:8] if resolved_collection_id else 'None'}")
+            else:
+                logger.info(f"📝 WAL write {write_id[:8]} added ({WALWriteStatus.EXECUTED.value if executed_on else WALWriteStatus.PENDING.value}) for {target_instance.value}")
+                if resolved_collection_id:
+                    logger.info(f"   Collection: {resolved_collection_id[:8] if len(resolved_collection_id) > 8 else resolved_collection_id}")
             
             if conversion_type:
                 logger.info(f"🔄 Deletion conversion applied: {conversion_type}")
