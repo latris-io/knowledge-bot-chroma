@@ -968,18 +968,51 @@ class UnifiedWALLoadBalancer:
                             if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_name):
                                 logger.info(f"🔍 WAL SYNC: Collection DELETE detected - resolving name '{collection_name}' to UUID for {instance.name}")
                                 
-                                # Resolve collection name to UUID for target instance
+                                # CRITICAL FIX: Always try to resolve UUID with enhanced logging
                                 resolved_uuid = self.resolve_collection_name_to_uuid(collection_name, instance.name)
                                 if resolved_uuid:
                                     # Replace collection name with UUID in path
                                     final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{resolved_uuid}')
-                                    logger.info(f"✅ WAL SYNC: Collection DELETE path resolved for {instance.name}: {normalized_path} -> {final_path}")
+                                    logger.info(f"✅ WAL SYNC: Collection DELETE path resolved for {instance.name}: {collection_name} -> {resolved_uuid[:8]}")
+                                    logger.info(f"   Final path: {final_path}")
                                 else:
-                                    logger.warning(f"⚠️ WAL SYNC: Could not resolve collection name '{collection_name}' to UUID for {instance.name}")
-                                    # This might be expected if collection was already deleted from target
-                                    logger.info(f"ℹ️ Skipping DELETE sync - collection '{collection_name}' may not exist on {instance.name}")
-                                    self.mark_write_synced(write_id)  # Mark as synced since target doesn't have collection anyway
-                                    continue
+                                    # CRITICAL: Don't immediately mark as synced - this might be a resolution error
+                                    logger.error(f"❌ WAL SYNC: FAILED to resolve collection name '{collection_name}' to UUID for {instance.name}")
+                                    logger.error(f"   This is unexpected - collection might exist but resolution failed")
+                                    
+                                    # Try one more direct verification before giving up
+                                    logger.info(f"🔍 VERIFICATION: Double-checking if collection '{collection_name}' exists on {instance.name}")
+                                    try:
+                                        verification_response = self.make_direct_request(
+                                            instance, 
+                                            "GET", 
+                                            "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                        )
+                                        if verification_response.status_code == 200:
+                                            collections = verification_response.json()
+                                            found_collection = None
+                                            for coll in collections:
+                                                if coll.get('name') == collection_name:
+                                                    found_collection = coll
+                                                    break
+                                            
+                                            if found_collection:
+                                                actual_uuid = found_collection.get('id')
+                                                logger.error(f"❌ CRITICAL BUG: Collection '{collection_name}' EXISTS with UUID {actual_uuid[:8]} but resolution failed!")
+                                                logger.error(f"   Forcing DELETE with discovered UUID: {actual_uuid}")
+                                                final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{actual_uuid}')
+                                            else:
+                                                logger.info(f"✅ VERIFICATION: Collection '{collection_name}' confirmed NOT on {instance.name} - DELETE not needed")
+                                                self.mark_write_synced(write_id)
+                                                continue
+                                        else:
+                                            logger.error(f"❌ VERIFICATION FAILED: Cannot verify collections on {instance.name} (HTTP {verification_response.status_code})")
+                                            self.mark_write_failed(write_id, f"Verification failed for collection '{collection_name}' on {instance.name}")
+                                            continue
+                                    except Exception as verify_error:
+                                        logger.error(f"❌ VERIFICATION ERROR: {verify_error}")
+                                        self.mark_write_failed(write_id, f"Verification error for collection '{collection_name}' on {instance.name}: {verify_error}")
+                                        continue
                     
                     # CRITICAL: Resolve collection names to UUIDs for document operations in WAL sync
                     if '/collections/' in normalized_path and any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/update', '/delete']):
