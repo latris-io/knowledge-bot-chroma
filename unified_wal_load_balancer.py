@@ -1149,6 +1149,18 @@ class UnifiedWALLoadBalancer:
                         self.mark_write_failed(write_id, f"Collection creation failed: HTTP {response.status_code}")
                         continue
                     
+                    # CRITICAL FIX: Handle DELETE operations with proper status code validation
+                    elif (method == 'DELETE' and '/collections/' in final_path):
+                        if response.status_code in [200, 204, 404]:
+                            logger.info(f"✅ WAL SYNC: Collection DELETE successful on {instance.name} - Status: {response.status_code}")
+                            # 404 is OK for DELETE - collection already deleted
+                        else:
+                            logger.error(f"❌ WAL SYNC: Collection DELETE failed on {instance.name} - Status: {response.status_code}")
+                            logger.error(f"   Response: {response.text[:200]}")
+                            logger.error(f"   DELETE path: {final_path}")
+                            self.mark_write_failed(write_id, f"Collection DELETE failed: HTTP {response.status_code}")
+                            continue
+                    
                     # Update collection mapping for successful collection creation
                     if (method == 'POST' and 
                         ('/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete', '/count'])) and
