@@ -1710,7 +1710,11 @@ class UnifiedWALLoadBalancer:
             # Log response for debugging WAL sync issues
             logger.debug(f"🔧 WAL SYNC RESPONSE: {response.status_code} - {response.text[:100]}")
             
-            response.raise_for_status()
+            # 🔧 CRITICAL FIX: Don't raise 404 errors for DELETE operations - they indicate success
+            if method == 'DELETE' and response.status_code == 404:
+                logger.debug(f"✅ DELETE 404 treated as success: collection already deleted")
+            else:
+                response.raise_for_status()
             return response
             
         except Exception as e:
