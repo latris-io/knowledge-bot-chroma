@@ -1063,7 +1063,29 @@ class UnifiedWALLoadBalancer:
                                                         else:
                                                             # Collection truly doesn't exist - DELETE goal legitimately achieved
                                                             logger.info(f"✅ DELETE VERIFIED: Collection '{collection_name}' confirmed NOT on {instance.name} - DELETE goal achieved")
-                                                            self.mark_write_synced(write_id)
+                                                            
+                                                            # CRITICAL FIX: Use proper sync marking for "both" target operations
+                                                            # Don't bypass the "both" target logic like the original bug
+                                                            target_instance_type = None
+                                                            try:
+                                                                with self.get_db_connection() as conn:
+                                                                    with conn.cursor() as cur:
+                                                                        cur.execute("""
+                                                                            SELECT target_instance FROM unified_wal_writes WHERE write_id = %s
+                                                                        """, (write_id,))
+                                                                        result = cur.fetchone()
+                                                                        if result:
+                                                                            target_instance_type = result[0]
+                                                            except Exception as e:
+                                                                logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
+                                                            
+                                                            # Use appropriate sync marking based on target_instance
+                                                            if target_instance_type == 'both':
+                                                                # Use per-instance sync tracking for "both" operations
+                                                                self.mark_instance_synced(write_id, instance.name)
+                                                            else:
+                                                                # Use regular sync marking for single-instance operations
+                                                                self.mark_write_synced(write_id)
                                                             continue
                                                     else:
                                                         # Cannot verify collections - fail the DELETE operation
