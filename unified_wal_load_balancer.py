@@ -3724,9 +3724,11 @@ if __name__ == '__main__':
                     logger.error(f"💀 CRITICAL: Collection {collection_name if 'collection_name' in locals() else 'UNKNOWN'} may be inaccessible via load balancer")
             
             # 🗑️ CRITICAL: DELETE collection from BOTH instances for distributed system (FIX DELETE SYNC ISSUE)
+            # 🔧 COORDINATION FIX: Only run distributed DELETE when NOT using WAL sync
             elif (request.method == 'DELETE' and 
                   '/collections/' in final_path and 
-                  response.status_code in [200, 204]):
+                  response.status_code in [200, 204] and
+                  not should_log_to_wal):
                 try:
                     logger.info(f"🔍 PROXY_REQUEST: DISTRIBUTED COLLECTION DELETION starting...")
                     
@@ -3821,6 +3823,14 @@ if __name__ == '__main__':
                     # Log issue but don't fail the request - the primary deletion succeeded
                     enhanced_wal.stats["delete_sync_failures"] = enhanced_wal.stats.get("delete_sync_failures", 0) + 1
                     logger.warning(f"⚠️ DELETE SYNC: Collection may be orphaned on other instance")
+            
+            # 🔧 COORDINATION: Log when WAL sync will handle DELETE instead of distributed system
+            elif (request.method == 'DELETE' and 
+                  '/collections/' in final_path and 
+                  response.status_code in [200, 204] and
+                  should_log_to_wal):
+                logger.info(f"🎯 WAL COORDINATION: DELETE operation will be synced via WAL system (distributed DELETE skipped)")
+                logger.info(f"   Collection deleted from {target_instance.name}, WAL will sync to other instance when healthy")
             
             # 🛡️ TRANSACTION SAFETY: Mark transaction as completed
             if transaction_id and enhanced_wal.transaction_safety:
