@@ -480,6 +480,15 @@ class UnifiedWALLoadBalancer:
                         if not cur.fetchone():
                             cur.execute("ALTER TABLE unified_wal_writes ADD COLUMN priority INTEGER DEFAULT 0;")
                             logger.info("Added priority column")
+                        
+                        # Check and add synced_instances column for "both" target tracking
+                        cur.execute("""
+                            SELECT column_name FROM information_schema.columns 
+                            WHERE table_name = 'unified_wal_writes' AND column_name = 'synced_instances';
+                        """)
+                        if not cur.fetchone():
+                            cur.execute("ALTER TABLE unified_wal_writes ADD COLUMN synced_instances JSONB DEFAULT NULL;")
+                            logger.info("Added synced_instances column for target_instance='both' tracking")
                             
                     except Exception as e:
                         logger.info(f"Column handling: {e}")
@@ -870,18 +879,21 @@ class UnifiedWALLoadBalancer:
             with self.get_db_connection_ctx() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     # Get writes that need to be synced to this instance
-                    # 🔧 CRITICAL FIX FOR USE CASE 2: Correct replica→primary sync logic
-                    # When looking for operations to sync TO primary, we want:
-                    # 1. Operations that were executed on replica (executed_on = 'replica') 
-                    # 2. Operations with target_instance = 'primary' or 'both'
+                    # 🔧 CRITICAL FIX FOR "BOTH" TARGET LOGIC: Enhanced logic for per-instance sync tracking
+                    # When looking for operations to sync TO an instance, we want:
+                    # 1. Operations with target_instance = target_instance AND executed_on != target_instance (single instance sync)
+                    # 2. Operations with target_instance = 'both' AND this instance NOT in synced_instances (both instance sync)
                     cur.execute("""
                         SELECT write_id, method, path, data, headers, collection_id, 
-                               timestamp, retry_count, data_size_bytes, priority
+                               timestamp, retry_count, data_size_bytes, priority, target_instance, synced_instances
                         FROM unified_wal_writes 
                         WHERE (status = 'executed' OR status = 'failed') 
                         AND (
-                            (target_instance = 'both') OR
-                            (target_instance = %s AND executed_on != %s)
+                            (target_instance = %s AND executed_on != %s) OR
+                            (target_instance = 'both' AND (
+                                synced_instances IS NULL OR 
+                                NOT (synced_instances ? %s)
+                            ))
                         )
                         AND retry_count < 3
                         AND (
@@ -890,7 +902,7 @@ class UnifiedWALLoadBalancer:
                         )
                         ORDER BY priority DESC, retry_count ASC, timestamp ASC
                         LIMIT %s
-                    """, (target_instance, target_instance, batch_size * 3))
+                    """, (target_instance, target_instance, target_instance, batch_size * 3))
                     
                     all_writes = cur.fetchall()
                     
@@ -1231,8 +1243,29 @@ class UnifiedWALLoadBalancer:
                             logger.error(f"❌ Failed to update collection mapping: {mapping_error}")
                             # Don't fail sync for mapping issues
                     
-                    # Mark as synced
-                    self.mark_write_synced(write_id)
+                    # CRITICAL FIX: Use proper sync marking for "both" target operations
+                    # Check if this is a "both" target operation that needs per-instance tracking
+                    target_instance_type = None
+                    try:
+                        with self.get_db_connection() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    SELECT target_instance FROM unified_wal_writes WHERE write_id = %s
+                                """, (write_id,))
+                                result = cur.fetchone()
+                                if result:
+                                    target_instance_type = result[0]
+                    except Exception as e:
+                        logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
+                    
+                    # Use appropriate sync marking based on target_instance
+                    if target_instance_type == 'both':
+                        # Use per-instance sync tracking for "both" operations
+                        self.mark_instance_synced(write_id, instance.name)
+                    else:
+                        # Use regular sync marking for single-instance operations
+                        self.mark_write_synced(write_id)
+                        
                     success_count += 1
                     self.stats["successful_syncs"] += 1
                     logger.debug(f"✅ WAL SYNC SUCCESS: {write_record['write_id'][:8]} - {method} {final_path}")
@@ -2382,6 +2415,74 @@ class UnifiedWALLoadBalancer:
                         conn.close()
                     except:
                         pass
+
+    def mark_instance_synced(self, write_id: str, instance_name: str):
+        """Mark a write as synced to a specific instance for 'both' target operations"""
+        try:
+            with self._get_appropriate_lock('wal_write'):
+                with self.get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        # First get the current target_instance and synced_instances
+                        cur.execute("""
+                            SELECT target_instance, synced_instances 
+                            FROM unified_wal_writes 
+                            WHERE write_id = %s
+                        """, (write_id,))
+                        
+                        result = cur.fetchone()
+                        if not result:
+                            logger.error(f"❌ WAL record not found for write_id: {write_id[:8]}")
+                            return
+                        
+                        target_instance, synced_instances = result
+                        
+                        # If target is not 'both', use regular sync logic
+                        if target_instance != 'both':
+                            self.mark_write_synced(write_id)
+                            return
+                        
+                        # Parse current synced instances (JSON array or empty)
+                        try:
+                            if synced_instances:
+                                synced_list = json.loads(synced_instances) if isinstance(synced_instances, str) else synced_instances
+                            else:
+                                synced_list = []
+                        except (json.JSONDecodeError, TypeError):
+                            synced_list = []
+                        
+                        # Add this instance if not already synced
+                        if instance_name not in synced_list:
+                            synced_list.append(instance_name)
+                            logger.info(f"✅ INSTANCE SYNC: {write_id[:8]} synced to {instance_name} ({len(synced_list)}/2 instances)")
+                        
+                        # Check if both instances are now synced
+                        required_instances = ['primary', 'replica']
+                        all_synced = all(inst in synced_list for inst in required_instances)
+                        
+                        if all_synced:
+                            # Both instances synced - mark as fully synced
+                            cur.execute("""
+                                UPDATE unified_wal_writes 
+                                SET status = %s, synced_instances = %s, synced_at = NOW(), updated_at = NOW()
+                                WHERE write_id = %s
+                            """, (WALWriteStatus.SYNCED.value, json.dumps(synced_list), write_id))
+                            logger.info(f"🎉 BOTH SYNC COMPLETE: {write_id[:8]} synced to both instances - marking as SYNCED")
+                        else:
+                            # Partial sync - update synced instances but keep status as executed
+                            cur.execute("""
+                                UPDATE unified_wal_writes 
+                                SET synced_instances = %s, updated_at = NOW()
+                                WHERE write_id = %s
+                            """, (json.dumps(synced_list), write_id))
+                            missing_instances = [inst for inst in required_instances if inst not in synced_list]
+                            logger.info(f"⏳ PARTIAL SYNC: {write_id[:8]} synced to {instance_name}, waiting for: {missing_instances}")
+                        
+                        conn.commit()
+                        
+        except psycopg2.OperationalError as e:
+            logger.warning(f"Database unavailable, skipping instance sync update for {write_id[:8]}: {e}")
+        except Exception as e:
+            logger.error(f"Error marking write {write_id[:8]} as synced to {instance_name}: {e}")
 
 # 🚀 REQUEST CONCURRENCY CONTROLS - Handle high concurrent user load
 class ConcurrencyManager:
