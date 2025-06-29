@@ -1107,7 +1107,13 @@ class UnifiedWALLoadBalancer:
                                         continue
                     
                     # CRITICAL: Resolve collection names to UUIDs for document operations in WAL sync
-                    if '/collections/' in normalized_path and any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/update', '/delete']):
+                    # 🔧 CRITICAL FIX: Skip UUID resolution for collection DELETE operations
+                    is_collection_delete = (method == 'DELETE' and '/collections/' in normalized_path and 
+                                          not any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/update', '/delete']))
+                    
+                    if (not is_collection_delete and 
+                        '/collections/' in normalized_path and 
+                        any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/update', '/delete'])):
                         # Extract collection name from path
                         path_parts = normalized_path.split('/collections/')
                         if len(path_parts) > 1:
@@ -1128,6 +1134,8 @@ class UnifiedWALLoadBalancer:
                                     # Skip this sync operation - collection doesn't exist on target
                                     self.mark_write_failed(write_id, f"Collection '{collection_part}' not found on {instance.name}")
                                     continue
+                    elif is_collection_delete:
+                        logger.info(f"🔧 COLLECTION DELETE: Skipping UUID resolution for collection DELETE - using original collection name")
                     
                     # Fix headers parsing
                     headers = {}
@@ -1141,7 +1149,10 @@ class UnifiedWALLoadBalancer:
                     collection_id = self.extract_collection_identifier(final_path)
                     
                     # CRITICAL: Map collection ID for proper sync (UUID resolution for document operations)
-                    if collection_id and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update', '/delete']):
+                    # 🔧 CRITICAL FIX: Skip UUID mapping for collection DELETE operations
+                    if (collection_id and 
+                        not is_collection_delete and 
+                        any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update', '/delete'])):
                         # This is a document operation - need to map collection UUID from source to target instance
                         logger.info(f"🔍 DOCUMENT OPERATION DETECTED: {method} {final_path}")
                         logger.info(f"   Source collection ID: {collection_id}")
@@ -1166,6 +1177,8 @@ class UnifiedWALLoadBalancer:
                         else:
                             logger.info(f"ℹ️ UUID mapping not needed: {collection_id[:8]} (same on both instances)")
                             # Continue with current UUID
+                    elif collection_id and is_collection_delete:
+                        logger.info(f"🔧 COLLECTION DELETE: Skipping UUID mapping for collection DELETE - using original collection name")
                     
                     # Make the sync request with normalized path
                     response = self.make_direct_request(instance, method, final_path, data=data, headers=headers)
