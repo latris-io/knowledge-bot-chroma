@@ -3650,10 +3650,37 @@ if __name__ == '__main__':
                                 logger.error(f"❌ PROXY_REQUEST: Error creating collection on {other_instance_name}: {other_error}")
                                 import traceback
                                 logger.error(f"Other instance error traceback: {traceback.format_exc()}")
-                        else:
-                            if other_instance:
-                                logger.warning(f"⚠️ PROXY_REQUEST: {other_instance_name} not healthy (healthy={other_instance.is_healthy}) - creating partial mapping")
+                        
+                        # 🔧 FAILOVER FIX: If other instance unavailable, create WAL entry for sync when it recovers
+                        if not other_collection_uuid and other_instance:
+                            if not other_instance.is_healthy:
+                                logger.info(f"🔧 FAILOVER FIX: {other_instance_name} unhealthy - creating WAL entry for collection creation sync")
+                                
+                                try:
+                                    # Create WAL entry to create collection on other instance when it recovers
+                                    if other_instance_name == "primary":
+                                        target_enum = TargetInstance.PRIMARY
+                                    else:
+                                        target_enum = TargetInstance.REPLICA
+                                    
+                                    # Use the same data that was used to create the collection
+                                    failover_write_id = enhanced_wal.add_wal_write(
+                                        method='POST',
+                                        path=final_path,
+                                        data=data,
+                                        headers={'Content-Type': 'application/json'},
+                                        target_instance=target_enum,
+                                        executed_on=target_instance.name
+                                    )
+                                    
+                                    logger.info(f"✅ FAILOVER FIX: WAL entry created for {other_instance_name} collection creation: {failover_write_id[:8]}")
+                                    
+                                except Exception as wal_error:
+                                    logger.error(f"❌ FAILOVER FIX: Failed to create WAL entry for {other_instance_name}: {wal_error}")
                             else:
+                                logger.warning(f"⚠️ PROXY_REQUEST: {other_instance_name} not healthy (healthy={other_instance.is_healthy}) - creating partial mapping")
+                        else:
+                            if not other_instance:
                                 logger.error(f"❌ PROXY_REQUEST: {other_instance_name} instance not found - creating partial mapping")
                         
                         # 🔧 CREATE MAPPING: Create complete mapping with both UUIDs
