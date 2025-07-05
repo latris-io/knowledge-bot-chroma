@@ -883,6 +883,10 @@ class UnifiedWALLoadBalancer:
                     # When looking for operations to sync TO an instance, we want:
                     # 1. Operations with target_instance = target_instance AND executed_on != target_instance (single instance sync)
                     # 2. Operations with target_instance = 'both' AND this instance NOT in synced_instances (both instance sync)
+                    
+                    # 🚨 CRITICAL BUG FIX: Use correct PostgreSQL JSON containment operator
+                    # The ? operator checks for key existence, but synced_instances is an array, not an object
+                    # We need to use @> operator to check if the array contains the target instance
                     cur.execute("""
                         SELECT write_id, method, path, data, headers, collection_id, 
                                timestamp, retry_count, data_size_bytes, priority, target_instance, synced_instances
@@ -892,7 +896,8 @@ class UnifiedWALLoadBalancer:
                             (target_instance = %s AND executed_on != %s) OR
                             (target_instance = 'both' AND (
                                 synced_instances IS NULL OR 
-                                NOT (synced_instances ? %s)
+                                synced_instances = '[]' OR
+                                NOT (synced_instances @> %s)
                             ))
                         )
                         AND retry_count < 3
@@ -902,9 +907,17 @@ class UnifiedWALLoadBalancer:
                         )
                         ORDER BY priority DESC, retry_count ASC, timestamp ASC
                         LIMIT %s
-                    """, (target_instance, target_instance, target_instance, batch_size * 3))
+                    """, (target_instance, target_instance, json.dumps([target_instance]), batch_size * 3))
                     
                     all_writes = cur.fetchall()
+                    
+                    # 🔧 DEBUG: Log what we found for troubleshooting
+                    if target_instance == 'replica':
+                        both_operations = [w for w in all_writes if w.get('target_instance') == 'both']
+                        if both_operations:
+                            logger.info(f"🔍 DEBUG: Found {len(both_operations)} 'both' target operations to sync to replica")
+                            for op in both_operations[:3]:  # Log first 3
+                                logger.info(f"   - {op['method']} {op['path']} (synced_instances: {op.get('synced_instances')})")
                     
                     if not all_writes:
                         return []
