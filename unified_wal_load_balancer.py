@@ -1544,102 +1544,30 @@ class UnifiedWALLoadBalancer:
                     logger.error(f"❌ Collection mapping cleanup failed: {mapping_cleanup_error}")
                     # Don't fail the sync operation for mapping cleanup errors
                     
-                    # 🔧 COORDINATION: Log when WAL sync will handle DELETE instead of distributed system
-                    elif (request.method == 'DELETE' and 
-                          '/collections/' in final_path and 
-                          response.status_code in [200, 204] and
-                          should_log_to_wal):
-                        logger.info(f"🎯 WAL COORDINATION: DELETE operation will be synced via WAL system (distributed DELETE skipped)")
-                        logger.info(f"   Collection deleted from {target_instance.name}, WAL will sync to other instance when healthy")
-                    
-                    # 🛡️ TRANSACTION SAFETY: Mark transaction as completed
-                    if transaction_id and enhanced_wal.transaction_safety:
-                        try:
-                            enhanced_wal.transaction_safety.mark_transaction_completed(
-                                transaction_id, 
-                                response.status_code,
-                                {"status": "success", "proxy_response": True}
-                            )
-                            logger.info(f"🛡️ TRANSACTION SAFETY: Completed {transaction_id[:8]} with status {response.status_code}")
-                        except Exception as e:
-                            logger.error(f"❌ Failed to mark transaction completed: {e}")
-                    
-                    # Return response with working JSON handling
-                    logger.info(f"✅ PROXY_REQUEST: Returning response to client")
-                    return Response(
-                        response.text,
-                        status=response.status_code,
-                        mimetype='application/json'
-                    )
-                    
-                except Exception as e:
-                    import traceback
-                    logger.error(f"❌ PROXY_REQUEST FAILED for {request.method} /{path}: {e}")
-                    logger.error(f"Full traceback: {traceback.format_exc()}")
-                    
-                    # 🔧 RETRY LOGIC: Attempt simple retry for certain failures
-                    if "Connection" in str(e) or "timeout" in str(e).lower() or "502" in str(e):
-                        logger.warning(f"🔄 RETRY: Connection issue detected, attempting simple retry")
-                        try:
-                            import time
-                            time.sleep(0.5)  # Brief pause
-                            
-                            # Simple retry without complex logic
-                            target_instance = enhanced_wal.choose_read_instance_with_realtime_health(f"/{path}", request.method, {})
-                            if target_instance:
-                                normalized_path = enhanced_wal.normalize_api_path_to_v2(f"/{path}")
-                                url = f"{target_instance.url}{normalized_path}"
-                                data = request.get_data() if request.method in ['POST', 'PUT', 'PATCH'] else None
-                                
-                                import requests
-                                response = requests.request(
-                                    method=request.method,
-                                    url=url,
-                                    headers={'Content-Type': 'application/json'} if data else {},
-                                    data=data,
-                                    timeout=15  # Longer timeout for retry
-                                )
-                                
-                                logger.info(f"✅ RETRY SUCCESS: {response.status_code} for {request.method} /{path}")
-                                
-                                # 🛡️ TRANSACTION SAFETY: Mark retry success
-                                if transaction_id and enhanced_wal.transaction_safety:
-                                    try:
-                                        enhanced_wal.transaction_safety.mark_transaction_completed(
-                                            transaction_id, 
-                                            response.status_code,
-                                            {"status": "retry_success", "original_error": str(e)[:100]}
-                                        )
-                                    except Exception as te:
-                                        logger.error(f"❌ Failed to mark retry transaction completed: {te}")
-                                
-                                # Return successful retry response
-                                return Response(
-                                    response.text,
-                                    status=response.status_code,
-                                    mimetype='application/json'
-                                )
-                                
-                        except Exception as retry_error:
-                            logger.error(f"❌ RETRY FAILED: {retry_error}")
-                            # Fall through to original error handling
-                    
-                    # 🛡️ TRANSACTION SAFETY: Mark transaction as failed for recovery
-                    if transaction_id and enhanced_wal.transaction_safety:
-                        try:
-                            # Detect timing gap failures
-                            is_timing_gap = "No healthy instances" in str(e) or "Connection" in str(e)
-                            
-                            enhanced_wal.transaction_safety.mark_transaction_failed(
-                                transaction_id,
-                                str(e)[:500],  # Limit error message length
-                                is_timing_gap=is_timing_gap
-                            )
-                            logger.info(f"🛡️ TRANSACTION SAFETY: Failed {transaction_id[:8]} - {'timing gap' if is_timing_gap else 'general error'}")
-                        except Exception as te:
-                            logger.error(f"❌ Failed to mark transaction failed: {te}")
-                    
-                    return jsonify({"error": f"Service temporarily unavailable: {str(e)}"}), 503
+            # Mark as synced regardless of mapping cleanup result
+            target_instance_type = None
+            try:
+                with self.get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT target_instance FROM unified_wal_writes WHERE write_id = %s", (write_id,))
+                        result = cur.fetchone()
+                        if result:
+                            target_instance_type = result[0]
+            except Exception as e:
+                logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
+            
+            if target_instance_type == 'both':
+                self.mark_instance_synced(write_id, instance.name)
+            else:
+                self.mark_write_synced(write_id)
+            
+            success_count += 1
+            
+        except Exception as e:
+            logger.error(f"❌ WAL sync failed for {write_id[:8]}: {e}")
+            self.mark_write_failed(write_id, str(e)[:500])
+            
+        return success_count, len(batch.writes) - success_count
 
     def perform_high_volume_sync(self):
         """Perform high-volume WAL synchronization with parallel batch processing"""
