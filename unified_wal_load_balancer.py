@@ -1049,74 +1049,43 @@ class UnifiedWALLoadBalancer:
                                                 logger.error(f"❌ CRITICAL BUG: Collection '{collection_name}' EXISTS with UUID {actual_uuid[:8]} but resolution failed!")
                                                 logger.error(f"   Forcing DELETE with discovered UUID: {actual_uuid}")
                                                 final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{actual_uuid}')
+                                                # Continue to execute DELETE with corrected UUID
                                             else:
-                                                # CRITICAL FIX: Verify collection actually doesn't exist before claiming success
-                                                logger.warning(f"⚠️ DELETE SYNC: UUID resolution failed for '{collection_name}' - verifying actual existence")
+                                                # Collection confirmed not to exist - DELETE goal already achieved
+                                                logger.info(f"✅ DELETE VERIFICATION: Collection '{collection_name}' confirmed NOT on {instance.name}")
+                                                logger.info(f"   DELETE goal already achieved - no action needed")
                                                 
+                                                # CRITICAL FIX: Use proper sync marking for "both" target operations
+                                                target_instance_type = None
                                                 try:
-                                                    # Double-check if collection actually exists with direct verification
-                                                    verification_response = requests.get(
-                                                        f"{instance.url}/api/v2/tenants/default_tenant/databases/default_database/collections",
-                                                        timeout=5
-                                                    )
-                                                    
-                                                    if verification_response.status_code == 200:
-                                                        collections = verification_response.json()
-                                                        found_collection = next((c for c in collections if c.get('name') == collection_name), None)
-                                                        
-                                                        if found_collection:
-                                                            # CRITICAL: Collection EXISTS but UUID resolution failed - this is a resolution bug, NOT a missing collection
-                                                            actual_uuid = found_collection.get('id')
-                                                            logger.error(f"❌ RESOLUTION BUG DETECTED: Collection '{collection_name}' EXISTS with UUID {actual_uuid[:8]} but resolution failed!")
-                                                            logger.info(f"🔧 FIXING: Force DELETE execution with discovered UUID")
-                                                            # Replace collection name with discovered UUID and continue with DELETE execution
-                                                            final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{actual_uuid}')
-                                                            logger.info(f"   Corrected DELETE path: {final_path}")
-                                                            # Continue with DELETE execution using corrected path (don't continue/skip)
-                                                        else:
-                                                            # Collection truly doesn't exist - DELETE goal legitimately achieved
-                                                            logger.info(f"✅ DELETE VERIFIED: Collection '{collection_name}' confirmed NOT on {instance.name} - DELETE goal achieved")
-                                                            
-                                                            # CRITICAL FIX: Use proper sync marking for "both" target operations
-                                                            # Don't bypass the "both" target logic like the original bug
-                                                            target_instance_type = None
-                                                            try:
-                                                                with self.get_db_connection() as conn:
-                                                                    with conn.cursor() as cur:
-                                                                        cur.execute("""
-                                                                            SELECT target_instance FROM unified_wal_writes WHERE write_id = %s
-                                                                        """, (write_id,))
-                                                                        result = cur.fetchone()
-                                                                        if result:
-                                                                            target_instance_type = result[0]
-                                                            except Exception as e:
-                                                                logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
-                                                            
-                                                            # Use appropriate sync marking based on target_instance
-                                                            if target_instance_type == 'both':
-                                                                # Use per-instance sync tracking for "both" operations
-                                                                self.mark_instance_synced(write_id, instance.name)
-                                                            else:
-                                                                # Use regular sync marking for single-instance operations
-                                                                self.mark_write_synced(write_id)
-                                                            continue
-                                                    else:
-                                                        # Cannot verify collections - fail the DELETE operation
-                                                        logger.error(f"❌ VERIFICATION FAILED: Cannot list collections on {instance.name} (HTTP {verification_response.status_code})")
-                                                        self.mark_write_failed(write_id, f"DELETE verification failed - cannot list collections on {instance.name}")
-                                                        continue
-                                                        
-                                                except Exception as verify_error:
-                                                    logger.error(f"❌ VERIFICATION ERROR during DELETE sync: {verify_error}")
-                                                    self.mark_write_failed(write_id, f"DELETE verification error on {instance.name}: {verify_error}")
-                                                    continue
+                                                    with self.get_db_connection() as conn:
+                                                        with conn.cursor() as cur:
+                                                            cur.execute("""
+                                                                SELECT target_instance FROM unified_wal_writes WHERE write_id = %s
+                                                            """, (write_id,))
+                                                            result = cur.fetchone()
+                                                            if result:
+                                                                target_instance_type = result[0]
+                                                except Exception as e:
+                                                    logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
+                                                
+                                                # Use appropriate sync marking based on target_instance
+                                                if target_instance_type == 'both':
+                                                    # Use per-instance sync tracking for "both" operations
+                                                    self.mark_instance_synced(write_id, instance.name)
+                                                    logger.info(f"📝 MARKED: DELETE operation {write_id[:8]} synced to {instance.name} (goal already achieved)")
+                                                else:
+                                                    # Use regular sync marking for single-instance operations
+                                                    self.mark_write_synced(write_id)
+                                                    logger.info(f"📝 MARKED: DELETE operation {write_id[:8]} completed (goal already achieved)")
+                                                continue
                                         else:
-                                            logger.error(f"❌ VERIFICATION FAILED: Cannot verify collections on {instance.name} (HTTP {verification_response.status_code})")
-                                            self.mark_write_failed(write_id, f"Verification failed for collection '{collection_name}' on {instance.name}")
+                                            logger.error(f"❌ VERIFICATION FAILED: Cannot list collections on {instance.name} (HTTP {verification_response.status_code})")
+                                            self.mark_write_failed(write_id, f"DELETE verification failed - cannot list collections on {instance.name}")
                                             continue
                                     except Exception as verify_error:
-                                        logger.error(f"❌ VERIFICATION ERROR: {verify_error}")
-                                        self.mark_write_failed(write_id, f"Verification error for collection '{collection_name}' on {instance.name}: {verify_error}")
+                                        logger.error(f"❌ VERIFICATION ERROR during DELETE sync: {verify_error}")
+                                        self.mark_write_failed(write_id, f"DELETE verification error on {instance.name}: {verify_error}")
                                         continue
                     
                     # CRITICAL: Resolve collection names to UUIDs for document operations in WAL sync
