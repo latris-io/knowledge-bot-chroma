@@ -905,7 +905,7 @@ class UnifiedWALLoadBalancer:
                             status = 'executed' OR 
                             (status = 'failed' AND updated_at < NOW() - INTERVAL '1 minute' * POWER(2, retry_count))
                         )
-                        ORDER BY priority DESC, retry_count ASC, timestamp ASC
+                        ORDER BY timestamp ASC, retry_count ASC, priority DESC
                         LIMIT %s
                     """, (target_instance, target_instance, json.dumps([target_instance]), batch_size * 3))
                     
