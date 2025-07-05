@@ -3649,19 +3649,33 @@ if __name__ == '__main__':
                 
                 elif request.method == 'DELETE' and '/collections/' in final_path and final_path.count('/') <= 8:  # DELETE /collections/{id} - FIX: 8 slashes in V2 API
                     operation_type = "collection_deletion"
-                    # 🔧 CRITICAL FIX: Log collection deletions when in failover mode (USE CASE 2)
-                    # Check if both instances are healthy - if not, we need WAL logging for sync
+                    # 🔧 CRITICAL FIX: Log collection deletions when in failover mode (USE CASE 2/3)
+                    # ENHANCED: Use real-time health checking to prevent timing gaps during infrastructure failures
                     primary_instance = enhanced_wal.get_primary_instance()
                     replica_instance = enhanced_wal.get_replica_instance()
-                    both_instances_healthy = (primary_instance and primary_instance.is_healthy and 
-                                            replica_instance and replica_instance.is_healthy)
+                    
+                    # REAL-TIME HEALTH CHECK: Prevent timing gaps during infrastructure failures
+                    primary_healthy = (primary_instance and primary_instance.is_healthy and 
+                                     enhanced_wal.check_instance_health_realtime(primary_instance, timeout=3))
+                    replica_healthy = (replica_instance and replica_instance.is_healthy and 
+                                     enhanced_wal.check_instance_health_realtime(replica_instance, timeout=3))
+                    
+                    both_instances_healthy = primary_healthy and replica_healthy
                     
                     if both_instances_healthy:
                         should_log_to_wal = False  # Distributed deletion handles this
-                        logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Both instances healthy, using distributed deletion (no WAL)")
+                        logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Both instances healthy (real-time verified), using distributed deletion (no WAL)")
                     else:
                         should_log_to_wal = True  # Need WAL for failover sync
-                        logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Failover mode detected, logging to WAL for sync")
+                        logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Failover mode detected (real-time verified: primary={primary_healthy}, replica={replica_healthy}), logging to WAL for sync")
+                        
+                        # Update cached health status immediately if real-time check differs
+                        if primary_instance and primary_instance.is_healthy and not primary_healthy:
+                            logger.warning(f"⚠️ HEALTH UPDATE: Primary marked unhealthy via real-time check (cached was healthy)")
+                            primary_instance.is_healthy = False
+                        if replica_instance and replica_instance.is_healthy and not replica_healthy:
+                            logger.warning(f"⚠️ HEALTH UPDATE: Replica marked unhealthy via real-time check (cached was healthy)")
+                            replica_instance.is_healthy = False
                 
                 elif '/collections/' in final_path and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update', '/delete']):  # WRITE operations only (removed /get, /query, /count)
                     operation_type = "document_write_operation"
