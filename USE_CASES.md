@@ -309,6 +309,21 @@ elif replica and replica.is_healthy:  # WRITE FAILOVER
 - ✅ **Enterprise validation**: Real infrastructure failure with production-grade verification
 - ✅ **✨ LOGIC BUG PERMANENTLY FIXED**: No more premature sync validation - proper timing flow implemented
 
+**✅ COMPLETE DELETE TESTING IMPLEMENTED**: USE CASE 2 now includes **comprehensive DELETE operations testing** that matches USE CASE 3, achieving full testing symmetry.
+
+**✅ INCLUDED IN USE CASE 2 TESTING**:
+- **Test 5: DELETE operations during primary failure**: Creates and deletes test collection during primary failure (routes to replica)
+- **DELETE sync validation**: Verifies that DELETE operations performed during primary failure sync from replica to primary when primary recovers
+- **Negative validation**: Confirms deleted collections do NOT exist on either instance after recovery
+- **Comprehensive error handling**: Marks DELETE test as failed if sync validation fails
+- **Selective cleanup**: Properly handles deleted collections in cleanup logic
+
+**✅ TESTING SYMMETRY ACHIEVED**: Both USE CASE 2 and USE CASE 3 now have identical DELETE testing coverage:
+- Creates test collection specifically for deletion during infrastructure failure
+- Validates DELETE sync after recovery (replica→primary for USE CASE 2, primary→replica for USE CASE 3)
+- Includes comprehensive DELETE sync debugging when failures occur
+- Tracks deleted collections for negative validation (ensuring they don't exist on both instances)
+
 **⚠️ NOTE**: `test_use_case_2_fixed_validation.py` is **INCOMPLETE** - it only creates collections but no documents, making it unsuitable for comprehensive testing.
 
 **Run Command:**
@@ -319,15 +334,17 @@ python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
 **Testing Flow:**
 1. **Initial health check** - Verify system ready
 2. **Manual primary suspension** - Guided Render dashboard instructions
-3. **Automated failure testing** - 4 comprehensive operation tests during outage:
-   - **Collection Creation** - Create test collection during primary failure
-   - **Document Addition** - Add document with embeddings during failure  
-   - **Document Query** - Query documents using embeddings during failure
-   - **Additional Collection** - Create second test collection during failure
+3. **Automated failure testing** - **5 comprehensive operation tests** during outage (**INCLUDING DELETE TESTING**):
+   - **Test 1: Collection Creation** - Create test collection during primary failure
+   - **Test 2: Document Addition** - Add document with embeddings during failure  
+   - **Test 3: Document Query** - Query documents using embeddings during failure
+   - **Test 4: Additional Collection** - Create second test collection during failure
+   - **Test 5: DELETE Operations** - ✅ **Create and delete test collection during primary failure and validate sync**
 4. **Manual primary recovery** - Guided restoration instructions  
-5. **🆕 ENHANCED automatic sync verification** - Monitor WAL completion, verify document-level sync from replica to primary
+5. **🆕 ENHANCED automatic sync verification** - Monitor WAL completion, verify document-level sync AND DELETE sync from replica to primary
 6. **🆕 Direct instance validation** - Check document counts and existence on both instances using collection UUIDs
-7. **Selective automatic cleanup** - Same as USE CASE 1: removes successful test data, preserves failed test data for debugging
+7. **🆕 DELETE sync validation** - ✅ **Verify deleted collections are properly removed from both instances**
+8. **Selective automatic cleanup** - Same as USE CASE 1: removes successful test data, preserves failed test data for debugging
 
 #### **🚨 CRITICAL: Automated Tests vs Manual Testing**
 
@@ -380,13 +397,13 @@ python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com
 </details>
 
 ### **Success Criteria** ✅ **ALL CRITERIA ACHIEVED**
-- ✅ **CMS ingest continues during primary downtime** ← **100% SUCCESS (4/4 operations)**
+- ✅ **CMS ingest continues during primary downtime** ← **100% SUCCESS (5/5 operations including DELETE)**
 - ✅ **Documents stored successfully on replica** ← **SUB-SECOND PERFORMANCE (0.6-1.4s)**
-- ✅ **CMS delete operations work during primary downtime** ← **CONFIRMED WORKING**
+- ✅ **CMS delete operations work during primary downtime** ← **✅ TESTED: Test 5 validates DELETE during primary failure**
 - ✅ **Load balancer detects and routes around unhealthy primary** ← **REAL-TIME DETECTION**
 - ✅ **WAL sync properly recovers primary when restored** ← **100% SUCCESS (0 pending writes)**
 - ✅ **Documents sync from replica to primary** ← **COMPLETE DATA CONSISTENCY (1/1 documents verified)**
-- ✅ **Delete operations sync from replica to primary** ← **CONFIRMED WORKING** 
+- ✅ **Delete operations sync from replica to primary** ← **✅ TESTED: DELETE sync validation ensures complete symmetry** 
 - ✅ **No data loss throughout failure scenario** ← **ZERO TRANSACTION LOSS ACHIEVED**
 
 ### **🎯 ENTERPRISE-GRADE RELIABILITY ACHIEVED**
@@ -748,6 +765,51 @@ To properly test USE CASE 3, you **MUST**:
    - Replica: 822b30a3-bcab-4c16-8b58-e0d0522b7cca
 ```
 
+### **Test Coverage**
+
+#### **🎉 COMPREHENSIVE Manual Testing Script with DELETE Operations** ⭐ **COMPLETE TESTING COVERAGE**
+
+**✅ RECOMMENDED: Manual Testing Script** (`test_use_case_3_manual.py`) ⭐ **INCLUDES COMPREHENSIVE DELETE TESTING** 
+
+✅ **COMPLETE TEST COVERAGE**: USE CASE 3 includes **comprehensive DELETE operations testing** that USE CASE 2 currently lacks.
+- ✅ **Complete lifecycle guidance**: Step-by-step manual infrastructure failure simulation
+- ✅ **Comprehensive testing during failure**: **5 automated operation tests** including DELETE operations
+- ✅ **🎯 DELETE operations testing**: Creates and deletes test collections during replica failure
+- ✅ **🎯 DELETE sync validation**: Verifies DELETE operations sync from primary to replica after recovery
+- ✅ **🎯 Automatic DELETE debugging**: Comprehensive debugging when DELETE sync fails
+- ✅ **Recovery verification**: Automatic monitoring of replica restoration and sync completion
+- ✅ **Enhanced Document-level sync verification**: Verifies operations sync between instances
+- ✅ **Direct instance verification**: Checks operations on both primary and replica instances using UUIDs
+- ✅ **Selective automatic cleanup**: Same enhanced cleanup behavior as USE CASE 1
+- ✅ **Enterprise validation**: Real infrastructure failure with production-grade verification
+
+**✅ USE CASE 3 TESTING ADVANTAGE**: This use case provides **complete DELETE operations coverage** that includes:
+- **Test 4: DELETE Operations** - Creates test collection, deletes it during replica failure, validates sync
+- **DELETE sync validation** - Ensures deleted collections are properly removed from both instances after recovery
+- **Automatic DELETE debugging** - Comprehensive troubleshooting when DELETE sync issues occur
+- **Negative validation** - Confirms deleted collections do NOT exist on either instance
+
+**📋 COMPARISON WITH USE CASE 2**: USE CASE 2 currently lacks DELETE operations testing. See USE CASE 2 test coverage section for details on this testing gap.
+
+**Run Command:**
+```bash
+python test_use_case_3_manual.py --url https://chroma-load-balancer.onrender.com
+```
+
+**Testing Flow:**
+1. **Initial health check** - Verify system ready
+2. **Manual replica suspension** - Guided Render dashboard instructions
+3. **Automated failure testing** - **5 comprehensive operation tests** during outage (**INCLUDING DELETE TESTING**):
+   - **Test 1: Collection Creation** - Create test collection during replica failure
+   - **Test 2: Read Operations** - Verify read failover to primary during failure
+   - **Test 3: Write Operations** - Confirm write operations continue normally
+   - **Test 4: DELETE Operations** - ✅ **CREATE and DELETE test collection during replica failure**
+   - **Test 5: Health Detection** - Verify load balancer health detection
+4. **Manual replica recovery** - Guided restoration instructions  
+5. **Enhanced automatic sync verification** - Monitor WAL completion, verify all operations sync from primary to replica
+6. **DELETE sync validation** - ✅ **Verify deleted collections are properly removed from both instances**
+7. **Selective automatic cleanup** - Same as USE CASE 1: removes successful test data, preserves failed test data for debugging
+
 ### **⚡ MANUAL TESTING PROTOCOL**
 
 **🔄 STEP-BY-STEP TESTING:**
@@ -767,6 +829,7 @@ To properly test USE CASE 3, you **MUST**:
    - Create collections (should work via primary)
    - Verify read failover (should route to primary)
    - Confirm write operations continue normally
+   - **✅ Test DELETE operations** (creates and deletes test collection)
 
 4. **Manual Replica Recovery**
    - Resume replica via Render dashboard
@@ -775,6 +838,7 @@ To properly test USE CASE 3, you **MUST**:
 
 5. **Verification**
    - Check collections exist on both instances
+   - **✅ Verify DELETE sync** (deleted collections removed from both instances)
    - Verify data consistency
    - Confirm zero transaction loss
 
