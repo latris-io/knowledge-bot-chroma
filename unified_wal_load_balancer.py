@@ -1051,34 +1051,65 @@ class UnifiedWALLoadBalancer:
                                                 final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{actual_uuid}')
                                                 # Continue to execute DELETE with corrected UUID
                                             else:
-                                                # Collection confirmed not to exist - DELETE goal already achieved
-                                                logger.info(f"✅ DELETE VERIFICATION: Collection '{collection_name}' confirmed NOT on {instance.name}")
-                                                logger.info(f"   DELETE goal already achieved - no action needed")
+                                                # Collection doesn't exist - this could be timing issue during sync
+                                                logger.warning(f"⚠️ DELETE SYNC ISSUE: Collection '{collection_name}' not found on {instance.name}")
+                                                logger.warning(f"   This could be:")
+                                                logger.warning(f"   1. DELETE goal already achieved (collection was deleted)")
+                                                logger.warning(f"   2. Timing issue - collection hasn't been created via sync yet")
+                                                logger.warning(f"   3. Collection mapping issue")
                                                 
-                                                # CRITICAL FIX: Use proper sync marking for "both" target operations
-                                                target_instance_type = None
+                                                # CRITICAL FIX: Don't assume "not found" = "DELETE goal achieved"
+                                                # Check if this collection was supposed to be created during same sync batch
+                                                logger.info(f"🔍 CHECKING: Looking for pending CREATE operations for '{collection_name}'")
+                                                
                                                 try:
                                                     with self.get_db_connection() as conn:
                                                         with conn.cursor() as cur:
+                                                            # Check if there are pending CREATE operations for this collection
                                                             cur.execute("""
-                                                                SELECT target_instance FROM unified_wal_writes WHERE write_id = %s
-                                                            """, (write_id,))
-                                                            result = cur.fetchone()
-                                                            if result:
-                                                                target_instance_type = result[0]
-                                                except Exception as e:
-                                                    logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
-                                                
-                                                # Use appropriate sync marking based on target_instance
-                                                if target_instance_type == 'both':
-                                                    # Use per-instance sync tracking for "both" operations
-                                                    self.mark_instance_synced(write_id, instance.name)
-                                                    logger.info(f"📝 MARKED: DELETE operation {write_id[:8]} synced to {instance.name} (goal already achieved)")
-                                                else:
-                                                    # Use regular sync marking for single-instance operations
-                                                    self.mark_write_synced(write_id)
-                                                    logger.info(f"📝 MARKED: DELETE operation {write_id[:8]} completed (goal already achieved)")
-                                                continue
+                                                                SELECT COUNT(*) FROM unified_wal_writes 
+                                                                WHERE method = 'POST' 
+                                                                AND path LIKE %s
+                                                                AND collection_id = %s
+                                                                AND status != 'synced'
+                                                            """, (f'%/collections%', collection_name))
+                                                            pending_creates = cur.fetchone()[0]
+                                                            
+                                                            if pending_creates > 0:
+                                                                logger.warning(f"⚠️ TIMING ISSUE: {pending_creates} pending CREATE operations for '{collection_name}'")
+                                                                logger.warning(f"   DELETE should wait for CREATE operations to complete first")
+                                                                # Fail this DELETE sync so it gets retried after CREATE completes
+                                                                self.mark_write_failed(write_id, f"Collection '{collection_name}' has pending CREATE operations - retry after CREATE completes")
+                                                                continue
+                                                            else:
+                                                                logger.info(f"✅ CONFIRMED: No pending CREATE operations - DELETE goal legitimately achieved")
+                                                                # Safe to mark as completed
+                                                                target_instance_type = None
+                                                                try:
+                                                                    cur.execute("""
+                                                                        SELECT target_instance FROM unified_wal_writes WHERE write_id = %s
+                                                                    """, (write_id,))
+                                                                    result = cur.fetchone()
+                                                                    if result:
+                                                                        target_instance_type = result[0]
+                                                                except Exception as e:
+                                                                    logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
+                                                                
+                                                                # Use appropriate sync marking based on target_instance
+                                                                if target_instance_type == 'both':
+                                                                    # Use per-instance sync tracking for "both" operations
+                                                                    self.mark_instance_synced(write_id, instance.name)
+                                                                    logger.info(f"📝 MARKED: DELETE operation {write_id[:8]} synced to {instance.name} (goal achieved - no pending CREATEs)")
+                                                                else:
+                                                                    # Use regular sync marking for single-instance operations
+                                                                    self.mark_write_synced(write_id)
+                                                                    logger.info(f"📝 MARKED: DELETE operation {write_id[:8]} completed (goal achieved - no pending CREATEs)")
+                                                                continue
+                                                except Exception as check_error:
+                                                    logger.error(f"❌ Error checking pending CREATE operations: {check_error}")
+                                                    # On error, be conservative and fail the DELETE sync for retry
+                                                    self.mark_write_failed(write_id, f"Could not verify pending CREATE operations for '{collection_name}': {check_error}")
+                                                    continue
                                         else:
                                             logger.error(f"❌ VERIFICATION FAILED: Cannot list collections on {instance.name} (HTTP {verification_response.status_code})")
                                             self.mark_write_failed(write_id, f"DELETE verification failed - cannot list collections on {instance.name}")
