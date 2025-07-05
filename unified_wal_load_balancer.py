@@ -1047,9 +1047,84 @@ class UnifiedWALLoadBalancer:
                                             if found_collection:
                                                 actual_uuid = found_collection.get('id')
                                                 logger.error(f"❌ CRITICAL BUG: Collection '{collection_name}' EXISTS with UUID {actual_uuid[:8]} but resolution failed!")
-                                                logger.error(f"   Forcing DELETE with discovered UUID: {actual_uuid}")
+                                                logger.error(f"   Trying DELETE with discovered UUID: {actual_uuid}")
                                                 final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{actual_uuid}')
-                                                # Continue to execute DELETE with corrected UUID
+                                                
+                                                # PHANTOM COLLECTION FIX: Try DELETE by UUID first, fall back to name if 404
+                                                uuid_delete_response = self.make_direct_request(instance, "DELETE", final_path)
+                                                if uuid_delete_response.status_code in [200, 204]:
+                                                    logger.info(f"✅ PHANTOM FIX: Collection '{collection_name}' deleted by corrected UUID {actual_uuid[:8]}")
+                                                    # Mark as synced and continue
+                                                    target_instance_type = None
+                                                    try:
+                                                        with self.get_db_connection() as conn:
+                                                            with conn.cursor() as cur:
+                                                                cur.execute("SELECT target_instance FROM unified_wal_writes WHERE write_id = %s", (write_id,))
+                                                                result = cur.fetchone()
+                                                                if result:
+                                                                    target_instance_type = result[0]
+                                                    except Exception as e:
+                                                        logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
+                                                    
+                                                    if target_instance_type == 'both':
+                                                        self.mark_instance_synced(write_id, instance.name)
+                                                    else:
+                                                        self.mark_write_synced(write_id)
+                                                    continue
+                                                elif uuid_delete_response.status_code == 404:
+                                                    # PHANTOM COLLECTION: UUID exists in listing but not accessible - try name-based DELETE
+                                                    logger.warning(f"🔍 PHANTOM COLLECTION DETECTED: UUID {actual_uuid[:8]} in listing but 404 on DELETE")
+                                                    logger.warning(f"   Attempting DELETE by name as fallback...")
+                                                    
+                                                    name_delete_path = f"/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+                                                    name_delete_response = self.make_direct_request(instance, "DELETE", name_delete_path)
+                                                    
+                                                    if name_delete_response.status_code in [200, 204]:
+                                                        logger.info(f"✅ PHANTOM FIX: Collection '{collection_name}' deleted by NAME after UUID 404")
+                                                        # Mark as synced and continue
+                                                        target_instance_type = None
+                                                        try:
+                                                            with self.get_db_connection() as conn:
+                                                                with conn.cursor() as cur:
+                                                                    cur.execute("SELECT target_instance FROM unified_wal_writes WHERE write_id = %s", (write_id,))
+                                                                    result = cur.fetchone()
+                                                                    if result:
+                                                                        target_instance_type = result[0]
+                                                        except Exception as e:
+                                                            logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
+                                                        
+                                                        if target_instance_type == 'both':
+                                                            self.mark_instance_synced(write_id, instance.name)
+                                                        else:
+                                                            self.mark_write_synced(write_id)
+                                                        continue
+                                                    elif name_delete_response.status_code == 404:
+                                                        logger.info(f"✅ PHANTOM COLLECTION RESOLVED: '{collection_name}' not found by name either - DELETE goal achieved")
+                                                        # Both UUID and name DELETE returned 404 - collection is actually gone
+                                                        target_instance_type = None
+                                                        try:
+                                                            with self.get_db_connection() as conn:
+                                                                with conn.cursor() as cur:
+                                                                    cur.execute("SELECT target_instance FROM unified_wal_writes WHERE write_id = %s", (write_id,))
+                                                                    result = cur.fetchone()
+                                                                    if result:
+                                                                        target_instance_type = result[0]
+                                                        except Exception as e:
+                                                            logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
+                                                        
+                                                        if target_instance_type == 'both':
+                                                            self.mark_instance_synced(write_id, instance.name)
+                                                        else:
+                                                            self.mark_write_synced(write_id)
+                                                        continue
+                                                    else:
+                                                        logger.error(f"❌ PHANTOM FIX FAILED: Name-based DELETE returned {name_delete_response.status_code}")
+                                                        self.mark_write_failed(write_id, f"Phantom collection DELETE failed: UUID 404, Name {name_delete_response.status_code}")
+                                                        continue
+                                                else:
+                                                    logger.error(f"❌ CORRECTED UUID DELETE FAILED: {uuid_delete_response.status_code}")
+                                                    self.mark_write_failed(write_id, f"Corrected UUID DELETE failed: HTTP {uuid_delete_response.status_code}")
+                                                    continue
                                             else:
                                                 # Collection doesn't exist - this could be timing issue during sync
                                                 logger.warning(f"⚠️ DELETE SYNC ISSUE: Collection '{collection_name}' not found on {instance.name}")
@@ -1202,9 +1277,82 @@ class UnifiedWALLoadBalancer:
                     
                     # CRITICAL FIX: Handle DELETE operations with proper status code validation
                     elif (method == 'DELETE' and '/collections/' in final_path):
-                        if response.status_code in [200, 204, 404]:
+                        if response.status_code in [200, 204]:
                             logger.info(f"✅ WAL SYNC: Collection DELETE successful on {instance.name} - Status: {response.status_code}")
-                            # 404 is OK for DELETE - collection already deleted
+                        elif response.status_code == 404:
+                            # 404 for DELETE could mean:
+                            # 1. Collection already deleted (legitimate success)
+                            # 2. Stale UUID mapping (phantom collection issue)
+                            
+                            # Extract collection name from original path to check for phantom collections
+                            collection_name = None
+                            if '/collections/' in normalized_path:
+                                path_parts = normalized_path.split('/collections/')
+                                if len(path_parts) > 1:
+                                    collection_identifier = path_parts[1].split('/')[0]
+                                    # Check if this looks like a collection name (not UUID)
+                                    import re
+                                    if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_identifier):
+                                        collection_name = collection_identifier
+                            
+                            if collection_name:
+                                # This was a name-based DELETE that returned 404 - collection truly doesn't exist
+                                logger.info(f"✅ WAL SYNC: Collection DELETE successful on {instance.name} - Status: 404 (collection not found by name)")
+                            else:
+                                # This was a UUID-based DELETE that returned 404 - could be phantom collection
+                                logger.warning(f"🔍 PHANTOM CHECK: UUID DELETE returned 404 on {instance.name} - checking if collection exists by name")
+                                
+                                # Try to find the collection name from the original WAL record
+                                try:
+                                    original_collection_name = write_record.get('collection_id')
+                                    if original_collection_name and not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', original_collection_name):
+                                        # We have the original collection name - check if it exists and try name-based DELETE
+                                        logger.info(f"🔍 PHANTOM CHECK: Verifying collection '{original_collection_name}' exists on {instance.name}")
+                                        
+                                        verification_response = self.make_direct_request(
+                                            instance, 
+                                            "GET", 
+                                            "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                        )
+                                        
+                                        if verification_response.status_code == 200:
+                                            collections = verification_response.json()
+                                            found_collection = None
+                                            for coll in collections:
+                                                if coll.get('name') == original_collection_name:
+                                                    found_collection = coll
+                                                    break
+                                            
+                                            if found_collection:
+                                                actual_uuid = found_collection.get('id')
+                                                logger.warning(f"🔍 PHANTOM COLLECTION CONFIRMED: '{original_collection_name}' exists with UUID {actual_uuid[:8]} but UUID DELETE failed")
+                                                logger.warning(f"   Attempting DELETE by name as fallback...")
+                                                
+                                                name_delete_path = f"/api/v2/tenants/default_tenant/databases/default_database/collections/{original_collection_name}"
+                                                name_delete_response = self.make_direct_request(instance, "DELETE", name_delete_path)
+                                                
+                                                if name_delete_response.status_code in [200, 204]:
+                                                    logger.info(f"✅ PHANTOM FIX: Collection '{original_collection_name}' deleted by NAME after UUID 404 on {instance.name}")
+                                                elif name_delete_response.status_code == 404:
+                                                    logger.info(f"✅ PHANTOM RESOLVED: Collection '{original_collection_name}' not found by name either - DELETE goal achieved on {instance.name}")
+                                                else:
+                                                    logger.error(f"❌ PHANTOM FIX FAILED: Name-based DELETE returned {name_delete_response.status_code} on {instance.name}")
+                                                    logger.error(f"   Response: {name_delete_response.text[:200]}")
+                                                    self.mark_write_failed(write_id, f"Phantom collection DELETE failed: UUID 404, Name {name_delete_response.status_code}")
+                                                    continue
+                                            else:
+                                                logger.info(f"✅ WAL SYNC: Collection '{original_collection_name}' not found in listing - DELETE goal achieved on {instance.name}")
+                                        else:
+                                            logger.warning(f"⚠️ Cannot verify phantom collection - collection listing failed with {verification_response.status_code}")
+                                            logger.info(f"✅ WAL SYNC: Assuming DELETE goal achieved on {instance.name} (verification failed but UUID DELETE got 404)")
+                                    else:
+                                        # Original identifier was already a UUID - assume DELETE goal achieved
+                                        logger.info(f"✅ WAL SYNC: UUID DELETE returned 404 - assuming goal achieved on {instance.name}")
+                                        
+                                except Exception as phantom_check_error:
+                                    logger.warning(f"⚠️ Error during phantom collection check: {phantom_check_error}")
+                                    logger.info(f"✅ WAL SYNC: Assuming DELETE goal achieved on {instance.name} (phantom check failed)")
+                                    
                         else:
                             logger.error(f"❌ WAL SYNC: Collection DELETE failed on {instance.name} - Status: {response.status_code}")
                             logger.error(f"   Response: {response.text[:200]}")
