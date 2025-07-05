@@ -15,7 +15,7 @@ import logging
 import psycopg2
 import psycopg2.extras
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -472,7 +472,7 @@ class TransactionSafetyService:
                 continue
             
             # Check if we're past the retry time
-            if transaction['next_retry_at'] and datetime.now() < transaction['next_retry_at']:
+            if transaction['next_retry_at'] and datetime.now(timezone.utc) < transaction['next_retry_at']:
                 continue
             
             # Attempt recovery
