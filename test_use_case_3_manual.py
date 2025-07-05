@@ -19,6 +19,7 @@ import json
 import time
 import sys
 import subprocess
+import os
 from datetime import datetime, timedelta
 from enhanced_verification_base import EnhancedVerificationBase
 
@@ -273,6 +274,151 @@ class UseCase3Tester(EnhancedVerificationBase):
         except Exception as e:
             print(f"   ⚠️ WAL validation error: {e}")
             return True  # Don't fail on monitoring issues
+
+    def run_automatic_delete_debugging(self):
+        """
+        🔧 AUTOMATIC DEBUG: Run comprehensive DELETE sync debugging
+        Automatically gathers all debugging information needed to diagnose DELETE sync issues
+        """
+        try:
+            self.log("🔍 AUTOMATIC DELETE SYNC DEBUGGING")
+            self.log("=" * 60)
+            
+            # Run the debug script
+            debug_script_path = "debug_delete_sync.py"
+            
+            # Check if debug script exists
+            if not os.path.exists(debug_script_path):
+                self.log(f"⚠️ Debug script not found: {debug_script_path}")
+                self.log(f"   Creating minimal debugging output...")
+                self.run_minimal_debugging()
+                return
+            
+            self.log(f"🔍 Running comprehensive debugging script: {debug_script_path}")
+            self.log(f"📊 Base URL: {self.base_url}")
+            
+            # Run the debug script and capture output
+            try:
+                result = subprocess.run(
+                    ["python", debug_script_path, "--url", self.base_url],
+                    capture_output=True,
+                    text=True,
+                    timeout=60  # 60 second timeout
+                )
+                
+                if result.returncode == 0:
+                    self.log("✅ DEBUG SCRIPT COMPLETED SUCCESSFULLY")
+                    self.log("📋 DEBUG REPORT:")
+                    self.log("-" * 40)
+                    # Print the debug output with indentation
+                    for line in result.stdout.split('\n'):
+                        if line.strip():
+                            self.log(f"   {line}")
+                    self.log("-" * 40)
+                    
+                    if result.stderr:
+                        self.log("⚠️ DEBUG WARNINGS:")
+                        for line in result.stderr.split('\n'):
+                            if line.strip():
+                                self.log(f"   {line}")
+                else:
+                    self.log(f"❌ DEBUG SCRIPT FAILED (exit code: {result.returncode})")
+                    if result.stderr:
+                        self.log("ERROR OUTPUT:")
+                        for line in result.stderr.split('\n'):
+                            if line.strip():
+                                self.log(f"   {line}")
+                    
+                    # Fall back to minimal debugging
+                    self.log("🔧 Falling back to minimal debugging...")
+                    self.run_minimal_debugging()
+                    
+            except subprocess.TimeoutExpired:
+                self.log("❌ DEBUG SCRIPT TIMED OUT (60 seconds)")
+                self.log("🔧 Falling back to minimal debugging...")
+                self.run_minimal_debugging()
+                
+            except Exception as e:
+                self.log(f"❌ Error running debug script: {e}")
+                self.log("🔧 Falling back to minimal debugging...")
+                self.run_minimal_debugging()
+                
+        except Exception as e:
+            self.log(f"❌ Automatic debugging failed: {e}")
+            self.log("🔧 Continuing with test completion...")
+            
+    def run_minimal_debugging(self):
+        """
+        Run minimal debugging information gathering when full debug script unavailable
+        """
+        try:
+            self.log("🔍 MINIMAL DELETE SYNC DEBUGGING")
+            self.log("-" * 40)
+            
+            # 1. WAL Status
+            try:
+                wal_response = requests.get(f"{self.base_url}/wal/status", timeout=10)
+                if wal_response.status_code == 200:
+                    wal_data = wal_response.json()
+                    self.log(f"📊 WAL Status: {wal_data.get('pending_writes', 'unknown')} pending writes")
+                    self.log(f"   Failed syncs: {wal_data.get('failed_syncs', 'unknown')}")
+                else:
+                    self.log(f"⚠️ WAL Status: HTTP {wal_response.status_code}")
+            except Exception as e:
+                self.log(f"❌ WAL Status error: {e}")
+            
+            # 2. Collection State
+            if self.deleted_collections:
+                self.log(f"📋 DELETE Operations Analysis:")
+                for collection in self.deleted_collections:
+                    self.log(f"   Collection: {collection}")
+                    
+                    # Check primary
+                    try:
+                        primary_response = requests.get(
+                            f"{self.primary_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                            timeout=10
+                        )
+                        if primary_response.status_code == 200:
+                            primary_collections = [c['name'] for c in primary_response.json()]
+                            primary_exists = collection in primary_collections
+                            self.log(f"      Primary: {'EXISTS' if primary_exists else 'DELETED'}")
+                        else:
+                            self.log(f"      Primary: ERROR (HTTP {primary_response.status_code})")
+                    except Exception as e:
+                        self.log(f"      Primary: ERROR ({e})")
+                    
+                    # Check replica
+                    try:
+                        replica_response = requests.get(
+                            f"{self.replica_url}/api/v2/tenants/default_tenant/databases/default_database/collections",
+                            timeout=10
+                        )
+                        if replica_response.status_code == 200:
+                            replica_collections = [c['name'] for c in replica_response.json()]
+                            replica_exists = collection in replica_collections
+                            self.log(f"      Replica: {'EXISTS' if replica_exists else 'DELETED'}")
+                        else:
+                            self.log(f"      Replica: ERROR (HTTP {replica_response.status_code})")
+                    except Exception as e:
+                        self.log(f"      Replica: ERROR ({e})")
+            
+            # 3. System Health
+            try:
+                status_response = requests.get(f"{self.base_url}/status", timeout=10)
+                if status_response.status_code == 200:
+                    status_data = status_response.json()
+                    self.log(f"📊 System Health: {status_data.get('healthy_instances', 'unknown')}/2 instances")
+                else:
+                    self.log(f"⚠️ System Health: HTTP {status_response.status_code}")
+            except Exception as e:
+                self.log(f"❌ System Health error: {e}")
+            
+            self.log("-" * 40)
+            self.log("💡 For comprehensive debugging, ensure debug_delete_sync.py exists")
+            
+        except Exception as e:
+            self.log(f"❌ Minimal debugging failed: {e}")
         
         # Check transaction safety logs if available
         try:
@@ -798,6 +944,10 @@ class UseCase3Tester(EnhancedVerificationBase):
                             self.log(f"   ❌ DELETE SYNC CRITICAL FAILURE: '{deleted_collection}' still exists on REPLICA only")
                             self.log(f"       This is the exact issue you identified - DELETE didn't sync to replica!")
                             delete_sync_success = False
+                            
+                            # 🔧 AUTOMATIC DEBUG: Run comprehensive debugging when DELETE sync fails
+                            self.log(f"🔍 AUTOMATIC DEBUG: Gathering comprehensive DELETE sync troubleshooting information...")
+                            self.run_automatic_delete_debugging()
                     
                     if delete_sync_success:
                         self.log(f"📊 DELETE sync validation: ✅ All {len(self.deleted_collections)} deleted collections properly removed from both instances")

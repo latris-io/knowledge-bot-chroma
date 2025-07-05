@@ -860,9 +860,89 @@ WHERE NOT (synced_instances @> %s) OR synced_instances IS NULL
 
 **Schema Migration**: Auto-applied during deployment with backward compatibility
 
+### **🔧 AUTOMATIC DELETE SYNC DEBUGGING** ✅ **ENHANCED TROUBLESHOOTING**
+
+**🎯 COMPREHENSIVE DEBUGGING INFORMATION AVAILABLE**
+
+When DELETE sync issues occur during USE CASE 3 testing, the system automatically gathers comprehensive debugging information to diagnose root causes quickly.
+
+#### **Built-in Debugging Capabilities**
+
+**Automatic Debug Report Generation**: The enhanced manual testing script automatically runs comprehensive debugging when DELETE sync failures are detected, gathering:
+
+1. **WAL System Status**: Pending writes, failed operations, sync batch processing
+2. **Recent DELETE Operations**: Last 10 DELETE operations in WAL with full details
+3. **Collection State Analysis**: Current collections on both primary and replica instances  
+4. **Collection Mappings**: UUID mappings and mapping status verification
+5. **Transaction Safety Status**: Recovery transactions and timing gap analysis
+6. **System Health**: Instance health, memory usage, and performance metrics
+
+#### **Debugging Script** (`debug_delete_sync.py`)
+
+**Comprehensive Information Gathering**:
+```bash
+# Automatically run after failed USE CASE 3 tests
+python debug_delete_sync.py
+
+# Gathers complete debugging report including:
+# - WAL status and recent operations
+# - Collection state on both instances
+# - Collection mappings and UUIDs
+# - Transaction safety analysis
+# - System health and performance
+```
+
+#### **Automatic Integration**
+
+**Enhanced Testing Script**: The USE CASE 3 manual testing script automatically:
+- ✅ **Detects DELETE sync failures** during validation
+- ✅ **Runs comprehensive debugging** automatically when failures occur
+- ✅ **Generates complete debug report** with all necessary troubleshooting information
+- ✅ **Preserves debugging data** for investigation while cleaning successful tests
+- ✅ **Provides actionable insights** for root cause analysis
+
+**No Manual Intervention Required**: When DELETE sync fails, debugging information is automatically gathered and presented, eliminating the need to manually copy/paste debugging commands.
+
+#### **Debug Report Contents**
+
+**Automatic Analysis Includes**:
+```yaml
+1. WAL System Analysis:
+   - Pending writes count and details
+   - Recent DELETE operations with status
+   - Sync batch processing information
+   - Failed operation analysis
+
+2. Collection State Verification:
+   - Primary instance collections
+   - Replica instance collections  
+   - Collection existence verification
+   - UUID consistency checking
+
+3. Mapping Analysis:
+   - Collection name to UUID mappings
+   - Mapping completeness verification
+   - Missing mapping detection
+   - UUID resolution testing
+
+4. Transaction Safety Analysis:
+   - Recovery transaction status
+   - Timing gap detection
+   - Failed transaction analysis
+   - Recovery mechanism verification
+
+5. System Health Assessment:
+   - Instance health status
+   - Memory and CPU utilization
+   - Performance metrics
+   - Error rate analysis
+```
+
 ### **🎉 CONCLUSION**
 
 **USE CASE 3 is now PRODUCTION-READY with enterprise-grade reliability and bulletproof DELETE sync.**
+
+**Enhanced Debugging**: Comprehensive automatic debugging capabilities ensure quick root cause identification when issues occur, with complete troubleshooting information gathered automatically.
 
 **Architectural Achievement**: The comprehensive DELETE sync fix represents a major architectural enhancement that ensures **zero data inconsistency** during infrastructure failures in both directions.
 
