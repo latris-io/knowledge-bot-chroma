@@ -1425,83 +1425,221 @@ class UnifiedWALLoadBalancer:
                                                     """, (collection_name, new_uuid))
                                                     conn.commit()
                                                     logger.info(f"✅ Created replica mapping: {collection_name} -> {new_uuid[:8]}")
-                                        
+                                                
+                                                # CRITICAL FIX: Verify the mapping was actually updated
+                                                cur.execute("""
+                                                    SELECT replica_collection_id FROM collection_id_mapping 
+                                                    WHERE collection_name = %s
+                                                """, (collection_name,))
+                                                verification_result = cur.fetchone()
+                                                if verification_result and verification_result[0] == new_uuid:
+                                                    logger.info(f"✅ MAPPING VERIFIED: {collection_name} replica UUID correctly stored as {new_uuid[:8]}")
+                                                else:
+                                                    logger.error(f"❌ MAPPING VERIFICATION FAILED: {collection_name} replica UUID not updated correctly")
+                                                    logger.error(f"   Expected: {new_uuid[:8]}, Got: {verification_result[0][:8] if verification_result and verification_result[0] else 'None'}")
+                                                    # Force update with UPSERT to ensure it's set correctly
+                                                    cur.execute("""
+                                                        INSERT INTO collection_id_mapping 
+                                                        (collection_name, replica_collection_id, created_at, updated_at)
+                                                        VALUES (%s, %s, NOW(), NOW())
+                                                        ON CONFLICT (collection_name) DO UPDATE SET
+                                                        replica_collection_id = EXCLUDED.replica_collection_id,
+                                                        updated_at = NOW()
+                                                    """, (collection_name, new_uuid))
+                                                    conn.commit()
+                                                    logger.info(f"🔧 FORCE UPDATED replica mapping: {collection_name} -> {new_uuid[:8]}")
+                                                
                         except Exception as mapping_error:
-                            logger.error(f"❌ Failed to update collection mapping: {mapping_error}")
-                            # Don't fail sync for mapping issues
-                    
-                    # CRITICAL FIX: Use proper sync marking for "both" target operations
-                    # Check if this is a "both" target operation that needs per-instance tracking
-                    target_instance_type = None
-                    try:
-                        with self.get_db_connection() as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("""
-                                    SELECT target_instance FROM unified_wal_writes WHERE write_id = %s
-                                """, (write_id,))
-                                result = cur.fetchone()
-                                if result:
-                                    target_instance_type = result[0]
-                    except Exception as e:
-                        logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
-                    
-                    # Use appropriate sync marking based on target_instance
-                    if target_instance_type == 'both':
-                        # Use per-instance sync tracking for "both" operations
-                        self.mark_instance_synced(write_id, instance.name)
+                            logger.error(f"❌ Collection mapping update failed for {collection_name}: {mapping_error}")
+                            logger.error(f"   Collection created but mapping not updated - this will cause DELETE sync issues")
+                            # Try emergency mapping fix
+                            try:
+                                with self.get_db_connection() as emergency_conn:
+                                    with emergency_conn.cursor() as emergency_cur:
+                                        emergency_cur.execute("""
+                                            INSERT INTO collection_id_mapping 
+                                            (collection_name, primary_collection_id, replica_collection_id, created_at, updated_at)
+                                            VALUES (%s, %s, %s, NOW(), NOW())
+                                            ON CONFLICT (collection_name) DO UPDATE SET
+                                            primary_collection_id = COALESCE(EXCLUDED.primary_collection_id, collection_id_mapping.primary_collection_id),
+                                            replica_collection_id = COALESCE(EXCLUDED.replica_collection_id, collection_id_mapping.replica_collection_id),
+                                            updated_at = NOW()
+                                        """, (
+                                            collection_name, 
+                                            new_uuid if instance.name == 'primary' else None,
+                                            new_uuid if instance.name == 'replica' else None
+                                        ))
+                                        emergency_conn.commit()
+                                        logger.info(f"🚑 EMERGENCY MAPPING FIX: {collection_name} -> {instance.name} UUID: {new_uuid[:8]}")
+                            except Exception as emergency_error:
+                                logger.error(f"❌ EMERGENCY MAPPING FIX FAILED: {emergency_error}")
+                            
                     else:
-                        # Use regular sync marking for single-instance operations
-                        self.mark_write_synced(write_id)
+                        logger.warning(f"⚠️ Collection creation response missing UUID or name: {collection_info}")
                         
-                    success_count += 1
-                    self.stats["successful_syncs"] += 1
-                    logger.debug(f"✅ WAL SYNC SUCCESS: {write_record['write_id'][:8]} - {method} {final_path}")
+                except Exception as response_error:
+                    logger.error(f"❌ Failed to parse collection creation response: {response_error}")
+                    logger.error(f"   Response text: {response.text[:200]}")
                     
-                except requests.exceptions.HTTPError as http_err:
-                    # Handle HTTP errors specifically
-                    status_code = getattr(http_err.response, 'status_code', 'unknown')
-                    response_text = getattr(http_err.response, 'text', 'no response text')[:200]
-                    error_msg = f"HTTP {status_code}: {response_text}"
+            # Clean up collection mapping if DELETE was successful
+            elif (method == 'DELETE' and 
+                  '/collections/' in final_path and 
+                  response.status_code in [200, 204]):
+                try:
+                    # Extract collection name from the original WAL record for mapping cleanup
+                    original_collection_identifier = write_record.get('collection_id')
                     
-                    logger.error(f"❌ WAL SYNC HTTP ERROR: {write_record['write_id'][:8]} - {method} {final_path}")
-                    logger.error(f"   HTTP Status: {status_code}")
-                    logger.error(f"   Response: {response_text}")
-                    logger.error(f"   Instance: {instance.name}")
+                    # CRITICAL FIX: Only clean up mapping if this is a name-based identifier
+                    import re
+                    if (original_collection_identifier and 
+                        not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', original_collection_identifier)):
+                        
+                        collection_name = original_collection_identifier
+                        logger.info(f"🗑️ COLLECTION DELETED: {collection_name} from {instance.name} - cleaning up mapping")
+                        
+                        # Update mapping to remove the UUID for this instance
+                        # 🔒 SCALABILITY: Use appropriate lock for collection mapping operations
+                        with self._get_appropriate_lock('collection_mapping'):
+                            with self.get_db_connection() as conn:
+                                with conn.cursor() as cur:
+                                    if instance.name == 'primary':
+                                        # Collection deleted from primary - clear primary UUID
+                                        cur.execute("""
+                                            UPDATE collection_id_mapping 
+                                            SET primary_collection_id = NULL, updated_at = NOW()
+                                            WHERE collection_name = %s
+                                        """, (collection_name,))
+                                        logger.info(f"🗑️ Cleared primary mapping for {collection_name}")
+                                    else:  # replica
+                                        # Collection deleted from replica - clear replica UUID  
+                                        cur.execute("""
+                                            UPDATE collection_id_mapping 
+                                            SET replica_collection_id = NULL, updated_at = NOW()
+                                            WHERE collection_name = %s
+                                        """, (collection_name,))
+                                        logger.info(f"🗑️ Cleared replica mapping for {collection_name}")
+                                    
+                                    conn.commit()
+                                    
+                                    # Check if both UUIDs are now NULL and delete the mapping entirely
+                                    cur.execute("""
+                                        SELECT primary_collection_id, replica_collection_id 
+                                        FROM collection_id_mapping 
+                                        WHERE collection_name = %s
+                                    """, (collection_name,))
+                                    result = cur.fetchone()
+                                    
+                                    if result and not result[0] and not result[1]:
+                                        # Both UUIDs are NULL - delete the mapping entirely
+                                        cur.execute("""
+                                            DELETE FROM collection_id_mapping 
+                                            WHERE collection_name = %s
+                                        """, (collection_name,))
+                                        conn.commit()
+                                        logger.info(f"🗑️ MAPPING DELETED: {collection_name} (both instances cleared)")
+                                    else:
+                                        logger.info(f"✅ MAPPING UPDATED: {collection_name} (one instance still has collection)")
+                                        
+                except Exception as mapping_cleanup_error:
+                    logger.error(f"❌ Collection mapping cleanup failed: {mapping_cleanup_error}")
+                    # Don't fail the sync operation for mapping cleanup errors
                     
-                    self.mark_write_failed(write_record['write_id'], f"{method} {final_path}: {error_msg}")
-                    self.stats["failed_syncs"] += 1
+                    # 🔧 COORDINATION: Log when WAL sync will handle DELETE instead of distributed system
+                    elif (request.method == 'DELETE' and 
+                          '/collections/' in final_path and 
+                          response.status_code in [200, 204] and
+                          should_log_to_wal):
+                        logger.info(f"🎯 WAL COORDINATION: DELETE operation will be synced via WAL system (distributed DELETE skipped)")
+                        logger.info(f"   Collection deleted from {target_instance.name}, WAL will sync to other instance when healthy")
+                    
+                    # 🛡️ TRANSACTION SAFETY: Mark transaction as completed
+                    if transaction_id and enhanced_wal.transaction_safety:
+                        try:
+                            enhanced_wal.transaction_safety.mark_transaction_completed(
+                                transaction_id, 
+                                response.status_code,
+                                {"status": "success", "proxy_response": True}
+                            )
+                            logger.info(f"🛡️ TRANSACTION SAFETY: Completed {transaction_id[:8]} with status {response.status_code}")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to mark transaction completed: {e}")
+                    
+                    # Return response with working JSON handling
+                    logger.info(f"✅ PROXY_REQUEST: Returning response to client")
+                    return Response(
+                        response.text,
+                        status=response.status_code,
+                        mimetype='application/json'
+                    )
                     
                 except Exception as e:
-                    # Enhanced error logging for debugging WAL sync failures
-                    error_msg = str(e)
-                    logger.error(f"❌ WAL SYNC FAILED: {write_record['write_id'][:8]} - {method} {final_path}")
-                    logger.error(f"   Error: {error_msg}")
-                    logger.error(f"   Instance: {instance.name}")
-                    logger.error(f"   Data size: {len(data) if data else 0} bytes")
+                    import traceback
+                    logger.error(f"❌ PROXY_REQUEST FAILED for {request.method} /{path}: {e}")
+                    logger.error(f"Full traceback: {traceback.format_exc()}")
                     
-                    # Mark as failed with detailed error information
-                    self.mark_write_failed(write_record['write_id'], f"{method} {final_path}: {error_msg}")
-                    self.stats["failed_syncs"] += 1
-            
-            end_memory = process.memory_info().rss / 1024 / 1024
-            memory_delta = end_memory - start_memory
-            processing_time = time.time() - start_time
-            throughput = batch.batch_size / processing_time if processing_time > 0 else 0
-            
-            # Update throughput stats
-            if throughput > 0:
-                if self.stats["avg_sync_throughput"] == 0:
-                    self.stats["avg_sync_throughput"] = throughput
-                else:
-                    self.stats["avg_sync_throughput"] = (self.stats["avg_sync_throughput"] + throughput) / 2
-            
-            logger.info(f"✅ Batch completed: {success_count}/{batch.batch_size} successful, {throughput:.1f} writes/sec, memory delta: {memory_delta:+.1f}MB")
-            
-            return success_count, len(batch.writes) - success_count
-            
-        except Exception as e:
-            logger.error(f"Error processing sync batch: {e}")
-            return success_count, len(batch.writes) - success_count
+                    # 🔧 RETRY LOGIC: Attempt simple retry for certain failures
+                    if "Connection" in str(e) or "timeout" in str(e).lower() or "502" in str(e):
+                        logger.warning(f"🔄 RETRY: Connection issue detected, attempting simple retry")
+                        try:
+                            import time
+                            time.sleep(0.5)  # Brief pause
+                            
+                            # Simple retry without complex logic
+                            target_instance = enhanced_wal.choose_read_instance_with_realtime_health(f"/{path}", request.method, {})
+                            if target_instance:
+                                normalized_path = enhanced_wal.normalize_api_path_to_v2(f"/{path}")
+                                url = f"{target_instance.url}{normalized_path}"
+                                data = request.get_data() if request.method in ['POST', 'PUT', 'PATCH'] else None
+                                
+                                import requests
+                                response = requests.request(
+                                    method=request.method,
+                                    url=url,
+                                    headers={'Content-Type': 'application/json'} if data else {},
+                                    data=data,
+                                    timeout=15  # Longer timeout for retry
+                                )
+                                
+                                logger.info(f"✅ RETRY SUCCESS: {response.status_code} for {request.method} /{path}")
+                                
+                                # 🛡️ TRANSACTION SAFETY: Mark retry success
+                                if transaction_id and enhanced_wal.transaction_safety:
+                                    try:
+                                        enhanced_wal.transaction_safety.mark_transaction_completed(
+                                            transaction_id, 
+                                            response.status_code,
+                                            {"status": "retry_success", "original_error": str(e)[:100]}
+                                        )
+                                    except Exception as te:
+                                        logger.error(f"❌ Failed to mark retry transaction completed: {te}")
+                                
+                                # Return successful retry response
+                                return Response(
+                                    response.text,
+                                    status=response.status_code,
+                                    mimetype='application/json'
+                                )
+                                
+                        except Exception as retry_error:
+                            logger.error(f"❌ RETRY FAILED: {retry_error}")
+                            # Fall through to original error handling
+                    
+                    # 🛡️ TRANSACTION SAFETY: Mark transaction as failed for recovery
+                    if transaction_id and enhanced_wal.transaction_safety:
+                        try:
+                            # Detect timing gap failures
+                            is_timing_gap = "No healthy instances" in str(e) or "Connection" in str(e)
+                            
+                            enhanced_wal.transaction_safety.mark_transaction_failed(
+                                transaction_id,
+                                str(e)[:500],  # Limit error message length
+                                is_timing_gap=is_timing_gap
+                            )
+                            logger.info(f"🛡️ TRANSACTION SAFETY: Failed {transaction_id[:8]} - {'timing gap' if is_timing_gap else 'general error'}")
+                        except Exception as te:
+                            logger.error(f"❌ Failed to mark transaction failed: {te}")
+                    
+                    return jsonify({"error": f"Service temporarily unavailable: {str(e)}"}), 503
 
     def perform_high_volume_sync(self):
         """Perform high-volume WAL synchronization with parallel batch processing"""
