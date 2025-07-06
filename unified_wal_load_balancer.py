@@ -1786,46 +1786,67 @@ class UnifiedWALLoadBalancer:
             return None
 
     def make_direct_request(self, instance: ChromaInstance, method: str, path: str, **kwargs) -> requests.Response:
-        """Make direct request without WAL logging (used for sync operations)"""
-        kwargs['timeout'] = self.request_timeout
+        """
+        🔧 ENHANCED: Make direct request with retry logic for 502 errors and improved reliability
+        """
+        # Set default timeout if not provided
+        if 'timeout' not in kwargs:
+            kwargs['timeout'] = 10
         
-        # CRITICAL FIX: Ensure proper JSON handling for document operations
-        if 'data' in kwargs and kwargs['data']:
-            # If data is bytes, decode it for JSON operations
-            if isinstance(kwargs['data'], bytes):
-                try:
-                    # Decode bytes to string, then parse as JSON to ensure it's valid
-                    data_str = kwargs['data'].decode('utf-8')
-                    json.loads(data_str)  # Validate JSON
-                    kwargs['data'] = data_str
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    logger.warning(f"Invalid JSON data for {method} {path}: {e}")
-                    # Keep as bytes if it's not valid JSON
-            
-            # Ensure Content-Type header is set for JSON data
-            if 'headers' not in kwargs:
-                kwargs['headers'] = {}
-            if 'Content-Type' not in kwargs['headers']:
-                kwargs['headers']['Content-Type'] = 'application/json'
+        # CRITICAL FIX: Add retry logic for 502 Bad Gateway errors (common during instance recovery)
+        max_retries = 3
+        retry_delay = 2  # seconds
         
-        try:
-            url = f"{instance.url}{path}"
-            logger.debug(f"🔧 WAL SYNC REQUEST: {method} {url}")
-            response = requests.request(method, url, **kwargs)
-            
-            # Log response for debugging WAL sync issues
-            logger.debug(f"🔧 WAL SYNC RESPONSE: {response.status_code} - {response.text[:100]}")
-            
-            # 🔧 CRITICAL FIX: Don't raise 404 errors for DELETE operations - they indicate success
-            if method == 'DELETE' and response.status_code == 404:
-                logger.debug(f"✅ DELETE 404 treated as success: collection already deleted")
-            else:
-                response.raise_for_status()
-            return response
-            
-        except Exception as e:
-            logger.warning(f"Direct request to {instance.name} failed: {method} {path} - {e}")
-            raise e
+        for attempt in range(max_retries + 1):
+            try:
+                url = f"{instance.url}{path}"
+                logger.debug(f"🔧 WAL SYNC REQUEST (attempt {attempt + 1}/{max_retries + 1}): {method} {url}")
+                response = requests.request(method, url, **kwargs)
+                
+                # Log response for debugging WAL sync issues
+                logger.debug(f"🔧 WAL SYNC RESPONSE: {response.status_code} - {response.text[:100]}")
+                
+                # CRITICAL FIX: Handle 502 errors with retry logic
+                if response.status_code == 502 and attempt < max_retries:
+                    logger.warning(f"⚠️ 502 Bad Gateway on {instance.name} (attempt {attempt + 1}), retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+                
+                # 🔧 CRITICAL FIX: Don't raise 404 errors for DELETE operations - they indicate success
+                if method == 'DELETE' and response.status_code == 404:
+                    logger.debug(f"✅ DELETE 404 treated as success: collection already deleted")
+                else:
+                    response.raise_for_status()
+                return response
+                
+            except requests.exceptions.Timeout as e:
+                if attempt < max_retries:
+                    logger.warning(f"⚠️ Timeout on {instance.name} (attempt {attempt + 1}), retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                else:
+                    logger.error(f"❌ Final timeout on {instance.name} after {max_retries + 1} attempts")
+                    raise e
+            except requests.exceptions.ConnectionError as e:
+                if attempt < max_retries:
+                    logger.warning(f"⚠️ Connection error on {instance.name} (attempt {attempt + 1}), retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                else:
+                    logger.error(f"❌ Final connection error on {instance.name} after {max_retries + 1} attempts")
+                    raise e
+            except Exception as e:
+                if attempt < max_retries and "502" in str(e):
+                    logger.warning(f"⚠️ 502 error on {instance.name} (attempt {attempt + 1}), retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                else:
+                    logger.warning(f"Direct request to {instance.name} failed: {method} {path} - {e}")
+                    raise e
 
     def get_primary_instance(self) -> Optional[ChromaInstance]:
         """Get primary instance if healthy"""
@@ -3840,6 +3861,147 @@ if __name__ == '__main__':
                 return jsonify({"error": "WAL system not ready"}), 503
                 
         except Exception as e:
+            import traceback
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+
+    @app.route('/admin/complete_mappings', methods=['POST'])
+    def complete_mappings():
+        """🔧 CRITICAL FIX: Complete partial collection mappings by querying instances directly"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not ready"}), 503
+            
+            data = request.get_json() or {}
+            fix_specific_collection = data.get('collection_name')  # Optional: fix specific collection
+            
+            logger.info(f"🔧 MAPPING COMPLETION: Starting comprehensive mapping completion process")
+            
+            completed_mappings = []
+            failed_mappings = []
+            
+            # Get all incomplete mappings
+            with enhanced_wal.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    if fix_specific_collection:
+                        # Fix specific collection
+                        cur.execute("""
+                            SELECT collection_name, primary_collection_id, replica_collection_id 
+                            FROM collection_id_mapping 
+                            WHERE collection_name = %s
+                            AND (primary_collection_id IS NULL OR replica_collection_id IS NULL)
+                        """, (fix_specific_collection,))
+                    else:
+                        # Fix all incomplete mappings
+                        cur.execute("""
+                            SELECT collection_name, primary_collection_id, replica_collection_id 
+                            FROM collection_id_mapping 
+                            WHERE primary_collection_id IS NULL OR replica_collection_id IS NULL
+                        """)
+                    
+                    incomplete_mappings = cur.fetchall()
+            
+            logger.info(f"🔧 MAPPING COMPLETION: Found {len(incomplete_mappings)} incomplete mappings")
+            
+            for collection_name, primary_uuid, replica_uuid in incomplete_mappings:
+                try:
+                    logger.info(f"🔧 MAPPING COMPLETION: Processing '{collection_name}' (P:{primary_uuid[:8] if primary_uuid else 'None'}, R:{replica_uuid[:8] if replica_uuid else 'None'})")
+                    
+                    updated_primary_uuid = primary_uuid
+                    updated_replica_uuid = replica_uuid
+                    
+                    # Complete missing primary UUID
+                    if not primary_uuid:
+                        primary_instance = next((inst for inst in enhanced_wal.instances if inst.name == "primary" and inst.is_healthy), None)
+                        if primary_instance:
+                            try:
+                                response = enhanced_wal.make_direct_request(
+                                    primary_instance,
+                                    "GET",
+                                    "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                )
+                                if response.status_code == 200:
+                                    collections = response.json()
+                                    for collection in collections:
+                                        if collection.get('name') == collection_name:
+                                            updated_primary_uuid = collection.get('id')
+                                            logger.info(f"   ✅ Found primary UUID: {updated_primary_uuid[:8]}")
+                                            break
+                            except Exception as e:
+                                logger.error(f"   ❌ Error querying primary for '{collection_name}': {e}")
+                    
+                    # Complete missing replica UUID
+                    if not replica_uuid:
+                        replica_instance = next((inst for inst in enhanced_wal.instances if inst.name == "replica" and inst.is_healthy), None)
+                        if replica_instance:
+                            try:
+                                response = enhanced_wal.make_direct_request(
+                                    replica_instance,
+                                    "GET",
+                                    "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                )
+                                if response.status_code == 200:
+                                    collections = response.json()
+                                    for collection in collections:
+                                        if collection.get('name') == collection_name:
+                                            updated_replica_uuid = collection.get('id')
+                                            logger.info(f"   ✅ Found replica UUID: {updated_replica_uuid[:8]}")
+                                            break
+                            except Exception as e:
+                                logger.error(f"   ❌ Error querying replica for '{collection_name}': {e}")
+                    
+                    # Update mapping if we found missing UUIDs
+                    if (updated_primary_uuid != primary_uuid) or (updated_replica_uuid != replica_uuid):
+                        with enhanced_wal.get_db_connection() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    UPDATE collection_id_mapping 
+                                    SET primary_collection_id = %s, replica_collection_id = %s, updated_at = NOW()
+                                    WHERE collection_name = %s
+                                """, (updated_primary_uuid, updated_replica_uuid, collection_name))
+                                conn.commit()
+                                
+                        completed_mappings.append({
+                            "collection_name": collection_name,
+                            "primary_uuid": updated_primary_uuid[:8] if updated_primary_uuid else None,
+                            "replica_uuid": updated_replica_uuid[:8] if updated_replica_uuid else None,
+                            "was_primary_missing": primary_uuid is None,
+                            "was_replica_missing": replica_uuid is None
+                        })
+                        logger.info(f"   ✅ COMPLETED: Updated mapping for '{collection_name}'")
+                    else:
+                        failed_mappings.append({
+                            "collection_name": collection_name,
+                            "reason": "Could not find missing UUIDs on instances",
+                            "primary_available": primary_uuid is not None,
+                            "replica_available": replica_uuid is not None
+                        })
+                        logger.warning(f"   ⚠️ FAILED: Could not complete mapping for '{collection_name}'")
+                        
+                except Exception as e:
+                    failed_mappings.append({
+                        "collection_name": collection_name,
+                        "reason": f"Exception: {str(e)}",
+                        "primary_available": primary_uuid is not None,
+                        "replica_available": replica_uuid is not None
+                    })
+                    logger.error(f"   ❌ EXCEPTION: Error processing '{collection_name}': {e}")
+            
+            return jsonify({
+                "success": True,
+                "message": f"Mapping completion process finished",
+                "total_processed": len(incomplete_mappings),
+                "completed_count": len(completed_mappings),
+                "failed_count": len(failed_mappings),
+                "completed_mappings": completed_mappings,
+                "failed_mappings": failed_mappings
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"❌ MAPPING COMPLETION: Critical error: {e}")
             import traceback
             return jsonify({
                 "success": False,
