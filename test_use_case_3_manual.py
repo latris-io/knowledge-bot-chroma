@@ -428,7 +428,8 @@ class UseCase3Tester(EnhancedVerificationBase):
                             timeout=10
                         )
                         if replica_response.status_code == 200:
-                            replica_collections = [c['name'] for c in replica_response.json()]
+                            replica_collections = replica_response.json()
+                            replica_collections = [c['name'] for c in replica_collections]
                             replica_exists = collection in replica_collections
                             self.log(f"      Replica: {'EXISTS' if replica_exists else 'DELETED'}")
                         else:
@@ -762,7 +763,16 @@ class UseCase3Tester(EnhancedVerificationBase):
         return False
 
     def verify_data_consistency(self, max_retries=3):
-        """ENHANCED: Verify that test data exists and documents are synced between instances with retry logic"""
+        """
+        ENHANCED: Verify that test data exists and documents are synced between instances with retry logic
+        
+        CRITICAL FIX: This validation properly separates:
+        - Regular collections (should exist on both instances after sync)
+        - Deleted collections (should NOT exist on either instance after deletion)
+        
+        This prevents the bug where deleted collections were incorrectly counted as "missing syncs"
+        when they were actually successfully deleted as intended.
+        """
         self.log("🔍 Verifying data consistency (ENHANCED: including document-level sync with retries)...")
         
         for attempt in range(max_retries):
@@ -788,14 +798,20 @@ class UseCase3Tester(EnhancedVerificationBase):
                     
                 collections = response.json()
                 collection_names = [c['name'] for c in collections]
-                found_collections = [name for name in self.test_collections if name in collection_names]
+                
+                # CRITICAL FIX: Separate regular collections from deleted collections for consistency check
+                # Only check existence for collections that should EXIST (not deleted ones)
+                regular_collections = [col for col in self.test_collections if col not in self.deleted_collections]
+                found_collections = [name for name in regular_collections if name in collection_names]
                 
                 self.log(f"📊 Collection-level verification (attempt {attempt + 1}/{max_retries}):")
-                self.log(f"   Created during failure: {len(self.test_collections)}")
+                self.log(f"   Regular collections created during failure: {len(regular_collections)}")
                 self.log(f"   Found after recovery: {len(found_collections)}")
-                self.log(f"   Collection consistency: {len(found_collections)}/{len(self.test_collections)} = {len(found_collections)/len(self.test_collections)*100:.1f}%" if self.test_collections else "No test collections")
+                if self.deleted_collections:
+                    self.log(f"   Deleted collections (excluded from existence check): {len(self.deleted_collections)}")
+                self.log(f"   Collection consistency: {len(found_collections)}/{len(regular_collections)} = {len(found_collections)/len(regular_collections)*100:.1f}%" if regular_collections else "No regular collections to check")
                 
-                collection_consistency = len(found_collections) == len(self.test_collections)
+                collection_consistency = len(found_collections) == len(regular_collections)
 
                 # CRITICAL FIX: Verify collections actually exist on REPLICA instance
                 # This is the core USE CASE 3 functionality - primary→replica sync
@@ -803,7 +819,11 @@ class UseCase3Tester(EnhancedVerificationBase):
                 replica_sync_success = True
                 replica_collections_found = 0
                 
-                if self.test_collections:
+                # CRITICAL FIX: Separate regular collections from deleted collections for validation
+                # Only check replica sync for collections that should EXIST (not deleted ones)
+                regular_collections = [col for col in self.test_collections if col not in self.deleted_collections]
+                
+                if regular_collections:
                     try:
                         # Check REPLICA instance directly 
                         replica_response = requests.get(
@@ -814,20 +834,22 @@ class UseCase3Tester(EnhancedVerificationBase):
                         if replica_response.status_code == 200:
                             replica_collections = replica_response.json()
                             replica_collection_names = [c['name'] for c in replica_collections]
-                            replica_found = [name for name in self.test_collections if name in replica_collection_names]
+                            replica_found = [name for name in regular_collections if name in replica_collection_names]
                             replica_collections_found = len(replica_found)
                             
                             self.log(f"   📊 REPLICA INSTANCE CHECK:")
-                            self.log(f"      Collections created during replica failure: {len(self.test_collections)}")
+                            self.log(f"      Regular collections created during replica failure: {len(regular_collections)}")
                             self.log(f"      Collections found on replica after recovery: {replica_collections_found}")
-                            self.log(f"      Replica sync success: {replica_collections_found}/{len(self.test_collections)} = {replica_collections_found/len(self.test_collections)*100:.1f}%")
+                            if self.deleted_collections:
+                                self.log(f"      Deleted collections (excluded from sync check): {len(self.deleted_collections)}")
+                            self.log(f"      Replica sync success: {replica_collections_found}/{len(regular_collections)} = {replica_collections_found/len(regular_collections)*100:.1f}%")
                             
-                            if replica_collections_found == len(self.test_collections):
-                                self.log(f"   ✅ CORE SUCCESS: All collections synced from primary to replica!")
+                            if replica_collections_found == len(regular_collections):
+                                self.log(f"   ✅ CORE SUCCESS: All regular collections synced from primary to replica!")
                                 replica_sync_success = True
                             else:
-                                self.log(f"   ❌ CORE FAILURE: Only {replica_collections_found}/{len(self.test_collections)} collections synced to replica")
-                                self.log(f"      Collections missing from replica: {set(self.test_collections) - set(replica_found)}")
+                                self.log(f"   ❌ CORE FAILURE: Only {replica_collections_found}/{len(regular_collections)} regular collections synced to replica")
+                                self.log(f"      Regular collections missing from replica: {set(regular_collections) - set(replica_found)}")
                                 replica_sync_success = False
                         else:
                             self.log(f"   ❌ Cannot check replica instance: HTTP {replica_response.status_code}")
@@ -837,7 +859,7 @@ class UseCase3Tester(EnhancedVerificationBase):
                         self.log(f"   ❌ Error checking replica instance: {e}")
                         replica_sync_success = False
                 else:
-                    self.log(f"   ℹ️ No test collections to verify")
+                    self.log(f"   ℹ️ No regular collections to verify (all collections were deleted)")
                     replica_sync_success = True
                 
                 # Step 2: ENHANCED - Verify document-level sync between instances
