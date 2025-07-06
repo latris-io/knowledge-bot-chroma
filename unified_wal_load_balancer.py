@@ -2774,8 +2774,8 @@ class UnifiedWALLoadBalancer:
                     for row in results:
                         collection_name, source_uuid = row
                         
-                        # CRITICAL FIX: Check for incomplete DELETE operations before recreating collection
-                        # This includes both pending DELETEs and incomplete "both" target DELETEs
+                        # ENHANCED: Log pending DELETE operations but don't block collection recovery
+                        # Collection recovery should happen first, then WAL sync will process DELETEs
                         cur.execute("""
                             SELECT COUNT(*) FROM unified_wal_writes 
                             WHERE method = 'DELETE' 
@@ -2793,22 +2793,16 @@ class UnifiedWALLoadBalancer:
                                         OR synced_instances::text NOT LIKE %s
                                     )
                                 )
-                                OR
-                                -- Single target DELETEs aimed at this instance
-                                (
-                                    status IN ('executed', 'failed', 'pending')
-                                    AND target_instance = %s
-                                )
                             )
-                        """, (f'%/collections/{collection_name}%', f'%{target_instance_name}%', target_instance_name))
+                        """, (f'%/collections/{collection_name}%', f'%{target_instance_name}%'))
                         
-                        incomplete_deletes = cur.fetchone()[0]
+                        pending_deletes = cur.fetchone()[0]
                         
-                        if incomplete_deletes > 0:
-                            logger.warning(f"⚠️ COLLECTION RECOVERY: Skipping '{collection_name}' - has {incomplete_deletes} incomplete DELETE operations")
-                            logger.warning(f"   DELETE sync must complete to {target_instance_name} before collection recreation")
+                        if pending_deletes > 0:
+                            logger.info(f"📋 COLLECTION RECOVERY: '{collection_name}' has {pending_deletes} pending DELETE operations")
+                            logger.info(f"   Will recreate collection first, then WAL sync will process DELETE operations")
                             
-                            # Enhanced logging to show what specific DELETE operations are blocking recovery
+                            # Log the specific DELETE operations for tracking
                             cur.execute("""
                                 SELECT write_id, target_instance, status, synced_instances 
                                 FROM unified_wal_writes 
@@ -2825,21 +2819,16 @@ class UnifiedWALLoadBalancer:
                                             OR synced_instances::text NOT LIKE %s
                                         )
                                     )
-                                    OR
-                                    (
-                                        status IN ('executed', 'failed', 'pending')
-                                        AND target_instance = %s
-                                    )
                                 )
                                 ORDER BY created_at DESC
-                            """, (f'%/collections/{collection_name}%', f'%{target_instance_name}%', target_instance_name))
+                            """, (f'%/collections/{collection_name}%', f'%{target_instance_name}%'))
                             
-                            blocking_operations = cur.fetchall()
-                            for op in blocking_operations:
+                            pending_operations = cur.fetchall()
+                            for op in pending_operations:
                                 write_id, target, status, synced = op
-                                logger.warning(f"   Blocking DELETE: {write_id[:8]} target={target} status={status} synced={synced}")
-                            
-                            continue
+                                logger.info(f"   Pending DELETE: {write_id[:8]} target={target} status={status} synced={synced}")
+                        
+                        # Continue with collection recovery regardless of pending DELETEs
                         
                         missing_collections.append({
                             'name': collection_name,
