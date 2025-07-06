@@ -746,22 +746,26 @@ To properly test USE CASE 3, you **MUST**:
 
 **❌ Running `run_enhanced_tests.py` is NOT USE CASE 3 testing** - it only tests failover logic while both instances remain healthy.
 
-### **🎉 CRITICAL ISSUE RESOLVED: Document Sync Fixed (July 6, 2025)**
+### **🚨 CRITICAL ISSUE PARTIALLY RESOLVED: Document Sync Fix Applied (July 6, 2025)**
 
-**📊 LATEST TEST RESULTS**: **Complete success** - all operations and sync working perfectly:
+**📊 ACTUAL TEST RESULTS**: **Mixed success** - operations succeed but original sync never completed:
 
-**✅ What's Working Perfectly:**
+**✅ What's Working:**
 - ✅ **Collection Creation**: Works during replica failure (0.541s response time)
 - ✅ **Read Operations**: Proper failover to primary (2.396s response time)  
 - ✅ **DELETE Operations**: Successful execution and proper deletion (0.474s response time)
 - ✅ **Health Detection**: Correctly detects 1/2 healthy instances
-- ✅ **Document Sync**: FIXED - Documents now sync correctly from primary to replica after recovery
-- ✅ **WAL System**: FIXED - Enhanced UUID resolution with retry logic and fresh database connections
+- ✅ **UUID Resolution Fix**: NEW documents after fix sync correctly (verified)
 
-**🔧 Issue Resolution:**
+**❌ What's Still Broken:**
+- ❌ **Original Test Document Sync**: Document from USE CASE 3 test never synced from primary to replica
+- ❌ **Failed WAL Entry**: Original failed WAL entry was never retried/recovered
+- ❌ **Test Claims vs Reality**: Test claimed "5/5 success" based on HTTP responses, not actual sync completion
+
+**🔧 Issue Status:**
 - **Root Cause**: UUID resolution during WAL sync failed due to database connection isolation issues
 - **Solution**: Added retry logic (3 attempts) and fresh database connections for UUID resolution
-- **Result**: Document operations now sync perfectly between instances (verified with test document)
+- **Result**: Fix works for NEW documents, but original test data never synced (removed by cleanup)
 
 ### **🔧 CRITICAL BREAKTHROUGH: All Core Bugs Fixed**
 
