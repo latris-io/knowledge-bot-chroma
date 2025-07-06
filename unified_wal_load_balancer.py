@@ -1006,6 +1006,19 @@ class UnifiedWALLoadBalancer:
                     path = write_record['path']
                     data = write_record['data'] or b''
                     
+                    # CRITICAL FIX: Define target_instance_type early to prevent variable reference errors
+                    target_instance_type = None
+                    try:
+                        with self.get_db_connection() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("SELECT target_instance FROM unified_wal_writes WHERE write_id = %s", (write_id,))
+                                result = cur.fetchone()
+                                if result:
+                                    target_instance_type = result[0]
+                    except Exception as e:
+                        logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
+                        target_instance_type = 'single'  # Default fallback
+                    
                     # CRITICAL: Normalize API path for WAL sync (fixes 502 errors)
                     normalized_path = self.normalize_api_path_to_v2(path)
                     if normalized_path != path:
@@ -1063,17 +1076,6 @@ class UnifiedWALLoadBalancer:
                                                 if uuid_delete_response.status_code in [200, 204]:
                                                     logger.info(f"✅ PHANTOM FIX: Collection '{collection_name}' deleted by corrected UUID {actual_uuid[:8]}")
                                                     # Mark as synced and continue
-                                                    target_instance_type = None
-                                                    try:
-                                                        with self.get_db_connection() as conn:
-                                                            with conn.cursor() as cur:
-                                                                cur.execute("SELECT target_instance FROM unified_wal_writes WHERE write_id = %s", (write_id,))
-                                                                result = cur.fetchone()
-                                                                if result:
-                                                                    target_instance_type = result[0]
-                                                    except Exception as e:
-                                                        logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
-                                                    
                                                     if target_instance_type == 'both':
                                                         self.mark_instance_synced(write_id, instance.name)
                                                     else:
@@ -1090,17 +1092,6 @@ class UnifiedWALLoadBalancer:
                                                     if name_delete_response.status_code in [200, 204]:
                                                         logger.info(f"✅ PHANTOM FIX: Collection '{collection_name}' deleted by NAME after UUID 404")
                                                         # Mark as synced and continue
-                                                        target_instance_type = None
-                                                        try:
-                                                            with self.get_db_connection() as conn:
-                                                                with conn.cursor() as cur:
-                                                                    cur.execute("SELECT target_instance FROM unified_wal_writes WHERE write_id = %s", (write_id,))
-                                                                    result = cur.fetchone()
-                                                                    if result:
-                                                                        target_instance_type = result[0]
-                                                        except Exception as e:
-                                                            logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
-                                                        
                                                         if target_instance_type == 'both':
                                                             self.mark_instance_synced(write_id, instance.name)
                                                         else:
@@ -1109,17 +1100,6 @@ class UnifiedWALLoadBalancer:
                                                     elif name_delete_response.status_code == 404:
                                                         logger.info(f"✅ PHANTOM COLLECTION RESOLVED: '{collection_name}' not found by name either - DELETE goal achieved")
                                                         # Both UUID and name DELETE returned 404 - collection is actually gone
-                                                        target_instance_type = None
-                                                        try:
-                                                            with self.get_db_connection() as conn:
-                                                                with conn.cursor() as cur:
-                                                                    cur.execute("SELECT target_instance FROM unified_wal_writes WHERE write_id = %s", (write_id,))
-                                                                    result = cur.fetchone()
-                                                                    if result:
-                                                                        target_instance_type = result[0]
-                                                        except Exception as e:
-                                                            logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
-                                                        
                                                         if target_instance_type == 'both':
                                                             self.mark_instance_synced(write_id, instance.name)
                                                         else:
@@ -1167,17 +1147,6 @@ class UnifiedWALLoadBalancer:
                                                             else:
                                                                 logger.info(f"✅ CONFIRMED: No pending CREATE operations - DELETE goal legitimately achieved")
                                                                 # Safe to mark as completed
-                                                                target_instance_type = None
-                                                                try:
-                                                                    cur.execute("""
-                                                                        SELECT target_instance FROM unified_wal_writes WHERE write_id = %s
-                                                                    """, (write_id,))
-                                                                    result = cur.fetchone()
-                                                                    if result:
-                                                                        target_instance_type = result[0]
-                                                                except Exception as e:
-                                                                    logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
-                                                                
                                                                 # Use appropriate sync marking based on target_instance
                                                                 if target_instance_type == 'both':
                                                                     # Use per-instance sync tracking for "both" operations
@@ -1403,22 +1372,7 @@ class UnifiedWALLoadBalancer:
                             # Don't fail the sync operation for mapping cleanup errors
                     
                     # Mark as synced regardless of mapping cleanup result
-                    target_instance_type = None
-                    try:
-                        with self.get_db_connection() as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("SELECT target_instance FROM unified_wal_writes WHERE write_id = %s", (write_id,))
-                                result = cur.fetchone()
-                                if result:
-                                    target_instance_type = result[0]
-                    except Exception as e:
-                        logger.error(f"Error checking target_instance for {write_id[:8]}: {e}")
-                    
-                    if target_instance_type == 'both':
-                        self.mark_instance_synced(write_id, instance.name)
-                    else:
-                        self.mark_write_synced(write_id)
-                    
+                    # target_instance_type already defined at the beginning of the loop
                     success_count += 1
                     
                 except Exception as e:
