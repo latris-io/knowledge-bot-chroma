@@ -884,10 +884,50 @@ class UnifiedWALLoadBalancer:
                     # 1. Operations with target_instance = target_instance AND executed_on != target_instance (single instance sync)
                     # 2. Operations with target_instance = 'both' AND this instance NOT in synced_instances (both instance sync)
                     
+                    # 🔧 ENHANCED DEBUG: First check what "both" target operations exist in the database
+                    if target_instance == 'replica':
+                        logger.info(f"🔍 DEBUG REPLICA SYNC: Checking for 'both' target operations...")
+                        
+                        # Check all "both" target operations regardless of sync status
+                        cur.execute("""
+                            SELECT write_id, method, path, target_instance, status, synced_instances, created_at
+                            FROM unified_wal_writes 
+                            WHERE target_instance = 'both'
+                            ORDER BY created_at DESC
+                            LIMIT 10
+                        """)
+                        
+                        all_both_operations = cur.fetchall()
+                        logger.info(f"🔍 DEBUG: Found {len(all_both_operations)} total 'both' target operations:")
+                        for op in all_both_operations:
+                            logger.info(f"   {op['write_id'][:8]} {op['method']} target={op['target_instance']} status={op['status']} synced={op['synced_instances']}")
+                        
+                        # Now check which ones should be synced to replica
+                        cur.execute("""
+                            SELECT write_id, method, path, target_instance, status, synced_instances
+                            FROM unified_wal_writes 
+                            WHERE target_instance = 'both' 
+                            AND (status = 'executed' OR status = 'failed')
+                        """)
+                        
+                        both_executed = cur.fetchall()
+                        logger.info(f"🔍 DEBUG: Found {len(both_executed)} 'both' operations with executed/failed status:")
+                        for op in both_executed:
+                            # Check if replica is in synced_instances
+                            synced_instances = op['synced_instances'] or []
+                            if isinstance(synced_instances, str):
+                                import json
+                                synced_instances = json.loads(synced_instances)
+                            
+                            has_replica = 'replica' in synced_instances if synced_instances else False
+                            should_sync = not has_replica
+                            
+                            logger.info(f"   {op['write_id'][:8]} {op['method']} synced={synced_instances} has_replica={has_replica} should_sync={should_sync}")
+                    
                     # 🔧 CRITICAL FIX: Use correct PostgreSQL JSON array element checking
-                    # synced_instances is a JSON array like ["primary"] or ["primary", "replica"]
+                    # synced_instances is a JSONB array like ["primary"] or ["primary", "replica"]
                     # We need to check if the target_instance string exists as an element in this array
-                    # Use ? operator to check if array contains the target instance as a text element
+                    # Use @> operator to check if array contains the target instance as a JSON element
                     cur.execute("""
                         SELECT write_id, method, path, data, headers, collection_id, 
                                timestamp, retry_count, data_size_bytes, priority, target_instance, synced_instances
@@ -898,7 +938,7 @@ class UnifiedWALLoadBalancer:
                             (target_instance = 'both' AND (
                                 synced_instances IS NULL OR 
                                 synced_instances = '[]'::jsonb OR
-                                NOT (synced_instances ? %s)
+                                NOT (synced_instances @> %s::jsonb)
                             ))
                         )
                         AND retry_count < 3
@@ -908,7 +948,7 @@ class UnifiedWALLoadBalancer:
                         )
                         ORDER BY timestamp ASC, retry_count ASC, priority DESC
                         LIMIT %s
-                    """, (target_instance, target_instance, target_instance, batch_size * 3))
+                    """, (target_instance, target_instance, f'["{target_instance}"]', batch_size * 3))
                     
                     records = cur.fetchall()
                     
@@ -927,6 +967,17 @@ class UnifiedWALLoadBalancer:
                             logger.info(f"🔍 DEBUG: Found {len(both_operations)} 'both' target operations to sync to replica")
                             for op in both_operations[:3]:  # Log first 3
                                 logger.info(f"   - {op['method']} {op['path']} (synced_instances: {op.get('synced_instances')})")
+                        else:
+                            logger.warning(f"⚠️ DEBUG: No 'both' target operations found for replica sync despite having {len(records)} total operations")
+                            if records:
+                                logger.warning(f"   Operations found: {[f'{r['method']} target={r.get('target_instance')}' for r in records[:3]]}")
+                            
+                            # Additional debugging - check if the JSON query is working correctly
+                            logger.warning(f"🔍 ADDITIONAL DEBUG: Testing JSON query logic...")
+                            for record in records[:3]:
+                                synced_instances = record.get('synced_instances')
+                                target = record.get('target_instance')
+                                logger.warning(f"   Record: target={target}, synced_instances={synced_instances}, type={type(synced_instances)}")
                     
                     if not records:
                         return []
@@ -4408,12 +4459,45 @@ if __name__ == '__main__':
                     both_instances_healthy = (primary_instance and primary_instance.is_healthy and 
                                             replica_instance and replica_instance.is_healthy)
                     
-                    if both_instances_healthy:
+                    # 🔧 CRITICAL FIX FOR DELETE SYNC: Check if collection has incomplete mappings
+                    # If a collection was created during failover, it needs WAL sync even if instances are now healthy
+                    collection_identifier = final_path.split('/collections/')[-1].split('/')[0] if '/collections/' in final_path else None
+                    needs_wal_for_sync = False
+                    
+                    if collection_identifier and both_instances_healthy:
+                        try:
+                            # Check if this collection has incomplete mappings (created during failover)
+                            with enhanced_wal.get_db_connection() as conn:
+                                with conn.cursor() as cur:
+                                    # Look for incomplete mappings where one instance UUID is NULL
+                                    cur.execute("""
+                                        SELECT collection_name, primary_collection_id, replica_collection_id 
+                                        FROM collection_id_mapping 
+                                        WHERE (collection_name = %s OR primary_collection_id = %s OR replica_collection_id = %s)
+                                        AND (primary_collection_id IS NULL OR replica_collection_id IS NULL)
+                                    """, (collection_identifier, collection_identifier, collection_identifier))
+                                    
+                                    incomplete_mapping = cur.fetchone()
+                                    
+                                    if incomplete_mapping:
+                                        needs_wal_for_sync = True
+                                        logger.info(f"🔍 PROXY_REQUEST: Collection '{collection_identifier}' has incomplete mapping - forcing WAL sync")
+                                        logger.info(f"   Mapping: primary={incomplete_mapping[1][:8] if incomplete_mapping[1] else 'NULL'}, replica={incomplete_mapping[2][:8] if incomplete_mapping[2] else 'NULL'}")
+                                    
+                        except Exception as mapping_check_error:
+                            logger.warning(f"⚠️ PROXY_REQUEST: Could not check collection mapping: {mapping_check_error}")
+                            # Default to WAL logging for safety
+                            needs_wal_for_sync = True
+                    
+                    if both_instances_healthy and not needs_wal_for_sync:
                         should_log_to_wal = False  # Distributed deletion handles this
-                        logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Both instances healthy (cached status), using distributed deletion (no WAL)")
+                        logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Both instances healthy, complete mapping, using distributed deletion (no WAL)")
                     else:
-                        should_log_to_wal = True  # Need WAL for failover sync
-                        logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Failover mode detected (primary={primary_instance.is_healthy if primary_instance else 'None'}, replica={replica_instance.is_healthy if replica_instance else 'None'}), logging to WAL for sync")
+                        should_log_to_wal = True  # Need WAL for failover sync or incomplete mapping
+                        if not both_instances_healthy:
+                            logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Failover mode detected (primary={primary_instance.is_healthy if primary_instance else 'None'}, replica={replica_instance.is_healthy if replica_instance else 'None'}), logging to WAL for sync")
+                        else:
+                            logger.info(f"🔍 PROXY_REQUEST: COLLECTION DELETION - Incomplete mapping detected, logging to WAL for proper sync")
                 
                 elif '/collections/' in final_path and any(doc_op in final_path for doc_op in ['/add', '/upsert', '/update', '/delete']):  # WRITE operations only (removed /get, /query, /count)
                     operation_type = "document_write_operation"
