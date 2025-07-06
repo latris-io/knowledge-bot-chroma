@@ -1347,6 +1347,39 @@ class UnifiedWALLoadBalancer:
                         
                         if response.status_code in [200, 201]:
                             logger.info(f"✅ WAL SYNC: Collection creation successful on {instance.name} - Status: {response.status_code}")
+                            
+                            # 🔧 CRITICAL FIX: Update collection mapping with new UUID
+                            try:
+                                response_data = response.json()
+                                new_uuid = response_data.get('id')
+                                collection_name = response_data.get('name')
+                                
+                                if new_uuid and collection_name:
+                                    logger.info(f"🔧 MAPPING UPDATE: Updating {instance.name} UUID for '{collection_name}' -> {new_uuid[:8]}")
+                                    
+                                    with self.get_db_connection() as conn:
+                                        with conn.cursor() as cur:
+                                            if instance.name == 'primary':
+                                                cur.execute("""
+                                                    UPDATE collection_id_mapping 
+                                                    SET primary_collection_id = %s, updated_at = NOW()
+                                                    WHERE collection_name = %s
+                                                """, (new_uuid, collection_name))
+                                            else:  # replica
+                                                cur.execute("""
+                                                    UPDATE collection_id_mapping 
+                                                    SET replica_collection_id = %s, updated_at = NOW()
+                                                    WHERE collection_name = %s
+                                                """, (new_uuid, collection_name))
+                                            
+                                            conn.commit()
+                                            logger.info(f"✅ MAPPING UPDATED: {instance.name} UUID {new_uuid[:8]} stored for '{collection_name}'")
+                                else:
+                                    logger.warning(f"⚠️ MAPPING UPDATE: Could not extract UUID/name from collection creation response")
+                                    
+                            except Exception as mapping_error:
+                                logger.error(f"❌ MAPPING UPDATE: Failed to update mapping for {instance.name}: {mapping_error}")
+                            
                             # Mark as synced using appropriate method
                             if target_instance_type == 'both':
                                 self.mark_instance_synced(write_id, instance.name)
@@ -1355,6 +1388,20 @@ class UnifiedWALLoadBalancer:
                         elif response.status_code == 409:
                             # 409 Conflict = Collection already exists = SUCCESS for sync purposes
                             logger.info(f"✅ WAL SYNC: Collection creation successful on {instance.name} - Status: 409 (collection already exists)")
+                            
+                            # 🔧 CRITICAL FIX: For 409, we also need to update mapping if it's missing
+                            try:
+                                # Extract collection name from WAL record
+                                collection_identifier = write_record.get('collection_id')
+                                if collection_identifier:
+                                    # Resolve the existing collection UUID and update mapping
+                                    existing_uuid = self.resolve_collection_name_to_uuid(collection_identifier, instance.name)
+                                    if existing_uuid:
+                                        logger.info(f"✅ MAPPING UPDATED: 409 case - {instance.name} UUID {existing_uuid[:8]} confirmed for '{collection_identifier}'")
+                                    
+                            except Exception as mapping_409_error:
+                                logger.error(f"❌ MAPPING UPDATE: 409 case failed for {instance.name}: {mapping_409_error}")
+                            
                             # Mark as synced using appropriate method
                             if target_instance_type == 'both':
                                 self.mark_instance_synced(write_id, instance.name)
