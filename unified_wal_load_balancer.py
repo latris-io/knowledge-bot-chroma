@@ -1516,15 +1516,16 @@ class UnifiedWALLoadBalancer:
                                         ))
                                         emergency_conn.commit()
                                         logger.info(f"🚑 EMERGENCY MAPPING FIX: {collection_name} -> {instance.name} UUID: {new_uuid[:8]}")
-                            except Exception as emergency_error:
-                                logger.error(f"❌ EMERGENCY MAPPING FIX FAILED: {emergency_error}")
-                            
-                    else:
-                        logger.warning(f"⚠️ Collection creation response missing UUID or name: {collection_info}")
+                                                                        except Exception as emergency_error:
+                                                logger.error(f"❌ EMERGENCY MAPPING FIX FAILED: {emergency_error}")
+                                            
+                            else:
+                                logger.warning(f"⚠️ Collection creation response missing UUID or name: new_uuid={new_uuid}, collection_name={collection_name}")
+                                logger.warning(f"   Response status: {response.status_code}")
                         
-                except Exception as response_error:
-                    logger.error(f"❌ Failed to parse collection creation response: {response_error}")
-                    logger.error(f"   Response text: {response.text[:200]}")
+                        except Exception as response_error:
+                            logger.error(f"❌ Failed to parse collection creation response: {response_error}")
+                            logger.error(f"   Response text: {response.text[:200]}")
                     
             # Clean up collection mapping if DELETE was successful
             if (method == 'DELETE' and 
