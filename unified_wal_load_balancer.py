@@ -1527,52 +1527,52 @@ class UnifiedWALLoadBalancer:
                             logger.error(f"❌ Failed to parse collection creation response: {response_error}")
                             logger.error(f"   Response text: {response.text[:200]}")
                     
-            # Clean up collection mapping if DELETE was successful
-            if (method == 'DELETE' and 
-                '/collections/' in final_path and 
-                response.status_code in [200, 204]):
-                try:
-                    # Extract collection name from the original WAL record for mapping cleanup
-                    original_collection_identifier = write_record.get('collection_id')
-                    
-                    # CRITICAL FIX: Only clean up mapping if this is a name-based identifier
-                    import re
-                    if (original_collection_identifier and 
-                        not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', original_collection_identifier)):
+                # Clean up collection mapping if DELETE was successful
+                if (method == 'DELETE' and 
+                    '/collections/' in final_path and 
+                    response.status_code in [200, 204]):
+                    try:
+                        # Extract collection name from the original WAL record for mapping cleanup
+                        original_collection_identifier = write_record.get('collection_id')
                         
-                        collection_name = original_collection_identifier
-                        logger.info(f"🗑️ COLLECTION DELETED: {collection_name} from {instance.name} - cleaning up mapping")
-                        
-                        # Update mapping to remove the UUID for this instance
-                        # 🔒 SCALABILITY: Use appropriate lock for collection mapping operations
-                        with self._get_appropriate_lock('collection_mapping'):
-                            with self.get_db_connection() as conn:
-                                with conn.cursor() as cur:
-                                    if instance.name == 'primary':
-                                        # Collection deleted from primary - clear primary UUID
+                        # CRITICAL FIX: Only clean up mapping if this is a name-based identifier
+                        import re
+                        if (original_collection_identifier and 
+                            not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', original_collection_identifier)):
+                            
+                            collection_name = original_collection_identifier
+                            logger.info(f"🗑️ COLLECTION DELETED: {collection_name} from {instance.name} - cleaning up mapping")
+                            
+                            # Update mapping to remove the UUID for this instance
+                            # 🔒 SCALABILITY: Use appropriate lock for collection mapping operations
+                            with self._get_appropriate_lock('collection_mapping'):
+                                with self.get_db_connection() as conn:
+                                    with conn.cursor() as cur:
+                                        if instance.name == 'primary':
+                                            # Collection deleted from primary - clear primary UUID
+                                            cur.execute("""
+                                                UPDATE collection_id_mapping 
+                                                SET primary_collection_id = NULL, updated_at = NOW()
+                                                WHERE collection_name = %s
+                                            """, (collection_name,))
+                                            logger.info(f"🗑️ Cleared primary mapping for {collection_name}")
+                                        else:  # replica
+                                            # Collection deleted from replica - clear replica UUID  
+                                            cur.execute("""
+                                                UPDATE collection_id_mapping 
+                                                SET replica_collection_id = NULL, updated_at = NOW()
+                                                WHERE collection_name = %s
+                                            """, (collection_name,))
+                                            logger.info(f"🗑️ Cleared replica mapping for {collection_name}")
+                                        
+                                        conn.commit()
+                                        
+                                        # Check if both UUIDs are now NULL and delete the mapping entirely
                                         cur.execute("""
-                                            UPDATE collection_id_mapping 
-                                            SET primary_collection_id = NULL, updated_at = NOW()
+                                            SELECT primary_collection_id, replica_collection_id 
+                                            FROM collection_id_mapping 
                                             WHERE collection_name = %s
                                         """, (collection_name,))
-                                        logger.info(f"🗑️ Cleared primary mapping for {collection_name}")
-                                    else:  # replica
-                                        # Collection deleted from replica - clear replica UUID  
-                                        cur.execute("""
-                                            UPDATE collection_id_mapping 
-                                            SET replica_collection_id = NULL, updated_at = NOW()
-                                            WHERE collection_name = %s
-                                        """, (collection_name,))
-                                        logger.info(f"🗑️ Cleared replica mapping for {collection_name}")
-                                    
-                                    conn.commit()
-                                    
-                                    # Check if both UUIDs are now NULL and delete the mapping entirely
-                                    cur.execute("""
-                                        SELECT primary_collection_id, replica_collection_id 
-                                        FROM collection_id_mapping 
-                                        WHERE collection_name = %s
-                                    """, (collection_name,))
                                     result = cur.fetchone()
                                     
                                     if result and not result[0] and not result[1]:
@@ -1586,9 +1586,9 @@ class UnifiedWALLoadBalancer:
                                     else:
                                         logger.info(f"✅ MAPPING UPDATED: {collection_name} (one instance still has collection)")
                                         
-                except Exception as mapping_cleanup_error:
-                    logger.error(f"❌ Collection mapping cleanup failed: {mapping_cleanup_error}")
-                    # Don't fail the sync operation for mapping cleanup errors
+                    except Exception as mapping_cleanup_error:
+                        logger.error(f"❌ Collection mapping cleanup failed: {mapping_cleanup_error}")
+                        # Don't fail the sync operation for mapping cleanup errors
                     
             # Mark as synced regardless of mapping cleanup result
             target_instance_type = None
