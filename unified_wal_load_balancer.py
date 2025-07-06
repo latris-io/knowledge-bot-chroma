@@ -970,7 +970,8 @@ class UnifiedWALLoadBalancer:
                         else:
                             logger.warning(f"⚠️ DEBUG: No 'both' target operations found for replica sync despite having {len(records)} total operations")
                             if records:
-                                logger.warning(f"   Operations found: {[f'{r['method']} target={r.get('target_instance')}' for r in records[:3]]}")
+                                operations_summary = [f"{r['method']} target={r.get('target_instance')}" for r in records[:3]]
+                            logger.warning(f"   Operations found: {operations_summary}")
                             
                             # Additional debugging - check if the JSON query is working correctly
                             logger.warning(f"🔍 ADDITIONAL DEBUG: Testing JSON query logic...")
