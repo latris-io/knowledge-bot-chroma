@@ -2908,24 +2908,37 @@ class UnifiedWALLoadBalancer:
                     # 🔧 CRITICAL FIX: Find incomplete mappings but exclude recently deleted collections
                     # Check for collections that have been intentionally deleted in recent WAL operations
                     cur.execute("""
-                        SELECT collection_name, primary_collection_id, replica_collection_id
-                        FROM collection_id_mapping 
+                        SELECT cm.collection_name, cm.primary_collection_id, cm.replica_collection_id
+                        FROM collection_id_mapping cm
                         WHERE (
-                            (%s = 'primary' AND primary_collection_id IS NULL AND replica_collection_id IS NOT NULL) OR
-                            (%s = 'replica' AND replica_collection_id IS NULL AND primary_collection_id IS NOT NULL)
+                            (%s = 'primary' AND cm.primary_collection_id IS NULL AND cm.replica_collection_id IS NOT NULL) OR
+                            (%s = 'replica' AND cm.replica_collection_id IS NULL AND cm.primary_collection_id IS NOT NULL)
                         )
-                        AND collection_name NOT IN (
+                        AND NOT EXISTS (
                             -- Exclude collections that have recent DELETE operations in WAL
-                            SELECT DISTINCT collection_id
-                            FROM unified_wal_writes 
-                            WHERE method = 'DELETE' 
-                            AND path LIKE '%%/collections/%%'
-                            AND collection_id IS NOT NULL
-                            AND created_at > NOW() - INTERVAL '5 minutes'
+                            -- Check both collection_id (which can be name or UUID) and UUID matching
+                            SELECT 1 FROM unified_wal_writes w
+                            WHERE w.method = 'DELETE' 
+                            AND w.path LIKE '%%/collections/%%'
+                            AND w.created_at > NOW() - INTERVAL '5 minutes'
                             AND (
-                                status = 'executed' 
-                                OR status = 'synced'
-                                OR (status = 'pending' AND retry_count < 3)
+                                w.status = 'executed' 
+                                OR w.status = 'synced'
+                                OR (w.status = 'pending' AND w.retry_count < 3)
+                            )
+                            AND (
+                                -- Match by collection name
+                                w.collection_id = cm.collection_name
+                                -- Match by primary UUID
+                                OR w.collection_id = cm.primary_collection_id
+                                -- Match by replica UUID  
+                                OR w.collection_id = cm.replica_collection_id
+                                -- Match if collection name appears in path
+                                OR w.path LIKE '%%/collections/' || cm.collection_name || '%%'
+                                -- Match if primary UUID appears in path
+                                OR (cm.primary_collection_id IS NOT NULL AND w.path LIKE '%%/collections/' || cm.primary_collection_id || '%%')
+                                -- Match if replica UUID appears in path
+                                OR (cm.replica_collection_id IS NOT NULL AND w.path LIKE '%%/collections/' || cm.replica_collection_id || '%%')
                             )
                         )
                     """, (target_instance_name, target_instance_name))
@@ -2938,25 +2951,25 @@ class UnifiedWALLoadBalancer:
                     
                     # 🔧 ENHANCED LOGGING: Show what collections are being filtered out
                     cur.execute("""
-                        SELECT DISTINCT collection_id, method, status, created_at
-                        FROM unified_wal_writes 
-                        WHERE method = 'DELETE' 
-                        AND path LIKE '%%/collections/%%'
-                        AND collection_id IS NOT NULL
-                        AND created_at > NOW() - INTERVAL '5 minutes'
+                        SELECT DISTINCT w.collection_id, w.method, w.status, w.created_at,
+                               COALESCE(w.collection_id, 'unknown') as identifier
+                        FROM unified_wal_writes w
+                        WHERE w.method = 'DELETE' 
+                        AND w.path LIKE '%%/collections/%%'
+                        AND w.created_at > NOW() - INTERVAL '5 minutes'
                         AND (
-                            status = 'executed' 
-                            OR status = 'synced'
-                            OR (status = 'pending' AND retry_count < 3)
+                            w.status = 'executed' 
+                            OR w.status = 'synced'
+                            OR (w.status = 'pending' AND w.retry_count < 3)
                         )
-                        ORDER BY created_at DESC
+                        ORDER BY w.created_at DESC
                     """)
                     
                     recent_deletes = cur.fetchall()
                     if recent_deletes:
-                        logger.info(f"🔍 COLLECTION RECOVERY: Excluding {len(recent_deletes)} recently deleted collections:")
+                        logger.info(f"🔍 COLLECTION RECOVERY: Found {len(recent_deletes)} recent DELETE operations to exclude:")
                         for delete_op in recent_deletes:
-                            logger.info(f"   - {delete_op['collection_id']} (DELETE {delete_op['status']} at {delete_op['created_at']})")
+                            logger.info(f"   - {delete_op['identifier']} (DELETE {delete_op['status']} at {delete_op['created_at']})")
                     
                     logger.info(f"🔧 COLLECTION RECOVERY: Found {len(incomplete_mappings)} collections missing on {target_instance_name}")
                     
