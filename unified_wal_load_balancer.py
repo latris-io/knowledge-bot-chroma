@@ -2100,27 +2100,6 @@ class UnifiedWALLoadBalancer:
             }
 
     # Keep other essential methods for load balancing functionality
-    def choose_read_instance(self, path: str, method: str, headers: Dict[str, str]) -> Optional[ChromaInstance]:
-        """Choose instance for read operations"""
-        healthy_instances = self.get_healthy_instances()
-        if not healthy_instances:
-            return None
-        
-        # For read operations, prefer replica if available
-        if method == "GET":
-            replica = self.get_replica_instance()
-            primary = self.get_primary_instance()
-            
-            # Use read replica ratio to determine routing
-            if replica and primary and random.random() < self.read_replica_ratio:
-                return replica
-            elif primary:
-                return primary
-            else:
-                return replica
-        
-        # For write operations, always use primary
-        return self.get_primary_instance()
 
     def normalize_api_path_to_v2(self, path: str) -> str:
         """Convert V1-style API paths to proper V2 format for ChromaDB compatibility"""
