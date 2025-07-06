@@ -515,13 +515,41 @@ class UseCase3Tester(EnhancedVerificationBase):
                 timeout=15
             )
             
-            if response.status_code == 200:
-                self.test_collections.append(collection_name)
-                result = response.json()
-                self.log(f"✅ Collection created: {collection_name} (Status: {response.status_code}, Time: {response.elapsed.total_seconds():.3f}s)")
-                return True, result
-            else:
-                self.log(f"❌ Collection creation failed: {response.status_code}")
+            # 🔧 CRITICAL FIX: Don't claim success based on HTTP response code - verify actual collection creation
+            if response.status_code != 200:
+                self.log(f"❌ Collection creation failed: HTTP {response.status_code}")
+                return False, None
+                
+            # 🔧 CRITICAL FIX: Verify the collection was actually created by checking it exists
+            self.log(f"✅ Collection creation: HTTP {response.status_code} - Now verifying actual collection exists...")
+            
+            # Wait briefly for creation to complete
+            time.sleep(2)
+            
+            # Verify collection exists
+            try:
+                verify_response = requests.get(
+                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}",
+                    timeout=10
+                )
+                
+                if verify_response.status_code == 200:
+                    collection_info = verify_response.json()
+                    if collection_info.get('name') == collection_name:
+                        self.test_collections.append(collection_name)
+                        result = response.json()
+                        self.log(f"✅ Collection verified: '{collection_name}' exists with ID {collection_info.get('id', 'unknown')[:8]}...")
+                        self.log(f"⏱️ Total time: {response.elapsed.total_seconds():.3f}s")
+                        return True, result
+                    else:
+                        self.log(f"❌ Collection verification failed: Name mismatch - expected '{collection_name}', got '{collection_info.get('name')}'")
+                        return False, None
+                else:
+                    self.log(f"❌ Collection verification failed: HTTP {verify_response.status_code}")
+                    return False, None
+                    
+            except Exception as e:
+                self.log(f"❌ Collection verification error: {e}")
                 return False, None
                 
         except Exception as e:
@@ -574,24 +602,72 @@ class UseCase3Tester(EnhancedVerificationBase):
                 timeout=15
             )
             
-            add_success = add_response.status_code in [200, 201]
-            self.log(f"   Document addition: {'✅ Success' if add_success else '❌ Failed'} (Status: {add_response.status_code}, Time: {add_response.elapsed.total_seconds():.3f}s)")
+            # 🔧 CRITICAL FIX: Don't claim success based on HTTP response code - verify actual data storage
+            if add_response.status_code not in [200, 201]:
+                self.log(f"   Document addition: ❌ Failed - HTTP {add_response.status_code}")
+                return False
             
-            # ENHANCED: Track document for sync verification if successful
-            if add_success:
-                if collection_name not in self.documents_added_during_failure:
-                    self.documents_added_during_failure[collection_name] = []
-                
-                self.documents_added_during_failure[collection_name].append({
-                    'id': doc_id,
-                    'content': doc_content,
-                    'metadata': doc_metadata,
-                    'embeddings': doc_embeddings
-                })
-                
-                self.log(f"   📋 Tracked for sync verification: Collection '{collection_name}', Document '{doc_id}'")
+            # 🔧 CRITICAL FIX: Verify the document was actually stored by reading it back
+            self.log(f"   Document addition: ✅ HTTP {add_response.status_code} - Now verifying actual storage...")
             
-            return add_success
+            # Wait briefly for storage to complete
+            time.sleep(2)
+            
+            # Verify document exists and has correct content
+            try:
+                verify_response = requests.post(
+                    f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}/get",
+                    json={"include": ["documents", "metadatas", "embeddings"], "ids": [doc_id]},
+                    timeout=10
+                )
+                
+                if verify_response.status_code == 200:
+                    verify_data = verify_response.json()
+                    stored_docs = verify_data.get('documents', [])
+                    stored_metas = verify_data.get('metadatas', [])
+                    stored_embeddings = verify_data.get('embeddings', [])
+                    
+                    if len(stored_docs) == 1 and stored_docs[0] == doc_content:
+                        self.log(f"   ✅ Document verified: Content matches '{doc_content[:30]}...'")
+                        
+                        # Verify metadata
+                        if len(stored_metas) == 1 and stored_metas[0].get('test_type') == 'replica_down':
+                            self.log(f"   ✅ Metadata verified: test_type = replica_down")
+                            
+                            # Verify embeddings
+                            if len(stored_embeddings) == 1 and stored_embeddings[0] == doc_embeddings:
+                                self.log(f"   ✅ Embeddings verified: {len(doc_embeddings)} dimensions")
+                                
+                                # Track document for sync verification if all verification passed
+                                if collection_name not in self.documents_added_during_failure:
+                                    self.documents_added_during_failure[collection_name] = []
+                                
+                                self.documents_added_during_failure[collection_name].append({
+                                    'id': doc_id,
+                                    'content': doc_content,
+                                    'metadata': doc_metadata,
+                                    'embeddings': doc_embeddings
+                                })
+                                
+                                self.log(f"   📋 Document tracked for sync verification: '{doc_id}'")
+                                self.log(f"   ⏱️ Total time: {add_response.elapsed.total_seconds():.3f}s")
+                                return True
+                            else:
+                                self.log(f"   ❌ Embeddings verification failed: Expected {doc_embeddings}, got {stored_embeddings}")
+                                return False
+                        else:
+                            self.log(f"   ❌ Metadata verification failed: Expected test_type=replica_down, got {stored_metas}")
+                            return False
+                    else:
+                        self.log(f"   ❌ Document verification failed: Expected '{doc_content}', got {stored_docs}")
+                        return False
+                else:
+                    self.log(f"   ❌ Document verification failed: HTTP {verify_response.status_code}")
+                    return False
+                    
+            except Exception as e:
+                self.log(f"   ❌ Document verification error: {e}")
+                return False
             
         except Exception as e:
             self.log(f"❌ Write operations error: {e}")
@@ -618,15 +694,37 @@ class UseCase3Tester(EnhancedVerificationBase):
                     timeout=15
                 )
                 
-                delete_success = delete_response.status_code in [200, 204]
-                self.log(f"   DELETE operations: {'✅ Success' if delete_success else '❌ Failed'} (Status: {delete_response.status_code}, Time: {delete_response.elapsed.total_seconds():.3f}s)")
+                # 🔧 CRITICAL FIX: Don't claim success based on HTTP response code - verify actual deletion
+                if delete_response.status_code not in [200, 204]:
+                    self.log(f"   DELETE operations: ❌ Failed - HTTP {delete_response.status_code}")
+                    return False, delete_test_collection
                 
-                # CRITICAL FIX: Track deleted collection for validation (don't remove from test_collections yet)
-                if delete_success:
-                    self.deleted_collections.append(delete_test_collection)
-                    self.log(f"   📋 Tracked for DELETE sync validation: '{delete_test_collection}'")
+                # 🔧 CRITICAL FIX: Verify the collection was actually deleted by checking it no longer exists
+                self.log(f"   DELETE operations: ✅ HTTP {delete_response.status_code} - Now verifying actual deletion...")
                 
-                return delete_success, delete_test_collection
+                # Wait briefly for deletion to complete
+                time.sleep(2)
+                
+                # Verify collection no longer exists
+                try:
+                    verify_response = requests.get(
+                        f"{self.base_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{delete_test_collection}",
+                        timeout=10
+                    )
+                    
+                    if verify_response.status_code == 404:
+                        self.log(f"   ✅ DELETE verified: Collection '{delete_test_collection}' no longer exists")
+                        self.deleted_collections.append(delete_test_collection)
+                        self.log(f"   📋 Tracked for DELETE sync validation: '{delete_test_collection}'")
+                        self.log(f"   ⏱️ Total time: {delete_response.elapsed.total_seconds():.3f}s")
+                        return True, delete_test_collection
+                    else:
+                        self.log(f"   ❌ DELETE verification failed: Collection still exists (HTTP {verify_response.status_code})")
+                        return False, delete_test_collection
+                        
+                except Exception as e:
+                    self.log(f"   ❌ DELETE verification error: {e}")
+                    return False, delete_test_collection
             else:
                 self.log(f"   DELETE operations: ❌ Failed (Could not create test collection)")
                 return False, None
@@ -1064,6 +1162,8 @@ class UseCase3Tester(EnhancedVerificationBase):
         """Print comprehensive test summary"""
         self.log("📊 USE CASE 3 TEST RESULTS SUMMARY:")
         self.log("="*50)
+        self.log("🔧 CRITICAL: Tests now validate ACTUAL DATA STORAGE, not just HTTP response codes")
+        self.log("")
         
         if not self.test_results:
             self.log("No test results to display")
@@ -1074,20 +1174,38 @@ class UseCase3Tester(EnhancedVerificationBase):
         
         for test_name, result in self.test_results.items():
             status = "✅ PASS" if result['success'] else "❌ FAIL"
+            if test_name == "collection_creation":
+                validation_note = "- Verified collection actually exists with correct name and ID"
+            elif test_name == "write_operations":
+                validation_note = "- Verified document content, metadata, and embeddings stored correctly"
+            elif test_name == "delete_operations":
+                validation_note = "- Verified collection actually deleted (404 response)"
+            elif test_name == "read_operations":
+                validation_note = "- Verified collection listing works during replica failure"
+            elif test_name == "health_detection":
+                validation_note = "- Verified 1/2 healthy instances detected"
+            else:
+                validation_note = ""
+                
             self.log(f"   {test_name}: {status}")
+            if validation_note:
+                self.log(f"     {validation_note}")
         
         success_rate = (passed_tests/total_tests*100) if total_tests > 0 else 0
         self.log(f"\n🎯 Overall: {passed_tests}/{total_tests} tests passed ({success_rate:.1f}%)")
+        self.log("📋 NOTE: Success now means data was actually stored/deleted/accessed, not just HTTP 200")
         
         if passed_tests == total_tests:
-            self.log("\n🎉 USE CASE 3 SUCCESS: Read operations failover seamlessly during replica failure!")
-            self.log("   ✅ Zero user impact during replica infrastructure failures")
-            self.log("   ✅ Write operations completely unaffected")
+            self.log("\n🎉 USE CASE 3 SUCCESS: Operations work correctly during replica failure!")
+            self.log("   ✅ Data operations verified with actual storage confirmation")
             self.log("   ✅ Load balancer provides transparent failover")
+            self.log("   ✅ All operations complete successfully despite replica down")
         elif passed_tests > 0:
             self.log(f"\n⚠️  USE CASE 3 PARTIAL SUCCESS: {passed_tests}/{total_tests} operations succeeded")
+            self.log("   ⚠️  Some operations failed to properly store/retrieve data")
         else:
-            self.log("\n❌ USE CASE 3 FAILED: No operations succeeded during replica failure")
+            self.log("\n❌ USE CASE 3 FAILED: No operations properly stored/retrieved data")
+            self.log("   ❌ Load balancer not handling replica failure correctly")
         
         return passed_tests == total_tests
 
