@@ -2833,192 +2833,159 @@ class UnifiedWALLoadBalancer:
             logger.error(f"Full traceback: {traceback.format_exc()}")
 
     def sync_missing_collections_to_instance(self, target_instance_name: str) -> bool:
+        """Sync collections missing on target instance by creating them from source instance
+        
+        CRITICAL FIX: Prevent recreation of collections that were intentionally deleted
         """
-        🔧 ENHANCED: Sync collections that were created on one instance during the other's failure
-        CRITICAL FIX: Skip collections with pending DELETE operations to prevent timing conflicts
-        """
+        logger.info(f"🔧 COLLECTION RECOVERY: Starting collection recovery for {target_instance_name}")
+        
+        if target_instance_name not in ['primary', 'replica']:
+            logger.error(f"❌ Invalid target instance: {target_instance_name}")
+            return False
+        
+        source_instance_name = 'replica' if target_instance_name == 'primary' else 'primary'
+        source_instance = self.get_primary_instance() if source_instance_name == 'primary' else self.get_replica_instance()
+        target_instance = self.get_replica_instance() if target_instance_name == 'replica' else self.get_primary_instance()
+        
+        if not source_instance or not target_instance:
+            logger.error(f"❌ COLLECTION RECOVERY: Cannot get instances (source: {source_instance_name}, target: {target_instance_name})")
+            return False
+        
+        if not source_instance.is_healthy or not target_instance.is_healthy:
+            logger.error(f"❌ COLLECTION RECOVERY: Instance health issue (source: {source_instance.is_healthy}, target: {target_instance.is_healthy})")
+            return False
+        
         try:
-            missing_collections = []
-            
             with self.get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    if target_instance_name == "replica":
-                        # Collections missing on replica (created during replica failure)
-                        cur.execute("""
-                            SELECT collection_name, primary_collection_id
-                            FROM collection_id_mapping 
-                            WHERE primary_collection_id IS NOT NULL 
-                            AND replica_collection_id IS NULL
-                            ORDER BY created_at ASC
-                        """)
-                    else:  # primary
-                        # Collections missing on primary (created during primary failure)
-                        cur.execute("""
-                            SELECT collection_name, replica_collection_id
-                            FROM collection_id_mapping 
-                            WHERE replica_collection_id IS NOT NULL 
-                            AND primary_collection_id IS NULL
-                            ORDER BY created_at ASC
-                        """)
-                    
-                    results = cur.fetchall()
-                    for row in results:
-                        collection_name, source_uuid = row
-                        
-                        # ENHANCED: Log pending DELETE operations but don't block collection recovery
-                        # Collection recovery should happen first, then WAL sync will process DELETEs
-                        cur.execute("""
-                            SELECT COUNT(*) FROM unified_wal_writes 
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    # 🔧 CRITICAL FIX: Find incomplete mappings but exclude recently deleted collections
+                    # Check for collections that have been intentionally deleted in recent WAL operations
+                    cur.execute("""
+                        SELECT collection_name, primary_collection_id, replica_collection_id, status
+                        FROM collection_id_mapping 
+                        WHERE (
+                            (%s = 'primary' AND primary_collection_id IS NULL AND replica_collection_id IS NOT NULL) OR
+                            (%s = 'replica' AND replica_collection_id IS NULL AND primary_collection_id IS NOT NULL)
+                        )
+                        AND collection_name NOT IN (
+                            -- Exclude collections that have recent DELETE operations in WAL
+                            SELECT DISTINCT collection_id
+                            FROM unified_wal_writes 
                             WHERE method = 'DELETE' 
-                            AND path LIKE %s 
+                            AND path LIKE '%%/collections/%%'
+                            AND collection_id IS NOT NULL
+                            AND created_at > NOW() - INTERVAL '5 minutes'
                             AND (
-                                -- Pending or failed DELETEs
-                                status IN ('failed', 'pending')
-                                OR 
-                                -- Incomplete "both" target DELETEs (executed but not synced to target instance)
-                                (
-                                    status = 'executed' 
-                                    AND target_instance = 'both'
-                                    AND (
-                                        synced_instances IS NULL 
-                                        OR synced_instances::text NOT LIKE %s
-                                    )
-                                )
+                                status = 'executed' 
+                                OR status = 'synced'
+                                OR (status = 'pending' AND retry_count < 3)
                             )
-                        """, (f'%/collections/{collection_name}%', f'%{target_instance_name}%'))
+                        )
+                    """, (target_instance_name, target_instance_name))
+                    
+                    incomplete_mappings = cur.fetchall()
+                    
+                    if not incomplete_mappings:
+                        logger.info(f"✅ COLLECTION RECOVERY: No collections need recovery on {target_instance_name}")
+                        return True
+                    
+                    # 🔧 ENHANCED LOGGING: Show what collections are being filtered out
+                    cur.execute("""
+                        SELECT DISTINCT collection_id, method, status, created_at
+                        FROM unified_wal_writes 
+                        WHERE method = 'DELETE' 
+                        AND path LIKE '%%/collections/%%'
+                        AND collection_id IS NOT NULL
+                        AND created_at > NOW() - INTERVAL '5 minutes'
+                        AND (
+                            status = 'executed' 
+                            OR status = 'synced'
+                            OR (status = 'pending' AND retry_count < 3)
+                        )
+                        ORDER BY created_at DESC
+                    """)
+                    
+                    recent_deletes = cur.fetchall()
+                    if recent_deletes:
+                        logger.info(f"🔍 COLLECTION RECOVERY: Excluding {len(recent_deletes)} recently deleted collections:")
+                        for delete_op in recent_deletes:
+                            logger.info(f"   - {delete_op['collection_id']} (DELETE {delete_op['status']} at {delete_op['created_at']})")
+                    
+                    logger.info(f"🔧 COLLECTION RECOVERY: Found {len(incomplete_mappings)} collections missing on {target_instance_name}")
+                    
+                    recovered_count = 0
+                    for mapping_row in incomplete_mappings:
+                        collection_name = mapping_row['collection_name']
+                        source_uuid = mapping_row['primary_collection_id'] if target_instance_name == 'replica' else mapping_row['replica_collection_id']
                         
-                        pending_deletes = cur.fetchone()[0]
+                        if not source_uuid:
+                            logger.warning(f"⚠️ COLLECTION RECOVERY: Cannot recover '{collection_name}' - no source UUID")
+                            continue
                         
-                        if pending_deletes > 0:
-                            logger.info(f"📋 COLLECTION RECOVERY: '{collection_name}' has {pending_deletes} pending DELETE operations")
-                            logger.info(f"   Will recreate collection first, then WAL sync will process DELETE operations")
+                        logger.info(f"🔧 COLLECTION RECOVERY: Recreating '{collection_name}' on {target_instance_name}")
+                        
+                        try:
+                            # Get collection metadata from source instance
+                            source_response = self.make_direct_request(
+                                source_instance,
+                                "GET",
+                                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{source_uuid}"
+                            )
                             
-                            # Log the specific DELETE operations for tracking
-                            cur.execute("""
-                                SELECT write_id, target_instance, status, synced_instances 
-                                FROM unified_wal_writes 
-                                WHERE method = 'DELETE' 
-                                AND path LIKE %s 
-                                AND (
-                                    status IN ('failed', 'pending')
-                                    OR 
-                                    (
-                                        status = 'executed' 
-                                        AND target_instance = 'both'
-                                        AND (
-                                            synced_instances IS NULL 
-                                            OR synced_instances::text NOT LIKE %s
-                                        )
-                                    )
-                                )
-                                ORDER BY created_at DESC
-                            """, (f'%/collections/{collection_name}%', f'%{target_instance_name}%'))
+                            if source_response.status_code != 200:
+                                logger.error(f"❌ COLLECTION RECOVERY: Error getting '{collection_name}' from source: HTTP {source_response.status_code}")
+                                continue
                             
-                            pending_operations = cur.fetchall()
-                            for op in pending_operations:
-                                write_id, target, status, synced = op
-                                logger.info(f"   Pending DELETE: {write_id[:8]} target={target} status={status} synced={synced}")
-                        
-                        # Continue with collection recovery regardless of pending DELETEs
-                        
-                        missing_collections.append({
-                            'name': collection_name,
-                            'source_uuid': source_uuid
-                        })
-            
-            if not missing_collections:
-                logger.info(f"✅ COLLECTION RECOVERY: No missing collections on {target_instance_name}")
-                return True
-            
-            logger.info(f"🔧 COLLECTION RECOVERY: Found {len(missing_collections)} collections missing on {target_instance_name}")
-            
-            # Get target instance
-            target_instance = next((inst for inst in self.instances if inst.name == target_instance_name), None)
-            if not target_instance:
-                logger.error(f"❌ COLLECTION RECOVERY: Cannot find {target_instance_name} instance")
-                return False
-            
-            if not target_instance.is_healthy:
-                logger.warning(f"⚠️ COLLECTION RECOVERY: {target_instance_name} is not healthy, skipping recovery")
-                return False
-            
-            # Get source instance for metadata copying
-            source_instance_name = "primary" if target_instance_name == "replica" else "replica"
-            source_instance = next((inst for inst in self.instances if inst.name == source_instance_name), None)
-            
-            success_count = 0
-            for collection_info in missing_collections:
-                collection_name = collection_info['name']
-                source_uuid = collection_info['source_uuid']
-                
-                try:
-                    logger.info(f"🔧 COLLECTION RECOVERY: Recreating '{collection_name}' on {target_instance_name}")
-                    
-                    # Get collection metadata from source instance
-                    source_response = self.make_direct_request(
-                        source_instance,
-                        "GET",
-                        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{source_uuid}"
-                    )
-                    
-                    if source_response.status_code != 200:
-                        logger.error(f"❌ COLLECTION RECOVERY: Cannot get metadata for '{collection_name}' from {source_instance_name} (HTTP {source_response.status_code})")
-                        continue
-                    
-                    source_collection = source_response.json()
-                    
-                    # Create collection on target instance with same metadata
-                    create_payload = {
-                        'name': collection_name,
-                        'metadata': source_collection.get('metadata', {}),
-                        'get_or_create': True  # Prevent conflicts if collection already exists
-                    }
-                    
-                    target_response = self.make_direct_request(
-                        target_instance,
-                        "POST",
-                        "/api/v2/tenants/default_tenant/databases/default_database/collections",
-                        data=json.dumps(create_payload).encode(),
-                        headers={'Content-Type': 'application/json'}
-                    )
-                    
-                    if target_response.status_code in [200, 201]:
-                        target_collection = target_response.json()
-                        target_uuid = target_collection.get('id')
-                        
-                        logger.info(f"✅ COLLECTION RECOVERY: Created '{collection_name}' on {target_instance_name} (UUID: {target_uuid[:8]}...)")
-                        
-                        # Update mapping with new target UUID
-                        with self.get_db_connection() as conn:
-                            with conn.cursor() as cur:
-                                if target_instance_name == "replica":
-                                    cur.execute("""
-                                        UPDATE collection_id_mapping 
-                                        SET replica_collection_id = %s, updated_at = NOW()
-                                        WHERE collection_name = %s
-                                    """, (target_uuid, collection_name))
-                                else:  # primary
-                                    cur.execute("""
-                                        UPDATE collection_id_mapping 
-                                        SET primary_collection_id = %s, updated_at = NOW()
-                                        WHERE collection_name = %s
-                                    """, (target_uuid, collection_name))
+                            source_collection = source_response.json()
+                            
+                            # Create collection on target instance
+                            create_payload = {
+                                "name": collection_name,
+                                "metadata": source_collection.get("metadata", {}),
+                                "get_or_create": True
+                            }
+                            
+                            target_response = self.make_direct_request(
+                                target_instance,
+                                "POST",
+                                "/api/v2/tenants/default_tenant/databases/default_database/collections",
+                                json=create_payload
+                            )
+                            
+                            if target_response.status_code in [200, 201, 409]:
+                                target_collection = target_response.json()
+                                target_uuid = target_collection.get("id")
                                 
-                                conn.commit()
-                                logger.info(f"✅ COLLECTION RECOVERY: Updated mapping for '{collection_name}' with {target_instance_name} UUID")
-                        
-                        success_count += 1
-                    else:
-                        logger.error(f"❌ COLLECTION RECOVERY: Failed to create '{collection_name}' on {target_instance_name} (HTTP {target_response.status_code})")
-                        logger.error(f"   Response: {target_response.text[:200]}")
-                        
-                except Exception as recovery_error:
-                    logger.error(f"❌ COLLECTION RECOVERY: Error recreating '{collection_name}': {recovery_error}")
-                    continue
-            
-            logger.info(f"✅ COLLECTION RECOVERY: Successfully recovered {success_count}/{len(missing_collections)} collections on {target_instance_name}")
-            return success_count == len(missing_collections)
-            
+                                if target_uuid:
+                                    # Update mapping with new UUID
+                                    if target_instance_name == 'primary':
+                                        cur.execute("""
+                                            UPDATE collection_id_mapping 
+                                            SET primary_collection_id = %s, status = 'complete', updated_at = NOW()
+                                            WHERE collection_name = %s
+                                        """, (target_uuid, collection_name))
+                                    else:  # replica
+                                        cur.execute("""
+                                            UPDATE collection_id_mapping 
+                                            SET replica_collection_id = %s, status = 'complete', updated_at = NOW()
+                                            WHERE collection_name = %s
+                                        """, (target_uuid, collection_name))
+                                    
+                                    conn.commit()
+                                    logger.info(f"✅ COLLECTION RECOVERY: '{collection_name}' recreated on {target_instance_name} with UUID {target_uuid[:8]}")
+                                    recovered_count += 1
+                                else:
+                                    logger.error(f"❌ COLLECTION RECOVERY: No UUID in response for '{collection_name}'")
+                            else:
+                                logger.error(f"❌ COLLECTION RECOVERY: Failed to create '{collection_name}' on {target_instance_name}: HTTP {target_response.status_code}")
+                                
+                        except Exception as recovery_error:
+                            logger.error(f"❌ COLLECTION RECOVERY: Error recreating '{collection_name}': {recovery_error}")
+                            continue
+                    
+                    logger.info(f"✅ COLLECTION RECOVERY: Successfully recovered {recovered_count}/{len(incomplete_mappings)} collections on {target_instance_name}")
+                    return recovered_count == len(incomplete_mappings)
+                    
         except Exception as e:
             logger.error(f"❌ COLLECTION RECOVERY: Failed for {target_instance_name}: {e}")
             return False
