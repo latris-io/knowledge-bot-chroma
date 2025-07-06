@@ -1887,11 +1887,12 @@ class UnifiedWALLoadBalancer:
                         
                         if instance.is_healthy and not was_healthy:
                             logger.info(f"✅ {instance.name} recovered")
-                            # CRITICAL: Trigger collection recovery for collections created during failure
+                            # CRITICAL: Trigger collection recovery AFTER WAL sync completes to prevent race conditions
+                            # This prevents collection recovery from recreating collections that have pending DELETE operations
                             threading.Thread(
-                                target=lambda: self.sync_missing_collections_to_instance(instance.name),
+                                target=lambda: self.coordinated_recovery_sequence(instance.name),
                                 daemon=True,
-                                name=f"CollectionRecovery-{instance.name}"
+                                name=f"CoordinatedRecovery-{instance.name}"
                             ).start()
                         elif not instance.is_healthy and was_healthy:
                             logger.warning(f"❌ {instance.name} went down")
@@ -1907,6 +1908,46 @@ class UnifiedWALLoadBalancer:
             except Exception as e:
                 logger.error(f"Health monitoring error: {e}")
                 time.sleep(60)
+
+    def coordinated_recovery_sequence(self, target_instance_name: str):
+        """
+        🔧 CRITICAL FIX: Coordinated recovery that prevents race conditions between collection recovery and WAL sync
+        """
+        try:
+            logger.info(f"🔧 COORDINATED RECOVERY: Starting for {target_instance_name}")
+            
+            # STEP 1: Wait for WAL sync to process any pending operations
+            max_wait_seconds = 60  # Max wait time for WAL sync
+            wait_interval = 5  # Check every 5 seconds
+            
+            for attempt in range(max_wait_seconds // wait_interval):
+                pending_writes = self.get_pending_writes_count()
+                if pending_writes == 0:
+                    logger.info(f"✅ COORDINATED RECOVERY: WAL sync complete (0 pending writes)")
+                    break
+                else:
+                    logger.info(f"⏳ COORDINATED RECOVERY: Waiting for WAL sync completion ({pending_writes} pending writes)")
+                    time.sleep(wait_interval)
+            else:
+                logger.warning(f"⚠️ COORDINATED RECOVERY: Proceeding despite pending WAL operations (timeout after {max_wait_seconds}s)")
+            
+            # STEP 2: Wait additional buffer time for any final DELETE operations to complete
+            logger.info(f"⏳ COORDINATED RECOVERY: Waiting 10s buffer for final operations...")
+            time.sleep(10)
+            
+            # STEP 3: Now safe to run collection recovery
+            logger.info(f"🔧 COORDINATED RECOVERY: Starting collection recovery for {target_instance_name}")
+            success = self.sync_missing_collections_to_instance(target_instance_name)
+            
+            if success:
+                logger.info(f"✅ COORDINATED RECOVERY: Completed successfully for {target_instance_name}")
+            else:
+                logger.error(f"❌ COORDINATED RECOVERY: Failed for {target_instance_name}")
+            
+        except Exception as e:
+            logger.error(f"❌ COORDINATED RECOVERY: Error for {target_instance_name}: {e}")
+            import traceback
+            logger.error(f"Recovery traceback: {traceback.format_exc()}")
 
     def get_status(self, realtime_health: bool = False) -> Dict[str, Any]:
         """🎯 Enhanced status with high-volume monitoring, real-time health, and advanced metrics"""
