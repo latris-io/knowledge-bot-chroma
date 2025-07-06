@@ -1317,14 +1317,14 @@ class UnifiedWALLoadBalancer:
                                         
                                         # Check if the collection name exists
                                         cur.execute("""
-                                            SELECT collection_name, primary_collection_id, replica_collection_id, status
+                                            SELECT collection_name, primary_collection_id, replica_collection_id
                                             FROM collection_id_mapping 
                                             WHERE primary_collection_id = %s OR replica_collection_id = %s
                                         """, (collection_id, collection_id))
                                         result = cur.fetchone()
                                         if result:
-                                            name, p_id, r_id, status = result
-                                            logger.error(f"   🔍 DEBUG: Found mapping: {name} -> P:{p_id[:8] if p_id else 'None'}, R:{r_id[:8] if r_id else 'None'}, Status:{status}")
+                                            name, p_id, r_id = result
+                                            logger.error(f"   🔍 DEBUG: Found mapping: {name} -> P:{p_id[:8] if p_id else 'None'}, R:{r_id[:8] if r_id else 'None'}")
                                         else:
                                             logger.error(f"   🔍 DEBUG: No mapping row found for UUID {collection_id[:8]}")
                                             
@@ -2861,7 +2861,7 @@ class UnifiedWALLoadBalancer:
                     # 🔧 CRITICAL FIX: Find incomplete mappings but exclude recently deleted collections
                     # Check for collections that have been intentionally deleted in recent WAL operations
                     cur.execute("""
-                        SELECT collection_name, primary_collection_id, replica_collection_id, status
+                        SELECT collection_name, primary_collection_id, replica_collection_id
                         FROM collection_id_mapping 
                         WHERE (
                             (%s = 'primary' AND primary_collection_id IS NULL AND replica_collection_id IS NOT NULL) OR
@@ -2961,13 +2961,13 @@ class UnifiedWALLoadBalancer:
                                     if target_instance_name == 'primary':
                                         cur.execute("""
                                             UPDATE collection_id_mapping 
-                                            SET primary_collection_id = %s, status = 'complete', updated_at = NOW()
+                                            SET primary_collection_id = %s, updated_at = NOW()
                                             WHERE collection_name = %s
                                         """, (target_uuid, collection_name))
                                     else:  # replica
                                         cur.execute("""
                                             UPDATE collection_id_mapping 
-                                            SET replica_collection_id = %s, status = 'complete', updated_at = NOW()
+                                            SET replica_collection_id = %s, updated_at = NOW()
                                             WHERE collection_name = %s
                                         """, (target_uuid, collection_name))
                                     
