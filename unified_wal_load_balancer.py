@@ -2741,17 +2741,14 @@ class UnifiedWALLoadBalancer:
             import traceback
             logger.error(f"Full traceback: {traceback.format_exc()}")
 
-    def sync_missing_collections_to_instance(self, target_instance_name: str):
+    def sync_missing_collections_to_instance(self, target_instance_name: str) -> bool:
         """
-        🔧 CRITICAL RECOVERY: Sync collections that were created during instance failure
-        This handles the case where collections were created on primary during replica failure
-        and need to be synced to replica when it recovers (or vice versa)
+        🔧 ENHANCED: Sync collections that were created on one instance during the other's failure
+        CRITICAL FIX: Skip collections with pending DELETE operations to prevent timing conflicts
         """
         try:
-            logger.info(f"🔍 COLLECTION RECOVERY: Checking for collections missing on {target_instance_name}")
-            
-            # Get all partial mappings (missing target instance UUID)
             missing_collections = []
+            
             with self.get_db_connection() as conn:
                 with conn.cursor() as cur:
                     if target_instance_name == "replica":
@@ -2776,6 +2773,23 @@ class UnifiedWALLoadBalancer:
                     results = cur.fetchall()
                     for row in results:
                         collection_name, source_uuid = row
+                        
+                        # CRITICAL FIX: Check for pending DELETE operations before recreating collection
+                        cur.execute("""
+                            SELECT COUNT(*) FROM unified_wal_writes 
+                            WHERE method = 'DELETE' 
+                            AND path LIKE %s 
+                            AND status IN ('executed', 'failed', 'pending')
+                            AND (target_instance = 'both' OR target_instance = %s)
+                        """, (f'%/collections/{collection_name}%', target_instance_name))
+                        
+                        pending_deletes = cur.fetchone()[0]
+                        
+                        if pending_deletes > 0:
+                            logger.warning(f"⚠️ COLLECTION RECOVERY: Skipping '{collection_name}' - has {pending_deletes} pending DELETE operations")
+                            logger.warning(f"   DELETE sync must complete before collection recreation")
+                            continue
+                        
                         missing_collections.append({
                             'name': collection_name,
                             'source_uuid': source_uuid
@@ -2789,27 +2803,27 @@ class UnifiedWALLoadBalancer:
             
             # Get target instance
             target_instance = next((inst for inst in self.instances if inst.name == target_instance_name), None)
-            if not target_instance or not target_instance.is_healthy:
-                logger.warning(f"⚠️ COLLECTION RECOVERY: {target_instance_name} not healthy - skipping recovery")
+            if not target_instance:
+                logger.error(f"❌ COLLECTION RECOVERY: Cannot find {target_instance_name} instance")
                 return False
             
-            # Get source instance
+            if not target_instance.is_healthy:
+                logger.warning(f"⚠️ COLLECTION RECOVERY: {target_instance_name} is not healthy, skipping recovery")
+                return False
+            
+            # Get source instance for metadata copying
             source_instance_name = "primary" if target_instance_name == "replica" else "replica"
             source_instance = next((inst for inst in self.instances if inst.name == source_instance_name), None)
-            if not source_instance or not source_instance.is_healthy:
-                logger.warning(f"⚠️ COLLECTION RECOVERY: {source_instance_name} not healthy - cannot recover collections")
-                return False
             
-            recovery_success = True
-            
+            success_count = 0
             for collection_info in missing_collections:
                 collection_name = collection_info['name']
                 source_uuid = collection_info['source_uuid']
                 
                 try:
-                    logger.info(f"🔧 COLLECTION RECOVERY: Syncing '{collection_name}' to {target_instance_name}")
+                    logger.info(f"🔧 COLLECTION RECOVERY: Recreating '{collection_name}' on {target_instance_name}")
                     
-                    # Get collection details from source instance
+                    # Get collection metadata from source instance
                     source_response = self.make_direct_request(
                         source_instance,
                         "GET",
@@ -2817,24 +2831,17 @@ class UnifiedWALLoadBalancer:
                     )
                     
                     if source_response.status_code != 200:
-                        logger.error(f"❌ COLLECTION RECOVERY: Cannot get collection '{collection_name}' from {source_instance_name} (HTTP {source_response.status_code})")
-                        recovery_success = False
+                        logger.error(f"❌ COLLECTION RECOVERY: Cannot get metadata for '{collection_name}' from {source_instance_name} (HTTP {source_response.status_code})")
                         continue
                     
                     source_collection = source_response.json()
                     
                     # Create collection on target instance with same metadata
                     create_payload = {
-                        "name": collection_name
+                        'name': collection_name,
+                        'metadata': source_collection.get('metadata', {}),
+                        'get_or_create': True  # Prevent conflicts if collection already exists
                     }
-                    
-                    # Preserve metadata if available
-                    if source_collection.get('metadata'):
-                        create_payload['metadata'] = source_collection['metadata']
-                    
-                    # Preserve configuration if available  
-                    if source_collection.get('configuration_json'):
-                        create_payload['configuration'] = source_collection['configuration_json']
                     
                     target_response = self.make_direct_request(
                         target_instance,
@@ -2868,21 +2875,18 @@ class UnifiedWALLoadBalancer:
                                 
                                 conn.commit()
                                 logger.info(f"✅ COLLECTION RECOVERY: Updated mapping for '{collection_name}' with {target_instance_name} UUID")
+                        
+                        success_count += 1
                     else:
                         logger.error(f"❌ COLLECTION RECOVERY: Failed to create '{collection_name}' on {target_instance_name} (HTTP {target_response.status_code})")
                         logger.error(f"   Response: {target_response.text[:200]}")
-                        recovery_success = False
                         
-                except Exception as e:
-                    logger.error(f"❌ COLLECTION RECOVERY: Error syncing '{collection_name}' to {target_instance_name}: {e}")
-                    recovery_success = False
+                except Exception as recovery_error:
+                    logger.error(f"❌ COLLECTION RECOVERY: Error recreating '{collection_name}': {recovery_error}")
+                    continue
             
-            if recovery_success:
-                logger.info(f"🎉 COLLECTION RECOVERY: Successfully synced all missing collections to {target_instance_name}")
-            else:
-                logger.warning(f"⚠️ COLLECTION RECOVERY: Some collections failed to sync to {target_instance_name}")
-            
-            return recovery_success
+            logger.info(f"✅ COLLECTION RECOVERY: Successfully recovered {success_count}/{len(missing_collections)} collections on {target_instance_name}")
+            return success_count == len(missing_collections)
             
         except Exception as e:
             logger.error(f"❌ COLLECTION RECOVERY: Failed for {target_instance_name}: {e}")
@@ -3862,6 +3866,215 @@ if __name__ == '__main__':
                 
         except Exception as e:
             import traceback
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+
+    @app.route('/admin/force_delete_sync', methods=['POST'])
+    def force_delete_sync():
+        """🔧 CRITICAL FIX: Force completion of incomplete DELETE sync operations"""
+        try:
+            if enhanced_wal is None:
+                return jsonify({"error": "WAL system not ready"}), 503
+            
+            data = request.get_json() or {}
+            collection_name = data.get('collection_name')  # Optional: specific collection
+            
+            with enhanced_wal.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Find incomplete DELETE operations
+                    if collection_name:
+                        cur.execute("""
+                            SELECT write_id, path, collection_id, target_instance, synced_instances, error_message
+                            FROM unified_wal_writes 
+                            WHERE method = 'DELETE' 
+                            AND status = 'executed'
+                            AND path LIKE %s
+                            AND (synced_instances IS NULL OR synced_instances::text NOT LIKE '%replica%' OR synced_instances::text NOT LIKE '%primary%')
+                        """, (f'%{collection_name}%',))
+                    else:
+                        cur.execute("""
+                            SELECT write_id, path, collection_id, target_instance, synced_instances, error_message
+                            FROM unified_wal_writes 
+                            WHERE method = 'DELETE' 
+                            AND status = 'executed'
+                            AND (synced_instances IS NULL OR synced_instances::text NOT LIKE '%replica%' OR synced_instances::text NOT LIKE '%primary%')
+                            ORDER BY created_at DESC
+                            LIMIT 10
+                        """)
+                    
+                    incomplete_deletes = cur.fetchall()
+                    
+                    if not incomplete_deletes:
+                        return jsonify({
+                            "success": True,
+                            "message": "No incomplete DELETE operations found",
+                            "incomplete_deletes": 0
+                        })
+                    
+                    results = []
+                    for row in incomplete_deletes:
+                        write_id, path, collection_id, target_instance, synced_instances, error_message = row
+                        
+                        # Extract collection name from path
+                        if '/collections/' in path:
+                            path_collection_name = path.split('/collections/')[-1].split('/')[0]
+                        else:
+                            path_collection_name = collection_id or "unknown"
+                        
+                        # Check if collection still exists on either instance
+                        primary_exists = False
+                        replica_exists = False
+                        
+                        try:
+                            primary_instance = enhanced_wal.get_primary_instance()
+                            if primary_instance and primary_instance.is_healthy:
+                                primary_response = enhanced_wal.make_direct_request(
+                                    primary_instance,
+                                    "GET",
+                                    "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                )
+                                if primary_response.status_code == 200:
+                                    primary_collections = primary_response.json()
+                                    primary_exists = any(c.get('name') == path_collection_name for c in primary_collections)
+                            
+                            replica_instance = enhanced_wal.get_replica_instance()
+                            if replica_instance and replica_instance.is_healthy:
+                                replica_response = enhanced_wal.make_direct_request(
+                                    replica_instance,
+                                    "GET",
+                                    "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                )
+                                if replica_response.status_code == 200:
+                                    replica_collections = replica_response.json()
+                                    replica_exists = any(c.get('name') == path_collection_name for c in replica_collections)
+                        
+                        except Exception as check_error:
+                            results.append({
+                                "write_id": write_id[:8],
+                                "collection_name": path_collection_name,
+                                "action": "error",
+                                "error": f"Cannot check collection existence: {check_error}"
+                            })
+                            continue
+                        
+                        # Determine action based on collection existence
+                        if not primary_exists and not replica_exists:
+                            # Both deleted - mark as fully synced
+                            cur.execute("""
+                                UPDATE unified_wal_writes 
+                                SET status = 'synced', synced_instances = '["primary", "replica"]', synced_at = NOW(), updated_at = NOW()
+                                WHERE write_id = %s
+                            """, (write_id,))
+                            conn.commit()
+                            
+                            results.append({
+                                "write_id": write_id[:8],
+                                "collection_name": path_collection_name,
+                                "action": "marked_synced",
+                                "reason": "Collection deleted from both instances"
+                            })
+                        
+                        elif primary_exists and not replica_exists:
+                            # Need to sync to primary (delete from primary)
+                            try:
+                                delete_response = enhanced_wal.make_direct_request(
+                                    primary_instance,
+                                    "DELETE",
+                                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{path_collection_name}"
+                                )
+                                
+                                if delete_response.status_code in [200, 204, 404]:
+                                    enhanced_wal.mark_instance_synced(write_id, 'primary')
+                                    results.append({
+                                        "write_id": write_id[:8],
+                                        "collection_name": path_collection_name,
+                                        "action": "deleted_from_primary",
+                                        "status": delete_response.status_code
+                                    })
+                                else:
+                                    results.append({
+                                        "write_id": write_id[:8],
+                                        "collection_name": path_collection_name,
+                                        "action": "delete_failed",
+                                        "error": f"Primary DELETE failed: HTTP {delete_response.status_code}"
+                                    })
+                            except Exception as delete_error:
+                                results.append({
+                                    "write_id": write_id[:8],
+                                    "collection_name": path_collection_name,
+                                    "action": "delete_error",
+                                    "error": str(delete_error)
+                                })
+                        
+                        elif not primary_exists and replica_exists:
+                            # Need to sync to replica (delete from replica)
+                            try:
+                                delete_response = enhanced_wal.make_direct_request(
+                                    replica_instance,
+                                    "DELETE",
+                                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{path_collection_name}"
+                                )
+                                
+                                if delete_response.status_code in [200, 204, 404]:
+                                    enhanced_wal.mark_instance_synced(write_id, 'replica')
+                                    results.append({
+                                        "write_id": write_id[:8],
+                                        "collection_name": path_collection_name,
+                                        "action": "deleted_from_replica",
+                                        "status": delete_response.status_code
+                                    })
+                                else:
+                                    results.append({
+                                        "write_id": write_id[:8],
+                                        "collection_name": path_collection_name,
+                                        "action": "delete_failed",
+                                        "error": f"Replica DELETE failed: HTTP {delete_response.status_code}"
+                                    })
+                            except Exception as delete_error:
+                                results.append({
+                                    "write_id": write_id[:8],
+                                    "collection_name": path_collection_name,
+                                    "action": "delete_error",
+                                    "error": str(delete_error)
+                                })
+                        
+                        else:
+                            # Both exist - DELETE failed entirely, try to complete
+                            for instance_name, instance in [("primary", primary_instance), ("replica", replica_instance)]:
+                                if instance and instance.is_healthy:
+                                    try:
+                                        delete_response = enhanced_wal.make_direct_request(
+                                            instance,
+                                            "DELETE",
+                                            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{path_collection_name}"
+                                        )
+                                        
+                                        if delete_response.status_code in [200, 204, 404]:
+                                            enhanced_wal.mark_instance_synced(write_id, instance_name)
+                                            results.append({
+                                                "write_id": write_id[:8],
+                                                "collection_name": path_collection_name,
+                                                "action": f"deleted_from_{instance_name}",
+                                                "status": delete_response.status_code
+                                            })
+                                    except Exception as delete_error:
+                                        results.append({
+                                            "write_id": write_id[:8],
+                                            "collection_name": path_collection_name,
+                                            "action": f"delete_error_{instance_name}",
+                                            "error": str(delete_error)
+                                        })
+                    
+                    return jsonify({
+                        "success": True,
+                        "incomplete_deletes_found": len(incomplete_deletes),
+                        "results": results
+                    })
+                    
+        except Exception as e:
             return jsonify({
                 "success": False,
                 "error": str(e),
