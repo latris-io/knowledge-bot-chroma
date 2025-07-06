@@ -925,9 +925,9 @@ class UnifiedWALLoadBalancer:
                             logger.info(f"   {op['write_id'][:8]} {op['method']} synced={synced_instances} has_replica={has_replica} should_sync={should_sync}")
                     
                     # 🔧 CRITICAL FIX: Use correct PostgreSQL JSON array element checking
-                    # synced_instances is a JSONB array like ["primary"] or ["primary", "replica"]
+                    # synced_instances is a JSON array like ["primary"] or ["primary", "replica"]
                     # We need to check if the target_instance string exists as an element in this array
-                    # Use @> operator to check if array contains the target instance as a JSON element
+                    # Use ? operator to check if array contains the target instance as a text element
                     cur.execute("""
                         SELECT write_id, method, path, data, headers, collection_id, 
                                timestamp, retry_count, data_size_bytes, priority, target_instance, synced_instances
@@ -937,18 +937,13 @@ class UnifiedWALLoadBalancer:
                             (target_instance = %s AND executed_on != %s) OR
                             (target_instance = 'both' AND (
                                 synced_instances IS NULL OR 
-                                synced_instances = '[]'::jsonb OR
-                                NOT (synced_instances @> %s::jsonb)
+                                NOT (synced_instances ? %s)
                             ))
                         )
                         AND retry_count < 3
-                        AND (
-                            status = 'executed' OR 
-                            (status = 'failed' AND updated_at < NOW() - INTERVAL '1 minute' * POWER(2, retry_count))
-                        )
-                        ORDER BY timestamp ASC, retry_count ASC, priority DESC
+                        ORDER BY priority DESC, created_at ASC 
                         LIMIT %s
-                    """, (target_instance, target_instance, f'["{target_instance}"]', batch_size * 3))
+                    """, (target_instance, target_instance, target_instance, batch_size * 3))
                     
                     records = cur.fetchall()
                     
@@ -971,7 +966,9 @@ class UnifiedWALLoadBalancer:
                             logger.warning(f"⚠️ DEBUG: No 'both' target operations found for replica sync despite having {len(records)} total operations")
                             if records:
                                 operations_summary = [f"{r['method']} target={r.get('target_instance')}" for r in records[:3]]
-                            logger.warning(f"   Operations found: {operations_summary}")
+                                logger.warning(f"   Operations found: {operations_summary}")
+                            else:
+                                logger.warning(f"   No operations found in records")
                             
                             # Additional debugging - check if the JSON query is working correctly
                             logger.warning(f"🔍 ADDITIONAL DEBUG: Testing JSON query logic...")
