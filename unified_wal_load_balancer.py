@@ -1423,8 +1423,16 @@ class UnifiedWALLoadBalancer:
                             logger.error(f"❌ Collection mapping cleanup failed: {mapping_cleanup_error}")
                             # Don't fail the sync operation for mapping cleanup errors
                     
-                    # Mark as synced regardless of mapping cleanup result
-                    # target_instance_type already defined at the beginning of the loop
+                    # CRITICAL FIX: Use proper sync completion logic for "both" target operations
+                    if target_instance_type == 'both':
+                        # For "both" operations, use instance-specific sync tracking
+                        self.mark_instance_synced(write_id, instance.name)
+                        logger.info(f"🔄 BOTH TARGET: {write_id[:8]} {method} completed on {instance.name} - using instance-specific sync tracking")
+                    else:
+                        # For single target operations, mark as fully synced
+                        self.mark_write_synced(write_id)
+                        logger.info(f"✅ SINGLE TARGET: {write_id[:8]} {method} completed on {instance.name} - marked as fully synced")
+                    
                     success_count += 1
                     
                 except Exception as e:
@@ -1857,6 +1865,12 @@ class UnifiedWALLoadBalancer:
                         
                         if instance.is_healthy and not was_healthy:
                             logger.info(f"✅ {instance.name} recovered")
+                            # CRITICAL: Trigger collection recovery for collections created during failure
+                            threading.Thread(
+                                target=lambda: self.sync_missing_collections_to_instance(instance.name),
+                                daemon=True,
+                                name=f"CollectionRecovery-{instance.name}"
+                            ).start()
                         elif not instance.is_healthy and was_healthy:
                             logger.warning(f"❌ {instance.name} went down")
                         
@@ -2705,6 +2719,153 @@ class UnifiedWALLoadBalancer:
             logger.error(f"Error marking write {write_id[:8]} as synced to {instance_name}: {e}")
             import traceback
             logger.error(f"Full traceback: {traceback.format_exc()}")
+
+    def sync_missing_collections_to_instance(self, target_instance_name: str):
+        """
+        🔧 CRITICAL RECOVERY: Sync collections that were created during instance failure
+        This handles the case where collections were created on primary during replica failure
+        and need to be synced to replica when it recovers (or vice versa)
+        """
+        try:
+            logger.info(f"🔍 COLLECTION RECOVERY: Checking for collections missing on {target_instance_name}")
+            
+            # Get all partial mappings (missing target instance UUID)
+            missing_collections = []
+            with self.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    if target_instance_name == "replica":
+                        # Collections missing on replica (created during replica failure)
+                        cur.execute("""
+                            SELECT collection_name, primary_collection_id
+                            FROM collection_id_mapping 
+                            WHERE primary_collection_id IS NOT NULL 
+                            AND replica_collection_id IS NULL
+                            ORDER BY created_at ASC
+                        """)
+                    else:  # primary
+                        # Collections missing on primary (created during primary failure)
+                        cur.execute("""
+                            SELECT collection_name, replica_collection_id
+                            FROM collection_id_mapping 
+                            WHERE replica_collection_id IS NOT NULL 
+                            AND primary_collection_id IS NULL
+                            ORDER BY created_at ASC
+                        """)
+                    
+                    results = cur.fetchall()
+                    for row in results:
+                        collection_name, source_uuid = row
+                        missing_collections.append({
+                            'name': collection_name,
+                            'source_uuid': source_uuid
+                        })
+            
+            if not missing_collections:
+                logger.info(f"✅ COLLECTION RECOVERY: No missing collections on {target_instance_name}")
+                return True
+            
+            logger.info(f"🔧 COLLECTION RECOVERY: Found {len(missing_collections)} collections missing on {target_instance_name}")
+            
+            # Get target instance
+            target_instance = next((inst for inst in self.instances if inst.name == target_instance_name), None)
+            if not target_instance or not target_instance.is_healthy:
+                logger.warning(f"⚠️ COLLECTION RECOVERY: {target_instance_name} not healthy - skipping recovery")
+                return False
+            
+            # Get source instance
+            source_instance_name = "primary" if target_instance_name == "replica" else "replica"
+            source_instance = next((inst for inst in self.instances if inst.name == source_instance_name), None)
+            if not source_instance or not source_instance.is_healthy:
+                logger.warning(f"⚠️ COLLECTION RECOVERY: {source_instance_name} not healthy - cannot recover collections")
+                return False
+            
+            recovery_success = True
+            
+            for collection_info in missing_collections:
+                collection_name = collection_info['name']
+                source_uuid = collection_info['source_uuid']
+                
+                try:
+                    logger.info(f"🔧 COLLECTION RECOVERY: Syncing '{collection_name}' to {target_instance_name}")
+                    
+                    # Get collection details from source instance
+                    source_response = self.make_direct_request(
+                        source_instance,
+                        "GET",
+                        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{source_uuid}"
+                    )
+                    
+                    if source_response.status_code != 200:
+                        logger.error(f"❌ COLLECTION RECOVERY: Cannot get collection '{collection_name}' from {source_instance_name} (HTTP {source_response.status_code})")
+                        recovery_success = False
+                        continue
+                    
+                    source_collection = source_response.json()
+                    
+                    # Create collection on target instance with same metadata
+                    create_payload = {
+                        "name": collection_name
+                    }
+                    
+                    # Preserve metadata if available
+                    if source_collection.get('metadata'):
+                        create_payload['metadata'] = source_collection['metadata']
+                    
+                    # Preserve configuration if available  
+                    if source_collection.get('configuration_json'):
+                        create_payload['configuration'] = source_collection['configuration_json']
+                    
+                    target_response = self.make_direct_request(
+                        target_instance,
+                        "POST",
+                        "/api/v2/tenants/default_tenant/databases/default_database/collections",
+                        data=json.dumps(create_payload).encode(),
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    
+                    if target_response.status_code in [200, 201]:
+                        target_collection = target_response.json()
+                        target_uuid = target_collection.get('id')
+                        
+                        logger.info(f"✅ COLLECTION RECOVERY: Created '{collection_name}' on {target_instance_name} (UUID: {target_uuid[:8]}...)")
+                        
+                        # Update mapping with new target UUID
+                        with self.get_db_connection() as conn:
+                            with conn.cursor() as cur:
+                                if target_instance_name == "replica":
+                                    cur.execute("""
+                                        UPDATE collection_id_mapping 
+                                        SET replica_collection_id = %s, updated_at = NOW()
+                                        WHERE collection_name = %s
+                                    """, (target_uuid, collection_name))
+                                else:  # primary
+                                    cur.execute("""
+                                        UPDATE collection_id_mapping 
+                                        SET primary_collection_id = %s, updated_at = NOW()
+                                        WHERE collection_name = %s
+                                    """, (target_uuid, collection_name))
+                                
+                                conn.commit()
+                                logger.info(f"✅ COLLECTION RECOVERY: Updated mapping for '{collection_name}' with {target_instance_name} UUID")
+                    else:
+                        logger.error(f"❌ COLLECTION RECOVERY: Failed to create '{collection_name}' on {target_instance_name} (HTTP {target_response.status_code})")
+                        logger.error(f"   Response: {target_response.text[:200]}")
+                        recovery_success = False
+                        
+                except Exception as e:
+                    logger.error(f"❌ COLLECTION RECOVERY: Error syncing '{collection_name}' to {target_instance_name}: {e}")
+                    recovery_success = False
+            
+            if recovery_success:
+                logger.info(f"🎉 COLLECTION RECOVERY: Successfully synced all missing collections to {target_instance_name}")
+            else:
+                logger.warning(f"⚠️ COLLECTION RECOVERY: Some collections failed to sync to {target_instance_name}")
+            
+            return recovery_success
+            
+        except Exception as e:
+            logger.error(f"❌ COLLECTION RECOVERY: Failed for {target_instance_name}: {e}")
+            return False
 
 # 🚀 REQUEST CONCURRENCY CONTROLS - Handle high concurrent user load
 class ConcurrencyManager:
@@ -3652,6 +3813,39 @@ if __name__ == '__main__':
         except Exception as e:
             logger.error(f"❌ Reset stuck transactions failed: {e}")
             return jsonify({"error": str(e)}), 500
+
+    @app.route('/admin/sync_collections', methods=['POST'])
+    def sync_collections():
+        """Manually trigger collection recovery sync"""
+        try:
+            data = request.get_json() or {}
+            target_instance = data.get('target_instance')
+            
+            if not target_instance:
+                return jsonify({"error": "target_instance required (primary or replica)"}), 400
+                
+            if target_instance not in ['primary', 'replica']:
+                return jsonify({"error": "target_instance must be 'primary' or 'replica'"}), 400
+            
+            logger.info(f"🔧 MANUAL COLLECTION SYNC: Triggering sync to {target_instance}")
+            
+            if enhanced_wal:
+                success = enhanced_wal.sync_missing_collections_to_instance(target_instance)
+                return jsonify({
+                    "success": success,
+                    "message": f"Collection sync to {target_instance} {'completed' if success else 'failed'}",
+                    "target_instance": target_instance
+                }), 200 if success else 500
+            else:
+                return jsonify({"error": "WAL system not ready"}), 503
+                
+        except Exception as e:
+            import traceback
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
 
     def _handle_proxy_request_core(path, transaction_id=None):
         """Core proxy request logic - separated for cleaner concurrency control"""
