@@ -1230,7 +1230,6 @@ class UnifiedWALLoadBalancer:
                                 elif retry_attempt < max_retries - 1:
                                     # Wait before retry - mapping might be created shortly after collection creation
                                     logger.warning(f"   ⏳ UUID mapping not found on attempt {retry_attempt + 1}, retrying in 2 seconds...")
-                                    import time
                                     time.sleep(2)
                                 else:
                                     logger.error(f"   ❌ UUID mapping still not found after {max_retries} attempts")
@@ -1238,7 +1237,6 @@ class UnifiedWALLoadBalancer:
                             except Exception as uuid_error:
                                 logger.error(f"   ❌ UUID resolution error on attempt {retry_attempt + 1}: {uuid_error}")
                                 if retry_attempt < max_retries - 1:
-                                    import time
                                     time.sleep(2)
                         
                         if mapped_uuid and mapped_uuid != collection_id:
