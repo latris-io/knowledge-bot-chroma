@@ -1482,9 +1482,9 @@ class UnifiedWALLoadBalancer:
                     logger.error(f"   Response text: {response.text[:200]}")
                     
             # Clean up collection mapping if DELETE was successful
-            elif (method == 'DELETE' and 
-                  '/collections/' in final_path and 
-                  response.status_code in [200, 204]):
+            if (method == 'DELETE' and 
+                '/collections/' in final_path and 
+                response.status_code in [200, 204]):
                 try:
                     # Extract collection name from the original WAL record for mapping cleanup
                     original_collection_identifier = write_record.get('collection_id')
