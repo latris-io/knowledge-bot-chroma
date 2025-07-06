@@ -2709,7 +2709,7 @@ class UnifiedWALLoadBalancer:
                     with conn.cursor() as cur:
                         # First get the current target_instance and synced_instances
                         cur.execute("""
-                            SELECT target_instance, synced_instances 
+                            SELECT target_instance, synced_instances, method, path, collection_id
                             FROM unified_wal_writes 
                             WHERE write_id = %s
                         """, (write_id,))
@@ -2719,10 +2719,11 @@ class UnifiedWALLoadBalancer:
                             logger.error(f"❌ WAL record not found for write_id: {write_id[:8]}")
                             return
                         
-                        target_instance, synced_instances = result
+                        target_instance, synced_instances, method, path, collection_id = result
                         
                         # If target is not 'both', use regular sync logic
                         if target_instance != 'both':
+                            logger.info(f"🔄 SINGLE TARGET: {write_id[:8]} target={target_instance}, using regular sync")
                             self.mark_write_synced(write_id)
                             return
                         
@@ -2738,20 +2739,88 @@ class UnifiedWALLoadBalancer:
                         # Add this instance if not already synced
                         if instance_name not in synced_list:
                             synced_list.append(instance_name)
-                            logger.info(f"✅ INSTANCE SYNC: {write_id[:8]} synced to {instance_name} ({len(synced_list)}/2 instances)")
+                            logger.info(f"✅ INSTANCE SYNC: {write_id[:8]} {method} synced to {instance_name} ({len(synced_list)}/2 instances)")
+                            
+                            # ENHANCED LOGGING: Show operation details for DELETE operations
+                            if method == 'DELETE' and '/collections/' in path:
+                                logger.info(f"   🗑️ DELETE SYNC DETAILS: Collection {collection_id} deleted from {instance_name}")
+                                logger.info(f"   📋 Synced instances so far: {synced_list}")
+                        else:
+                            logger.warning(f"⚠️ DUPLICATE SYNC: {write_id[:8]} already marked synced to {instance_name}")
                         
                         # Check if both instances are now synced
                         required_instances = ['primary', 'replica']
                         all_synced = all(inst in synced_list for inst in required_instances)
                         
                         if all_synced:
-                            # Both instances synced - mark as fully synced
-                            cur.execute("""
-                                UPDATE unified_wal_writes 
-                                SET status = %s, synced_instances = %s, synced_at = NOW(), updated_at = NOW()
-                                WHERE write_id = %s
-                            """, (WALWriteStatus.SYNCED.value, json.dumps(synced_list), write_id))
-                            logger.info(f"🎉 BOTH SYNC COMPLETE: {write_id[:8]} synced to both instances - marking as SYNCED")
+                            # CRITICAL FIX: Before marking as fully synced, verify the operation actually succeeded on both instances
+                            verification_passed = True
+                            
+                            if method == 'DELETE' and '/collections/' in path and collection_id:
+                                logger.info(f"🔍 DELETE VERIFICATION: Verifying collection '{collection_id}' is actually deleted from both instances")
+                                
+                                # Verify deletion on both instances
+                                for verify_instance_name in required_instances:
+                                    verify_instance = next((inst for inst in self.instances if inst.name == verify_instance_name), None)
+                                    if verify_instance and verify_instance.is_healthy:
+                                        try:
+                                            # Check if collection still exists on this instance
+                                            collections_response = self.make_direct_request(
+                                                verify_instance,
+                                                "GET",
+                                                "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                            )
+                                            
+                                            if collections_response.status_code == 200:
+                                                collections = collections_response.json()
+                                                collection_exists = any(c.get('name') == collection_id for c in collections)
+                                                
+                                                if collection_exists:
+                                                    logger.error(f"❌ DELETE VERIFICATION FAILED: Collection '{collection_id}' still exists on {verify_instance_name}")
+                                                    logger.error(f"   This indicates DELETE sync failed - operation should not be marked as complete")
+                                                    verification_passed = False
+                                                    
+                                                    # CRITICAL FIX: Remove this instance from synced list since verification failed
+                                                    if verify_instance_name in synced_list:
+                                                        synced_list.remove(verify_instance_name)
+                                                        logger.info(f"🔧 CORRECTED: Removed {verify_instance_name} from synced list due to verification failure")
+                                                else:
+                                                    logger.info(f"✅ DELETE VERIFIED: Collection '{collection_id}' confirmed deleted from {verify_instance_name}")
+                                            else:
+                                                logger.warning(f"⚠️ DELETE VERIFICATION: Cannot list collections on {verify_instance_name} (HTTP {collections_response.status_code})")
+                                                # Don't fail verification for infrastructure issues, but log it
+                                                
+                                        except Exception as verify_error:
+                                            logger.error(f"❌ DELETE VERIFICATION ERROR for {verify_instance_name}: {verify_error}")
+                                            # Don't fail verification for infrastructure issues, but log it
+                            
+                            # Re-check if all instances are still synced after verification
+                            all_synced = all(inst in synced_list for inst in required_instances)
+                            
+                            if all_synced and verification_passed:
+                                # Both instances synced and verified - mark as fully synced
+                                cur.execute("""
+                                    UPDATE unified_wal_writes 
+                                    SET status = %s, synced_instances = %s, synced_at = NOW(), updated_at = NOW()
+                                    WHERE write_id = %s
+                                """, (WALWriteStatus.SYNCED.value, json.dumps(synced_list), write_id))
+                                logger.info(f"🎉 BOTH SYNC COMPLETE: {write_id[:8]} {method} synced to both instances - marking as SYNCED")
+                                
+                                if method == 'DELETE' and '/collections/' in path:
+                                    logger.info(f"   🗑️ DELETE SUCCESS: Collection '{collection_id}' confirmed deleted from both instances")
+                            else:
+                                # Verification failed or partial sync - update synced instances but keep status as executed
+                                cur.execute("""
+                                    UPDATE unified_wal_writes 
+                                    SET synced_instances = %s, updated_at = NOW()
+                                    WHERE write_id = %s
+                                """, (json.dumps(synced_list), write_id))
+                                missing_instances = [inst for inst in required_instances if inst not in synced_list]
+                                logger.warning(f"⚠️ SYNC INCOMPLETE: {write_id[:8]} {method} verification failed or partial sync")
+                                logger.warning(f"   Synced to: {synced_list}, Missing: {missing_instances}")
+                                
+                                if method == 'DELETE' and not verification_passed:
+                                    logger.error(f"   🗑️ DELETE ISSUE: Collection '{collection_id}' still exists on some instances")
                         else:
                             # Partial sync - update synced instances but keep status as executed
                             cur.execute("""
@@ -2760,7 +2829,7 @@ class UnifiedWALLoadBalancer:
                                 WHERE write_id = %s
                             """, (json.dumps(synced_list), write_id))
                             missing_instances = [inst for inst in required_instances if inst not in synced_list]
-                            logger.info(f"⏳ PARTIAL SYNC: {write_id[:8]} synced to {instance_name}, waiting for: {missing_instances}")
+                            logger.info(f"⏳ PARTIAL SYNC: {write_id[:8]} {method} synced to {instance_name}, waiting for: {missing_instances}")
                         
                         conn.commit()
                         
@@ -2768,6 +2837,8 @@ class UnifiedWALLoadBalancer:
             logger.warning(f"Database unavailable, skipping instance sync update for {write_id[:8]}: {e}")
         except Exception as e:
             logger.error(f"Error marking write {write_id[:8]} as synced to {instance_name}: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
 
 # 🚀 REQUEST CONCURRENCY CONTROLS - Handle high concurrent user load
 class ConcurrencyManager:
@@ -3080,6 +3151,72 @@ if __name__ == '__main__':
                     return jsonify({
                         'recent_errors': errors,
                         'error_count': len(errors)
+                    })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/admin/wal_debug', methods=['GET'])
+    def wal_debug():
+        """Comprehensive WAL debug information for troubleshooting DELETE sync issues"""
+        try:
+            with enhanced_wal.get_db_connection_ctx() as conn:
+                with conn.cursor() as cur:
+                    # Get recent writes (all statuses)
+                    cur.execute("""
+                        SELECT write_id, method, path, collection_id, status, target_instance, 
+                               synced_instances, error_message, created_at, updated_at, retry_count
+                        FROM unified_wal_writes 
+                        ORDER BY created_at DESC 
+                        LIMIT 20
+                    """)
+                    
+                    recent_writes = []
+                    for row in cur.fetchall():
+                        recent_writes.append({
+                            'write_id': row[0][:8],
+                            'method': row[1],
+                            'path': row[2],
+                            'collection_id': row[3],
+                            'status': row[4],
+                            'target_instance': row[5],
+                            'synced_instances': row[6],
+                            'error_message': row[7],
+                            'created_at': row[8].isoformat() if row[8] else None,
+                            'updated_at': row[9].isoformat() if row[9] else None,
+                            'retry_count': row[10]
+                        })
+                    
+                    # Get DELETE operations specifically
+                    cur.execute("""
+                        SELECT write_id, path, collection_id, status, target_instance, 
+                               synced_instances, error_message, created_at
+                        FROM unified_wal_writes 
+                        WHERE method = 'DELETE' 
+                        ORDER BY created_at DESC 
+                        LIMIT 10
+                    """)
+                    
+                    delete_operations = []
+                    for row in cur.fetchall():
+                        delete_operations.append({
+                            'write_id': row[0][:8],
+                            'path': row[1],
+                            'collection_id': row[2],
+                            'status': row[3],
+                            'target_instance': row[4],
+                            'synced_instances': row[5],
+                            'error_message': row[6],
+                            'created_at': row[7].isoformat() if row[7] else None
+                        })
+                    
+                    return jsonify({
+                        'recent_writes': recent_writes,
+                        'delete_operations': delete_operations,
+                        'summary': {
+                            'total_recent_writes': len(recent_writes),
+                            'total_delete_operations': len(delete_operations),
+                            'pending_writes': enhanced_wal.get_pending_writes_count()
+                        }
                     })
         except Exception as e:
             return jsonify({'error': str(e)}), 500
