@@ -2964,14 +2964,28 @@ class UnifiedWALLoadBalancer:
                                             SET primary_collection_id = %s, updated_at = NOW()
                                             WHERE collection_name = %s
                                         """, (target_uuid, collection_name))
+                                        logger.info(f"✅ MAPPING UPDATED: Primary UUID {target_uuid[:8]} for '{collection_name}'")
                                     else:  # replica
                                         cur.execute("""
                                             UPDATE collection_id_mapping 
                                             SET replica_collection_id = %s, updated_at = NOW()
                                             WHERE collection_name = %s
                                         """, (target_uuid, collection_name))
+                                        logger.info(f"✅ MAPPING UPDATED: Replica UUID {target_uuid[:8]} for '{collection_name}'")
                                     
                                     conn.commit()
+                                    
+                                    # Verify mapping update
+                                    cur.execute("""
+                                        SELECT primary_collection_id, replica_collection_id 
+                                        FROM collection_id_mapping 
+                                        WHERE collection_name = %s
+                                    """, (collection_name,))
+                                    mapping_result = cur.fetchone()
+                                    if mapping_result:
+                                        p_uuid, r_uuid = mapping_result
+                                        logger.info(f"🔍 MAPPING VERIFIED: '{collection_name}' -> P:{p_uuid[:8] if p_uuid else 'None'}, R:{r_uuid[:8] if r_uuid else 'None'}")
+                                    
                                     logger.info(f"✅ COLLECTION RECOVERY: '{collection_name}' recreated on {target_instance_name} with UUID {target_uuid[:8]}")
                                     recovered_count += 1
                                 else:
