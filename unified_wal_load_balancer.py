@@ -928,6 +928,11 @@ class UnifiedWALLoadBalancer:
                     # synced_instances is a JSON array like ["primary"] or ["primary", "replica"]
                     # We need to check if the target_instance string exists as an element in this array
                     # Use ? operator to check if array contains the target instance as a text element
+                    
+                    # 🔧 CRITICAL FIX: Change ordering to respect chronological order for create-then-delete workflows
+                    # The real world use case is: collection created first, then deleted later
+                    # So we should process operations in chronological order (created_at ASC) to respect this normal workflow
+                    # This fixes the issue where DELETE operations (priority 1) were processed before CREATE operations (priority 0)
                     cur.execute("""
                         SELECT write_id, method, path, data, headers, collection_id, 
                                timestamp, retry_count, data_size_bytes, priority, target_instance, synced_instances
@@ -941,7 +946,7 @@ class UnifiedWALLoadBalancer:
                             ))
                         )
                         AND retry_count < 3
-                        ORDER BY priority DESC, created_at ASC 
+                        ORDER BY created_at ASC, priority DESC
                         LIMIT %s
                     """, (target_instance, target_instance, target_instance, batch_size * 3))
                     
@@ -949,11 +954,12 @@ class UnifiedWALLoadBalancer:
                     
                     # 🔍 ENHANCED DEBUG: Log WAL processing order verification
                     if records:
-                        logger.info(f"📋 WAL BATCH ORDER DEBUG: Processing {len(records)} operations for {target_instance}")
+                        logger.info(f"📋 WAL BATCH ORDER DEBUG: Processing {len(records)} operations for {target_instance} in CHRONOLOGICAL order")
                         for i, record in enumerate(records[:5]):  # Log first 5 for verification
                             logger.info(f"   {i+1}. {record['timestamp']} - {record['method']} (priority={record['priority']}, retries={record['retry_count']})")
                         if len(records) > 5:
                             logger.info(f"   ... and {len(records) - 5} more operations")
+                        logger.info(f"   ✅ CHRONOLOGICAL ORDER: Operations will be processed in the order they were created (CREATE before DELETE)")
                     
                     # 🔧 DEBUG: Log what we found for troubleshooting
                     if target_instance == 'replica':
@@ -980,7 +986,7 @@ class UnifiedWALLoadBalancer:
                     if not records:
                         return []
                     
-                    # Create memory-optimized batches
+                    # Create memory-optimized batches with chronological ordering preserved
                     batches = []
                     current_batch = []
                     current_batch_size_mb = 0
@@ -1018,8 +1024,10 @@ class UnifiedWALLoadBalancer:
                             priority=max(w.get('priority', 0) for w in current_batch)
                         ))
                     
-                    # Sort batches by priority (high priority first)
-                    batches.sort(key=lambda b: b.priority, reverse=True)
+                    # 🔧 CRITICAL FIX: Don't re-sort batches by priority - preserve chronological order
+                    # Remove the priority-based sorting to maintain chronological order within and across batches
+                    # batches.sort(key=lambda b: b.priority, reverse=True)  # REMOVED - this breaks chronological order
+                    logger.info(f"🔄 CHRONOLOGICAL BATCHING: Created {len(batches)} batches preserving chronological order for normal create-then-delete workflows")
                     
                     return batches
                     
@@ -2847,6 +2855,35 @@ class UnifiedWALLoadBalancer:
                                 
                                 if method == 'DELETE' and '/collections/' in path:
                                     logger.info(f"   🗑️ DELETE SUCCESS: Collection '{collection_name}' confirmed deleted from both instances")
+                                    
+                                    # 🔧 CRITICAL FIX: Mark any pending CREATE operations for this collection as obsolete
+                                    # This prevents race condition where CREATE operations recreate deleted collections
+                                    try:
+                                        cur.execute("""
+                                            UPDATE unified_wal_writes 
+                                            SET status = 'obsolete', 
+                                                error_message = 'Collection deleted - CREATE operation no longer needed',
+                                                updated_at = NOW()
+                                            WHERE method = 'POST'
+                                            AND (status = 'pending' OR status = 'executed' OR status = 'failed')
+                                            AND (
+                                                -- Match by collection_id (name or UUID)
+                                                collection_id = %s
+                                                -- Match by path containing collection name
+                                                OR path LIKE '%%/collections' 
+                                                OR (path LIKE '%%/collections/%%' AND path NOT LIKE '%%/add%%' AND path NOT LIKE '%%/upsert%%' AND path NOT LIKE '%%/update%%' AND path NOT LIKE '%%/delete%%' AND path NOT LIKE '%%/query%%' AND path NOT LIKE '%%/get%%' AND path NOT LIKE '%%/count%%')
+                                            )
+                                            AND collection_id = %s
+                                            AND write_id != %s
+                                            AND created_at <= (SELECT created_at FROM unified_wal_writes WHERE write_id = %s)
+                                        """, (collection_name, collection_name, write_id, write_id))
+                                        
+                                        obsoleted_count = cur.rowcount
+                                        if obsoleted_count > 0:
+                                            logger.info(f"   🔧 OBSOLETED: Marked {obsoleted_count} pending CREATE operations for '{collection_name}' as obsolete")
+                                        
+                                    except Exception as obsolete_error:
+                                        logger.error(f"   ⚠️ Failed to obsolete CREATE operations: {obsolete_error}")
                             else:
                                 # Verification failed or partial sync - update synced instances but keep status as executed
                                 cur.execute("""
