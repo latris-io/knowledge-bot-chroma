@@ -1216,9 +1216,30 @@ class UnifiedWALLoadBalancer:
                         logger.info(f"   Source collection ID: {collection_id}")
                         logger.info(f"   Target instance: {instance.name}")
                         
-                        # Get the correct UUID for the target instance
-                        mapped_uuid = self.resolve_collection_name_to_uuid_by_source_id(collection_id, instance.name)
-                        logger.info(f"   Mapping result: {mapped_uuid}")
+                        # 🔧 CRITICAL FIX: Add retry logic for UUID resolution
+                        mapped_uuid = None
+                        max_retries = 3
+                        for retry_attempt in range(max_retries):
+                            try:
+                                # Get the correct UUID for the target instance
+                                mapped_uuid = self.resolve_collection_name_to_uuid_by_source_id(collection_id, instance.name)
+                                logger.info(f"   Mapping attempt {retry_attempt + 1}/{max_retries}: {mapped_uuid}")
+                                
+                                if mapped_uuid:
+                                    break  # Success!
+                                elif retry_attempt < max_retries - 1:
+                                    # Wait before retry - mapping might be created shortly after collection creation
+                                    logger.warning(f"   ⏳ UUID mapping not found on attempt {retry_attempt + 1}, retrying in 2 seconds...")
+                                    import time
+                                    time.sleep(2)
+                                else:
+                                    logger.error(f"   ❌ UUID mapping still not found after {max_retries} attempts")
+                                    
+                            except Exception as uuid_error:
+                                logger.error(f"   ❌ UUID resolution error on attempt {retry_attempt + 1}: {uuid_error}")
+                                if retry_attempt < max_retries - 1:
+                                    import time
+                                    time.sleep(2)
                         
                         if mapped_uuid and mapped_uuid != collection_id:
                             # Replace source UUID with target UUID in path
@@ -1227,10 +1248,43 @@ class UnifiedWALLoadBalancer:
                             logger.info(f"✅ UUID MAPPED for {instance.name}: {collection_id[:8]} -> {mapped_uuid[:8]}")
                             logger.info(f"   Path changed: {old_path} -> {final_path}")
                         elif mapped_uuid is None:
-                            logger.error(f"❌ CRITICAL: No UUID mapping found for {collection_id[:8]} -> {instance.name}")
+                            logger.error(f"❌ CRITICAL: No UUID mapping found for {collection_id[:8]} -> {instance.name} after {max_retries} retries")
                             logger.error(f"   Collection may not exist yet on target instance")
+                            
+                            # 🔧 ENHANCED DEBUG: Check if mapping exists but for wrong direction
+                            try:
+                                logger.error(f"   🔍 DEBUG: Checking if reverse mapping exists...")
+                                reverse_mapped = self.resolve_collection_name_to_uuid_by_source_id(collection_id, "primary" if instance.name == "replica" else "replica")
+                                if reverse_mapped:
+                                    logger.error(f"   🔍 DEBUG: Reverse mapping exists: {collection_id[:8]} -> {reverse_mapped[:8]} (wrong direction)")
+                                else:
+                                    logger.error(f"   🔍 DEBUG: No mapping found in either direction")
+                                    
+                                # Check total mappings for context
+                                with self.get_db_connection() as conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute("SELECT COUNT(*) FROM collection_id_mapping")
+                                        total_mappings = cur.fetchone()[0]
+                                        logger.error(f"   🔍 DEBUG: Total mappings in database: {total_mappings}")
+                                        
+                                        # Check if the collection name exists
+                                        cur.execute("""
+                                            SELECT collection_name, primary_collection_id, replica_collection_id, status
+                                            FROM collection_id_mapping 
+                                            WHERE primary_collection_id = %s OR replica_collection_id = %s
+                                        """, (collection_id, collection_id))
+                                        result = cur.fetchone()
+                                        if result:
+                                            name, p_id, r_id, status = result
+                                            logger.error(f"   🔍 DEBUG: Found mapping: {name} -> P:{p_id[:8] if p_id else 'None'}, R:{r_id[:8] if r_id else 'None'}, Status:{status}")
+                                        else:
+                                            logger.error(f"   🔍 DEBUG: No mapping row found for UUID {collection_id[:8]}")
+                                            
+                            except Exception as debug_error:
+                                logger.error(f"   🔍 DEBUG failed: {debug_error}")
+                            
                             # Skip this sync operation - collection doesn't exist on target
-                            self.mark_write_failed(write_id, f"No UUID mapping found for collection {collection_id[:8]} on {instance.name}")
+                            self.mark_write_failed(write_id, f"No UUID mapping found for collection {collection_id[:8]} on {instance.name} after {max_retries} retries")
                             continue
                         else:
                             logger.info(f"ℹ️ UUID mapping not needed: {collection_id[:8]} (same on both instances)")
@@ -2023,9 +2077,18 @@ class UnifiedWALLoadBalancer:
         try:
             logger.info(f"🔍 UUID MAPPING: Resolving {source_collection_id[:8]} for {target_instance_name}")
             
-            # Query mapping database to find the collection name and get target UUID
-            with self.get_db_connection() as conn:
-                with conn.cursor() as cur:
+            # 🔧 CRITICAL FIX: Use fresh database connection to avoid transaction isolation issues
+            # This ensures we see the latest collection mappings during WAL sync
+            import psycopg2
+            fresh_conn = None
+            try:
+                fresh_conn = psycopg2.connect(
+                    self.database_url,
+                    connect_timeout=10,
+                    application_name='wal-uuid-resolution'
+                )
+                
+                with fresh_conn.cursor() as cur:
                     # Find collection name by source UUID
                     cur.execute("""
                         SELECT collection_name, primary_collection_id, replica_collection_id 
@@ -2056,6 +2119,10 @@ class UnifiedWALLoadBalancer:
                         total_mappings = cur.fetchone()[0]
                         logger.error(f"   Total mappings in database: {total_mappings}")
                         return None  # Return None to fail sync properly instead of using wrong UUID
+                        
+            finally:
+                if fresh_conn:
+                    fresh_conn.close()
                         
         except Exception as e:
             logger.error(f"❌ UUID mapping failed for {source_collection_id[:8]} -> {target_instance_name}: {e}")
