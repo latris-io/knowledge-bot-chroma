@@ -909,17 +909,25 @@ class UnifiedWALLoadBalancer:
                         LIMIT %s
                     """, (target_instance, target_instance, json.dumps([target_instance]), batch_size * 3))
                     
-                    all_writes = cur.fetchall()
+                    records = cur.fetchall()
+                    
+                    # 🔍 ENHANCED DEBUG: Log WAL processing order verification
+                    if records:
+                        logger.info(f"📋 WAL BATCH ORDER DEBUG: Processing {len(records)} operations for {target_instance}")
+                        for i, record in enumerate(records[:5]):  # Log first 5 for verification
+                            logger.info(f"   {i+1}. {record['timestamp']} - {record['method']} (priority={record['priority']}, retries={record['retry_count']})")
+                        if len(records) > 5:
+                            logger.info(f"   ... and {len(records) - 5} more operations")
                     
                     # 🔧 DEBUG: Log what we found for troubleshooting
                     if target_instance == 'replica':
-                        both_operations = [w for w in all_writes if w.get('target_instance') == 'both']
+                        both_operations = [w for w in records if w.get('target_instance') == 'both']
                         if both_operations:
                             logger.info(f"🔍 DEBUG: Found {len(both_operations)} 'both' target operations to sync to replica")
                             for op in both_operations[:3]:  # Log first 3
                                 logger.info(f"   - {op['method']} {op['path']} (synced_instances: {op.get('synced_instances')})")
                     
-                    if not all_writes:
+                    if not records:
                         return []
                     
                     # Create memory-optimized batches
@@ -928,7 +936,7 @@ class UnifiedWALLoadBalancer:
                     current_batch_size_mb = 0
                     max_batch_size_mb = 30  # 30MB per batch to prevent memory issues
                     
-                    for write in all_writes:
+                    for write in records:
                         write_dict = dict(write)  # Convert RealDictRow to dict
                         write_size_mb = (write_dict.get('data_size_bytes', 0) / 1024 / 1024)
                         

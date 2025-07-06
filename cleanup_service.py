@@ -8,7 +8,7 @@ import os
 import time
 import logging
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -54,6 +54,16 @@ class DatabaseCleanupService:
         
         date_column = date_columns.get(table_name, 'created_at')
         cutoff_date = datetime.now() - timedelta(days=retention_days)
+        
+        # 🔍 ENHANCED DEBUG: Log datetime comparison for timezone bug detection
+        logger.info(f"🕐 CLEANUP DATETIME DEBUG: Cutoff={cutoff_date} (tz={cutoff_date.tzinfo})")
+        logger.info(f"🕐 CLEANUP DATETIME DEBUG: Retention={retention_days} days for {table_name}")
+        
+        # Ensure timezone-aware cutoff for database comparison
+        if cutoff_date.tzinfo is None:
+            # Convert naive datetime to UTC for database comparison
+            cutoff_date = cutoff_date.replace(tzinfo=timezone.utc)
+            logger.warning(f"🕐 TIMEZONE FIX: Converted naive cutoff_date to UTC for {table_name}")
         
         try:
             with psycopg2.connect(self.database_url) as conn:

@@ -472,8 +472,23 @@ class TransactionSafetyService:
                 continue
             
             # Check if we're past the retry time
-            if transaction['next_retry_at'] and datetime.now(timezone.utc) < transaction['next_retry_at']:
-                continue
+            if transaction['next_retry_at']:
+                # 🔍 ENHANCED DEBUG: Log datetime comparison for timezone bug detection
+                current_time = datetime.now(timezone.utc)
+                retry_time = transaction['next_retry_at']
+                
+                logger.info(f"🕐 DATETIME COMPARISON DEBUG: Current={current_time} (tz={current_time.tzinfo})")
+                logger.info(f"🕐 DATETIME COMPARISON DEBUG: Retry={retry_time} (tz={retry_time.tzinfo})")
+                
+                # Ensure both datetimes are timezone-aware for comparison
+                if retry_time.tzinfo is None:
+                    # Database timestamp is timezone-naive, assume UTC
+                    retry_time = retry_time.replace(tzinfo=timezone.utc)
+                    logger.warning(f"🕐 TIMEZONE FIX: Converted naive retry_time to UTC for comparison")
+                
+                if current_time < retry_time:
+                    logger.info(f"⏳ RETRY DELAY: Transaction {transaction_id[:8]} waiting until {retry_time}")
+                    continue
             
             # Attempt recovery
             if self.retry_transaction(transaction, load_balancer):
