@@ -2757,42 +2757,59 @@ class UnifiedWALLoadBalancer:
                             verification_passed = True
                             
                             if method == 'DELETE' and '/collections/' in path and collection_id:
-                                logger.info(f"🔍 DELETE VERIFICATION: Verifying collection '{collection_id}' is actually deleted from both instances")
+                                logger.info(f"🔍 DELETE VERIFICATION: Verifying collection is actually deleted from both instances")
                                 
-                                # Verify deletion on both instances
-                                for verify_instance_name in required_instances:
-                                    verify_instance = next((inst for inst in self.instances if inst.name == verify_instance_name), None)
-                                    if verify_instance and verify_instance.is_healthy:
-                                        try:
-                                            # Check if collection still exists on this instance
-                                            collections_response = self.make_direct_request(
-                                                verify_instance,
-                                                "GET",
-                                                "/api/v2/tenants/default_tenant/databases/default_database/collections"
-                                            )
-                                            
-                                            if collections_response.status_code == 200:
-                                                collections = collections_response.json()
-                                                collection_exists = any(c.get('name') == collection_id for c in collections)
+                                # CRITICAL FIX: Extract collection name from path, not UUID
+                                collection_name = None
+                                if '/collections/' in path:
+                                    # Extract collection name from path like: .../collections/UC3_MANUAL_1751810860_DELETE_TEST
+                                    path_parts = path.split('/collections/')
+                                    if len(path_parts) > 1:
+                                        collection_name = path_parts[1].split('/')[0]  # Get first segment after /collections/
+                                
+                                if not collection_name:
+                                    logger.warning(f"⚠️ DELETE VERIFICATION: Cannot extract collection name from path: {path}")
+                                    # Don't fail verification for path parsing issues
+                                else:
+                                    logger.info(f"🔍 DELETE VERIFICATION: Checking if collection '{collection_name}' is deleted from both instances")
+                                
+                                    # Verify deletion on both instances
+                                    for verify_instance_name in required_instances:
+                                        verify_instance = next((inst for inst in self.instances if inst.name == verify_instance_name), None)
+                                        if verify_instance and verify_instance.is_healthy:
+                                            try:
+                                                # Check if collection still exists on this instance
+                                                collections_response = self.make_direct_request(
+                                                    verify_instance,
+                                                    "GET",
+                                                    "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                                )
                                                 
-                                                if collection_exists:
-                                                    logger.error(f"❌ DELETE VERIFICATION FAILED: Collection '{collection_id}' still exists on {verify_instance_name}")
-                                                    logger.error(f"   This indicates DELETE sync failed - operation should not be marked as complete")
-                                                    verification_passed = False
+                                                if collections_response.status_code == 200:
+                                                    collections = collections_response.json()
                                                     
-                                                    # CRITICAL FIX: Remove this instance from synced list since verification failed
-                                                    if verify_instance_name in synced_list:
-                                                        synced_list.remove(verify_instance_name)
-                                                        logger.info(f"🔧 CORRECTED: Removed {verify_instance_name} from synced list due to verification failure")
+                                                    # CRITICAL FIX: Compare by collection NAME, not UUID
+                                                    collection_exists = any(c.get('name') == collection_name for c in collections)
+                                                    
+                                                    if collection_exists:
+                                                        logger.error(f"❌ DELETE VERIFICATION FAILED: Collection '{collection_name}' still exists on {verify_instance_name}")
+                                                        logger.error(f"   This indicates DELETE sync failed - operation should not be marked as complete")
+                                                        logger.error(f"   Collection UUID on {verify_instance_name}: {next((c.get('id') for c in collections if c.get('name') == collection_name), 'not found')}")
+                                                        verification_passed = False
+                                                        
+                                                        # CRITICAL FIX: Remove this instance from synced list since verification failed
+                                                        if verify_instance_name in synced_list:
+                                                            synced_list.remove(verify_instance_name)
+                                                            logger.info(f"🔧 CORRECTED: Removed {verify_instance_name} from synced list due to verification failure")
+                                                    else:
+                                                        logger.info(f"✅ DELETE VERIFIED: Collection '{collection_name}' confirmed deleted from {verify_instance_name}")
                                                 else:
-                                                    logger.info(f"✅ DELETE VERIFIED: Collection '{collection_id}' confirmed deleted from {verify_instance_name}")
-                                            else:
-                                                logger.warning(f"⚠️ DELETE VERIFICATION: Cannot list collections on {verify_instance_name} (HTTP {collections_response.status_code})")
+                                                    logger.warning(f"⚠️ DELETE VERIFICATION: Cannot list collections on {verify_instance_name} (HTTP {collections_response.status_code})")
+                                                    # Don't fail verification for infrastructure issues, but log it
+                                                    
+                                            except Exception as verify_error:
+                                                logger.error(f"❌ DELETE VERIFICATION ERROR for {verify_instance_name}: {verify_error}")
                                                 # Don't fail verification for infrastructure issues, but log it
-                                                
-                                        except Exception as verify_error:
-                                            logger.error(f"❌ DELETE VERIFICATION ERROR for {verify_instance_name}: {verify_error}")
-                                            # Don't fail verification for infrastructure issues, but log it
                             
                             # Re-check if all instances are still synced after verification
                             all_synced = all(inst in synced_list for inst in required_instances)
@@ -2807,7 +2824,7 @@ class UnifiedWALLoadBalancer:
                                 logger.info(f"🎉 BOTH SYNC COMPLETE: {write_id[:8]} {method} synced to both instances - marking as SYNCED")
                                 
                                 if method == 'DELETE' and '/collections/' in path:
-                                    logger.info(f"   🗑️ DELETE SUCCESS: Collection '{collection_id}' confirmed deleted from both instances")
+                                    logger.info(f"   🗑️ DELETE SUCCESS: Collection '{collection_name}' confirmed deleted from both instances")
                             else:
                                 # Verification failed or partial sync - update synced instances but keep status as executed
                                 cur.execute("""
@@ -2820,7 +2837,7 @@ class UnifiedWALLoadBalancer:
                                 logger.warning(f"   Synced to: {synced_list}, Missing: {missing_instances}")
                                 
                                 if method == 'DELETE' and not verification_passed:
-                                    logger.error(f"   🗑️ DELETE ISSUE: Collection '{collection_id}' still exists on some instances")
+                                    logger.error(f"   🗑️ DELETE ISSUE: Collection '{collection_name}' still exists on some instances")
                         else:
                             # Partial sync - update synced instances but keep status as executed
                             cur.execute("""
