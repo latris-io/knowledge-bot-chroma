@@ -1262,18 +1262,22 @@ class UnifiedWALLoadBalancer:
                     # Make the sync request with normalized path
                     response = self.make_direct_request(instance, method, final_path, data=data, headers=headers)
                     
-                    # CRITICAL FIX: Handle collection creation sync with proper error handling
+                    # CRITICAL FIX: Handle collection creation sync with proper error handling including 409 Conflict
                     if (method == 'POST' and 
-                        ('/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete', '/count'])) and
-                        response.status_code in [200, 201]):
-                        logger.info(f"✅ WAL SYNC: Collection creation successful on {instance.name} - Status: {response.status_code}")
-                    elif (method == 'POST' and 
-                          '/collections' in final_path and 
-                          response.status_code not in [200, 201]):
-                        logger.error(f"❌ WAL SYNC: Collection creation failed on {instance.name} - Status: {response.status_code}")
-                        logger.error(f"   Response: {response.text[:200]}")
-                        self.mark_write_failed(write_id, f"Collection creation failed: HTTP {response.status_code}")
-                        continue
+                        ('/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete', '/count']))):
+                        
+                        if response.status_code in [200, 201]:
+                            logger.info(f"✅ WAL SYNC: Collection creation successful on {instance.name} - Status: {response.status_code}")
+                        elif response.status_code == 409:
+                            # 409 Conflict = Collection already exists = SUCCESS for sync purposes
+                            logger.info(f"✅ WAL SYNC: Collection creation successful on {instance.name} - Status: 409 (collection already exists)")
+                            logger.info(f"   This is the expected behavior when syncing to an instance that already has the collection")
+                            # Continue processing as success - no need to mark as failed
+                        else:
+                            logger.error(f"❌ WAL SYNC: Collection creation failed on {instance.name} - Status: {response.status_code}")
+                            logger.error(f"   Response: {response.text[:200]}")
+                            self.mark_write_failed(write_id, f"Collection creation failed: HTTP {response.status_code}")
+                            continue
                     
                     # CRITICAL FIX: Handle DELETE operations with proper status code validation
                     elif (method == 'DELETE' and '/collections/' in final_path):
@@ -1360,15 +1364,56 @@ class UnifiedWALLoadBalancer:
                             self.mark_write_failed(write_id, f"Collection DELETE failed: HTTP {response.status_code}")
                             continue
                     
-                    # Update collection mapping for successful collection creation
+                    # Update collection mapping for successful collection creation (including 409 conflicts)
                     if (method == 'POST' and 
                         ('/collections' in final_path and not any(doc_op in final_path for doc_op in ['/add', '/upsert', '/get', '/query', '/update', '/delete', '/count'])) and
-                        response.status_code in [200, 201]):
+                        response.status_code in [200, 201, 409]):
                         try:
-                            # Parse response to get collection info
-                            collection_info = response.json()
-                            new_uuid = collection_info.get('id')
-                            collection_name = collection_info.get('name')
+                            # Parse response to get collection info (for 200/201) or query for existing collection (for 409)
+                            if response.status_code in [200, 201]:
+                                collection_info = response.json()
+                                new_uuid = collection_info.get('id')
+                                collection_name = collection_info.get('name')
+                            elif response.status_code == 409:
+                                # 409 Conflict - collection already exists, need to find it
+                                logger.info(f"🔍 409 CONFLICT: Finding existing collection info for mapping update")
+                                
+                                # Extract collection name from the original WAL record
+                                original_collection_identifier = write_record.get('collection_id')
+                                if original_collection_identifier:
+                                    # Try to get collection info from collections list
+                                    collections_response = self.make_direct_request(
+                                        instance, 
+                                        "GET", 
+                                        "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                    )
+                                    
+                                    if collections_response.status_code == 200:
+                                        collections_list = collections_response.json()
+                                        collection_info = None
+                                        
+                                        # Find collection by name
+                                        for coll in collections_list:
+                                            if coll.get('name') == original_collection_identifier:
+                                                collection_info = coll
+                                                break
+                                        
+                                        if collection_info:
+                                            new_uuid = collection_info.get('id')
+                                            collection_name = collection_info.get('name')
+                                            logger.info(f"✅ 409 RESOLVED: Found existing collection {collection_name} -> {new_uuid[:8] if new_uuid else 'None'}")
+                                        else:
+                                            logger.warning(f"⚠️ 409 ISSUE: Collection '{original_collection_identifier}' not found in collections list")
+                                            new_uuid = None
+                                            collection_name = original_collection_identifier
+                                    else:
+                                        logger.error(f"❌ 409 ERROR: Cannot list collections on {instance.name} - Status: {collections_response.status_code}")
+                                        new_uuid = None
+                                        collection_name = original_collection_identifier
+                                else:
+                                    logger.error(f"❌ 409 ERROR: No collection identifier in WAL record")
+                                    new_uuid = None
+                                    collection_name = None
                             
                             if new_uuid and collection_name:
                                 logger.info(f"🎯 COLLECTION CREATED: {collection_name} -> {new_uuid[:8]} on {instance.name}")
