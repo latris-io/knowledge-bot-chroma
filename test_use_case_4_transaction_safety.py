@@ -9,6 +9,7 @@ Features enhanced selective cleanup (same as USE CASE 1):
 - Preserves FAILED test data for debugging
 - Includes PostgreSQL cleanup (mappings, WAL entries)
 - Provides debugging URLs for preserved collections
+ENHANCED LOGGING: Comprehensive file-based logging for debugging
 """
 
 import requests
@@ -19,6 +20,7 @@ import threading
 import subprocess
 from datetime import datetime
 from typing import List, Dict, Tuple
+from logging_config import setup_test_logging, log_error_details, log_system_status
 
 class UseCase4TransactionSafetyTest:
     def __init__(self, base_url="https://chroma-load-balancer.onrender.com"):
@@ -27,10 +29,20 @@ class UseCase4TransactionSafetyTest:
         self.created_collections = []
         self.test_results = {}  # Track individual test results for selective cleanup
         
+        # ENHANCED LOGGING: Set up comprehensive file-based logging
+        self.logger = setup_test_logging("use_case_4_transaction_safety")
+        self.logger.info(f"USE CASE 4 Transaction Safety Testing started - Session: {self.test_session_id}")
+        self.logger.info(f"Base URL: {base_url}")
+        self.logger.info("Enhanced cleanup and logging systems initialized")
+        
     def log(self, message: str):
         """Log with timestamp"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         print(f"[{timestamp}] {message}")
+        
+        # ENHANCED LOGGING: Also log to file
+        if hasattr(self, 'logger'):
+            self.logger.info(message)
 
     def validate_system_integrity(self, test_name):
         """
@@ -162,6 +174,26 @@ class UseCase4TransactionSafetyTest:
         print(f"   Reason: {reason}")
         if details:
             print(f"   Details: {details}")
+        
+        # ENHANCED LOGGING: Log detailed failure information to file
+        if hasattr(self, 'logger'):
+            self.logger.error(f"TEST FAILURE: {test}")
+            self.logger.error(f"Reason: {reason}")
+            if details:
+                self.logger.error(f"Details: {details}")
+        
+        # Log comprehensive error context
+        error_context = {
+            "test_name": test,
+            "reason": reason,
+            "details": details,
+            "session_id": self.test_session_id,
+            "base_url": self.base_url,
+            "created_collections": self.created_collections,
+            "timestamp": time.time()
+        }
+        log_error_details(error_context, "use_case_4_transaction_safety")
+        
         return False
     
     def check_transaction_safety_service(self) -> Dict:

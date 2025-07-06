@@ -39,6 +39,59 @@ The system provides **high-availability ChromaDB** with:
 - **Write-Ahead Log (WAL)**: Ensures data consistency between instances
 - **Health-Based Failover**: Automatic routing based on instance health
 
+## 📝 **ENHANCED LOGGING & DEBUGGING** ✅ **NEW**
+
+### **🚨 CRITICAL DEBUGGING ENHANCEMENT**
+All test scripts now include **comprehensive file-based logging** to solve the "no log files to examine after tests run" problem that was hampering debugging efforts.
+
+### **Enhanced Logging Features**
+- ✅ **Persistent Log Files**: All test output saved to `logs/` directory with automatic rotation
+- ✅ **Component-Specific Logs**: Separate log files for each test component (UC1, UC2, UC3, UC4, UC5)
+- ✅ **Test Session Tracking**: Each test run gets unique session ID for traceability
+- ✅ **Error Context Logging**: Comprehensive error details saved for debugging failed tests
+- ✅ **System Status Logging**: Health monitoring and sync status automatically logged
+- ✅ **Performance Metrics**: Timing, throughput, and success rates logged for analysis
+
+### **Log File Structure**
+```
+logs/
+├── use_case_1_production.log          # USE CASE 1 automated tests
+├── use_case_2_manual.log              # USE CASE 2 manual testing
+├── use_case_3_manual.log              # USE CASE 3 manual testing  
+├── use_case_4_transaction_safety.log  # USE CASE 4 transaction testing
+├── use_case_5_scalability.log         # USE CASE 5 performance testing
+├── system.log                         # System-wide events
+├── error_details.log                  # Detailed error context
+└── system_status.log                  # Health monitoring data
+```
+
+### **Debugging Benefits**
+- **🔍 Test Hang Analysis**: When tests hang (like USE CASE 3), log files show exactly where execution stopped
+- **💾 Historical Analysis**: Compare test runs across time to identify trends or regressions
+- **🐛 Error Investigation**: Detailed error context helps identify root causes quickly
+- **📊 Performance Tracking**: Monitor system performance improvements or degradation over time
+- **🔧 Production Troubleshooting**: Log files provide forensic evidence for production issues
+
+### **Updated Test Scripts**
+All production test scripts now include enhanced logging:
+- ✅ `run_all_tests.py` (USE CASE 1)
+- ✅ `test_use_case_2_manual.py` (USE CASE 2) 
+- ✅ `test_use_case_3_manual.py` (USE CASE 3)
+- ✅ `test_use_case_4_transaction_safety.py` (USE CASE 4)
+- ✅ `test_use_case_5_scalability.py` (USE CASE 5)
+
+### **Using Enhanced Logging**
+No changes needed - logging is automatically enabled when running tests:
+```bash
+python run_all_tests.py --url https://chroma-load-balancer.onrender.com
+# Logs saved to: logs/use_case_1_production.log
+
+python test_use_case_2_manual.py --url https://chroma-load-balancer.onrender.com  
+# Logs saved to: logs/use_case_2_manual.log
+```
+
+**🎯 Result**: **No more "no log files to examine" problem** - comprehensive debugging capabilities now available for all test scenarios.
+
 ---
 
 ## 🔄 **USE CASE 1: Normal Operations (Both Instances Healthy)** ✅ **BREAKTHROUGH SUCCESS - PRODUCTION READY**

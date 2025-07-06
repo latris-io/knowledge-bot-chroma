@@ -22,6 +22,7 @@ import subprocess
 import os
 from datetime import datetime, timedelta
 from enhanced_verification_base import EnhancedVerificationBase
+from logging_config import setup_test_logging, log_error_details, log_system_status
 
 class UseCase3Tester(EnhancedVerificationBase):
     def __init__(self, base_url):
@@ -38,11 +39,28 @@ class UseCase3Tester(EnhancedVerificationBase):
         # CRITICAL FIX: Direct instance URLs for DELETE validation
         self.primary_url = "https://chroma-primary.onrender.com"
         self.replica_url = "https://chroma-replica.onrender.com"
+        
+        # Set up persistent logging for this test session
+        self.logger = setup_test_logging(f"use_case_3_manual_{self.session_id}")
+        self.logger.info(f"USE CASE 3 Manual Test Session Started")
+        self.logger.info(f"Base URL: {self.base_url}")
+        self.logger.info(f"Session ID: {self.session_id}")
 
     def log(self, message, level="INFO"):
-        """Log message with timestamp"""
+        """Log message with timestamp to both console and file"""
         timestamp = datetime.now().strftime("%H:%M:%S")
-        print(f"[{timestamp}] {level}: {message}" if level != "INFO" else f"[{timestamp}] {message}")
+        console_msg = f"[{timestamp}] {level}: {message}" if level != "INFO" else f"[{timestamp}] {message}"
+        print(console_msg)
+        
+        # Also log to file with appropriate level
+        if level == "DEBUG":
+            self.logger.debug(message)
+        elif level == "WARNING":
+            self.logger.warning(message)
+        elif level == "ERROR":
+            self.logger.error(message)
+        else:
+            self.logger.info(message)
 
     def check_system_health(self, realtime=False):
         """Check system health with optional real-time verification"""
@@ -53,10 +71,25 @@ class UseCase3Tester(EnhancedVerificationBase):
                 
             response = requests.get(url, timeout=10)
             if response.status_code == 200:
-                return response.json()
-        except:
-            pass
-        return None
+                status_data = response.json()
+                
+                # Log system status to file for debugging
+                log_system_status("use_case_3_manual", {
+                    "timestamp": datetime.now().isoformat(),
+                    "session_id": self.session_id,
+                    "realtime": realtime,
+                    "status_data": status_data,
+                    "response_time_ms": response.elapsed.total_seconds() * 1000
+                })
+                
+                return status_data
+            else:
+                self.logger.warning(f"System health check failed: HTTP {response.status_code}")
+                return None
+        except Exception as e:
+            self.logger.error(f"System health check error: {e}")
+            log_error_details("use_case_3_manual", e, {"method": "check_system_health", "realtime": realtime})
+            return None
 
     def validate_system_integrity(self, test_name):
         """
@@ -443,6 +476,27 @@ class UseCase3Tester(EnhancedVerificationBase):
         print(f"   Reason: {reason}")
         if details:
             print(f"   Details: {details}")
+        
+        # Log detailed error information to file
+        error_context = {
+            "test_name": test,
+            "reason": reason,
+            "details": details,
+            "session_id": self.session_id,
+            "base_url": self.base_url,
+            "test_collections": self.test_collections,
+            "deleted_collections": self.deleted_collections
+        }
+        
+        self.logger.error(f"TEST FAILURE: {test}")
+        self.logger.error(f"Reason: {reason}")
+        if details:
+            self.logger.error(f"Details: {details}")
+        self.logger.error(f"Error Context: {error_context}")
+        
+        # Also use the centralized error logging
+        log_error_details("use_case_3_manual", Exception(f"{test}: {reason}"), error_context)
+        
         return False
 
     def wait_for_user_input(self, prompt):

@@ -3,6 +3,7 @@
 REAL PRODUCTION VALIDATION TESTS
 Tests actual functionality that matters to real users, not just API responses
 NOW INCLUDES ENHANCED CLEANUP: PostgreSQL cleanup + selective lifecycle
+ENHANCED LOGGING: Comprehensive file-based logging for debugging
 """
 
 import requests
@@ -10,6 +11,7 @@ import time
 import json
 import sys
 from enhanced_test_base_cleanup import EnhancedTestBase
+from logging_config import setup_test_logging, log_error_details, log_system_status
 
 class ProductionValidator(EnhancedTestBase):
     def __init__(self, base_url):
@@ -19,12 +21,36 @@ class ProductionValidator(EnhancedTestBase):
         self.session_id = int(time.time())
         self.failures = []
         
+        # ENHANCED LOGGING: Set up comprehensive file-based logging
+        self.logger = setup_test_logging("use_case_1_production")
+        self.logger.info(f"USE CASE 1 Production Validation started - Session: {self.session_id}")
+        self.logger.info(f"Base URL: {base_url}")
+        self.logger.info("Enhanced cleanup and logging systems initialized")
+        
     def fail(self, test, reason, details=""):
         self.failures.append({'test': test, 'reason': reason, 'details': details})
         print(f"❌ PRODUCTION FAILURE: {test}")
         print(f"   Reason: {reason}")
         if details:
             print(f"   Details: {details}")
+        
+        # ENHANCED LOGGING: Log detailed failure information
+        self.logger.error(f"TEST FAILURE: {test}")
+        self.logger.error(f"Reason: {reason}")
+        if details:
+            self.logger.error(f"Details: {details}")
+        
+        # Log comprehensive error context
+        error_context = {
+            "test_name": test,
+            "reason": reason,
+            "details": details,
+            "session_id": self.session_id,
+            "base_url": self.base_url,
+            "timestamp": time.time()
+        }
+        log_error_details(error_context, "use_case_1_production")
+        
         return False
         
     def validate_json(self, response, operation):

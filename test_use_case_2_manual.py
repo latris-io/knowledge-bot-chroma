@@ -21,6 +21,7 @@ import sys
 import subprocess
 from datetime import datetime, timedelta
 from enhanced_verification_base import EnhancedVerificationBase
+from logging_config import setup_test_logging, log_error_details, log_system_status
 
 class UseCase2Tester(EnhancedVerificationBase):
     def __init__(self, base_url):
@@ -38,9 +39,19 @@ class UseCase2Tester(EnhancedVerificationBase):
         self.primary_url = "https://chroma-primary.onrender.com"
         self.replica_url = "https://chroma-replica.onrender.com"
         
+        # ENHANCED LOGGING: Set up comprehensive file-based logging
+        self.logger = setup_test_logging("use_case_2_manual")
+        self.logger.info(f"USE CASE 2 Manual Testing started - Session: {self.session_id}")
+        self.logger.info(f"Base URL: {base_url}")
+        self.logger.info("Enhanced verification and logging systems initialized")
+        
     def log(self, message, level="INFO"):
         timestamp = datetime.now().strftime("%H:%M:%S")
         print(f"[{timestamp}] {level}: {message}")
+        
+        # ENHANCED LOGGING: Also log to file
+        if hasattr(self, 'logger'):
+            getattr(self.logger, level.lower(), self.logger.info)(message)
         
     def wait_for_user(self, message):
         """Wait for user confirmation before proceeding"""
@@ -249,6 +260,27 @@ class UseCase2Tester(EnhancedVerificationBase):
         print(f"   Reason: {reason}")
         if details:
             print(f"   Details: {details}")
+        
+        # ENHANCED LOGGING: Log detailed failure information to file
+        if hasattr(self, 'logger'):
+            self.logger.error(f"TEST FAILURE: {test}")
+            self.logger.error(f"Reason: {reason}")
+            if details:
+                self.logger.error(f"Details: {details}")
+        
+        # Log comprehensive error context
+        error_context = {
+            "test_name": test,
+            "reason": reason,
+            "details": details,
+            "session_id": self.session_id,
+            "base_url": self.base_url,
+            "test_collections": self.test_collections,
+            "deleted_collections": self.deleted_collections,
+            "timestamp": time.time()
+        }
+        log_error_details(error_context, "use_case_2_manual")
+        
         return False
 
     def create_test_collection(self, name_suffix="", test_name=None):

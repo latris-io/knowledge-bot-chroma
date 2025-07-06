@@ -37,6 +37,7 @@ from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 import sys
 import os
+from logging_config import setup_test_logging, log_error_details, log_system_status
 
 # Enhanced Test Base for selective cleanup (same pattern as other use cases)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -80,19 +81,21 @@ class ScalabilityTester(EnhancedTestBase):
         self.performance_data = {}
         self.feature_states = {}
         
-        # Configure logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
-        self.logger = logging.getLogger(__name__)
+        # ENHANCED LOGGING: Set up comprehensive file-based logging
+        self.logger = setup_test_logging("use_case_5_scalability")
+        self.logger.info(f"USE CASE 5 Scalability Testing started - Session: {self.session_id}")
+        self.logger.info(f"Base URL: {base_url}")
+        self.logger.info("Enhanced test base, performance tracking and logging systems initialized")
         
     def log(self, message: str):
         """Enhanced logging with session tracking"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         session_msg = f"[{self.session_id}] {message}"
         print(f"{timestamp} - {session_msg}")
-        self.logger.info(session_msg)
+        
+        # ENHANCED LOGGING: Log to file with comprehensive tracking
+        if hasattr(self, 'logger'):
+            self.logger.info(session_msg)
     
     def make_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """Make HTTP request with error handling and performance tracking"""
@@ -232,6 +235,11 @@ class ScalabilityTester(EnhancedTestBase):
             self.record_test_result("baseline_performance", success, 
                                   f"Success rate: {performance['success_rate']:.1f}%, "
                                   f"Throughput: {performance['throughput_ops_sec']:.1f} ops/sec")
+            
+            # ENHANCED LOGGING: Log test result details
+            if hasattr(self, 'logger'):
+                self.logger.info(f"TEST RESULT: baseline_performance - Success: {success}")
+                self.logger.info(f"Performance metrics: {performance}")
             
             if success:
                 self.log("✅ PHASE 1 SUCCESS: Baseline performance established")
