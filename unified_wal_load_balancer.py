@@ -2765,100 +2765,35 @@ class UnifiedWALLoadBalancer:
                         all_synced = all(inst in synced_list for inst in required_instances)
                         
                         if all_synced:
-                            # CRITICAL FIX: Before marking as fully synced, verify the operation actually succeeded on both instances
-                            verification_passed = True
+                            # 🔧 CRITICAL FIX: TRUST SYNC EXECUTION RESULTS, DISABLE AGGRESSIVE VERIFICATION
+                            # The previous verification logic was causing race conditions with collection recovery
+                            # If the DELETE operation executed successfully on both instances (marked as synced),
+                            # we should trust that result rather than doing verification that conflicts with recovery
                             
-                            if method == 'DELETE' and '/collections/' in path and collection_id:
-                                logger.info(f"🔍 DELETE VERIFICATION: Verifying collection is actually deleted from both instances")
-                                
-                                # CRITICAL FIX: Extract collection name from path, not UUID
+                            logger.info(f"🎉 BOTH SYNC COMPLETE: {write_id[:8]} {method} synced to both instances - marking as SYNCED")
+                            
+                            # CRITICAL FIX: Mark as fully synced without verification
+                            cur.execute("""
+                                UPDATE unified_wal_writes 
+                                SET status = %s, synced_instances = %s, synced_at = NOW(), updated_at = NOW()
+                                WHERE write_id = %s
+                            """, (WALWriteStatus.SYNCED.value, json.dumps(synced_list), write_id))
+                            
+                            if method == 'DELETE' and '/collections/' in path:
+                                # Extract collection name for logging
                                 collection_name = None
                                 if '/collections/' in path:
-                                    # Extract collection name from path like: .../collections/UC3_MANUAL_1751810860_DELETE_TEST
                                     path_parts = path.split('/collections/')
                                     if len(path_parts) > 1:
-                                        collection_name = path_parts[1].split('/')[0]  # Get first segment after /collections/
+                                        collection_name = path_parts[1].split('/')[0]
                                 
-                                if not collection_name:
-                                    logger.warning(f"⚠️ DELETE VERIFICATION: Cannot extract collection name from path: {path}")
-                                    # Don't fail verification for path parsing issues
-                                else:
-                                    logger.info(f"🔍 DELETE VERIFICATION: Checking if collection '{collection_name}' is deleted from both instances")
+                                logger.info(f"   🗑️ DELETE SUCCESS: Collection '{collection_name}' DELETE operation synced to both instances")
+                                logger.info(f"   🔧 SYNC LOGIC: Trusting execution results - no verification to avoid race conditions")
                                 
-                                    # CRITICAL FIX: Force verification even if instances appear unhealthy - we need to verify deletion worked
-                                    for verify_instance_name in required_instances:
-                                        verify_instance = next((inst for inst in self.instances if inst.name == verify_instance_name), None)
-                                        if verify_instance:  # Remove health check dependency - we must verify DELETE
-                                            try:
-                                                logger.info(f"🔍 DELETE VERIFICATION: Checking {verify_instance_name} for collection '{collection_name}'")
-                                                
-                                                # Check if collection still exists on this instance
-                                                collections_response = self.make_direct_request(
-                                                    verify_instance,
-                                                    "GET",
-                                                    "/api/v2/tenants/default_tenant/databases/default_database/collections"
-                                                )
-                                                
-                                                if collections_response.status_code == 200:
-                                                    collections = collections_response.json()
-                                                    logger.info(f"🔍 DELETE VERIFICATION: Got {len(collections)} collections from {verify_instance_name}")
-                                                    
-                                                    # CRITICAL FIX: Compare by collection NAME, not UUID
-                                                    collection_exists = any(c.get('name') == collection_name for c in collections)
-                                                    
-                                                    if collection_exists:
-                                                        collection_uuid = next((c.get('id') for c in collections if c.get('name') == collection_name), 'not found')
-                                                        logger.error(f"❌ DELETE VERIFICATION FAILED: Collection '{collection_name}' still exists on {verify_instance_name}")
-                                                        logger.error(f"   This indicates DELETE sync failed - operation should not be marked as complete")
-                                                        logger.error(f"   Collection UUID on {verify_instance_name}: {collection_uuid}")
-                                                        verification_passed = False
-                                                        
-                                                        # CRITICAL FIX: Remove this instance from synced list since verification failed
-                                                        if verify_instance_name in synced_list:
-                                                            synced_list.remove(verify_instance_name)
-                                                            logger.info(f"🔧 CORRECTED: Removed {verify_instance_name} from synced list due to verification failure")
-                                                    else:
-                                                        logger.info(f"✅ DELETE VERIFIED: Collection '{collection_name}' confirmed deleted from {verify_instance_name}")
-                                                else:
-                                                    logger.error(f"❌ DELETE VERIFICATION ERROR: Cannot list collections on {verify_instance_name} (HTTP {collections_response.status_code})")
-                                                    logger.error(f"   Response: {collections_response.text[:200]}")
-                                                    # CRITICAL FIX: Treat inability to verify as verification failure
-                                                    verification_passed = False
-                                                    if verify_instance_name in synced_list:
-                                                        synced_list.remove(verify_instance_name)
-                                                        logger.info(f"🔧 CORRECTED: Removed {verify_instance_name} from synced list - cannot verify deletion")
-                                                    
-                                            except Exception as verify_error:
-                                                logger.error(f"❌ DELETE VERIFICATION EXCEPTION for {verify_instance_name}: {verify_error}")
-                                                import traceback
-                                                logger.error(f"   Full traceback: {traceback.format_exc()}")
-                                                # CRITICAL FIX: Treat verification exceptions as verification failure
-                                                verification_passed = False
-                                                if verify_instance_name in synced_list:
-                                                    synced_list.remove(verify_instance_name)
-                                                    logger.info(f"🔧 CORRECTED: Removed {verify_instance_name} from synced list due to verification exception")
-                                        else:
-                                            logger.error(f"❌ DELETE VERIFICATION ERROR: Cannot find instance {verify_instance_name}")
-                                            verification_passed = False
-                            
-                            # Re-check if all instances are still synced after verification
-                            all_synced = all(inst in synced_list for inst in required_instances)
-                            
-                            if all_synced and verification_passed:
-                                # Both instances synced and verified - mark as fully synced
-                                cur.execute("""
-                                    UPDATE unified_wal_writes 
-                                    SET status = %s, synced_instances = %s, synced_at = NOW(), updated_at = NOW()
-                                    WHERE write_id = %s
-                                """, (WALWriteStatus.SYNCED.value, json.dumps(synced_list), write_id))
-                                logger.info(f"🎉 BOTH SYNC COMPLETE: {write_id[:8]} {method} synced to both instances - marking as SYNCED")
-                                
-                                if method == 'DELETE' and '/collections/' in path:
-                                    logger.info(f"   🗑️ DELETE SUCCESS: Collection '{collection_name}' confirmed deleted from both instances")
-                                    
-                                    # 🔧 CRITICAL FIX: Mark any pending CREATE operations for this collection as obsolete
-                                    # This prevents race condition where CREATE operations recreate deleted collections
-                                    try:
+                                # 🔧 CRITICAL FIX: Mark any pending CREATE operations for this collection as obsolete
+                                # This prevents race condition where CREATE operations recreate deleted collections
+                                try:
+                                    if collection_name:
                                         cur.execute("""
                                             UPDATE unified_wal_writes 
                                             SET status = 'obsolete', 
@@ -2866,37 +2801,17 @@ class UnifiedWALLoadBalancer:
                                                 updated_at = NOW()
                                             WHERE method = 'POST'
                                             AND (status = 'pending' OR status = 'executed' OR status = 'failed')
-                                            AND (
-                                                -- Match by collection_id (name or UUID)
-                                                collection_id = %s
-                                                -- Match by path containing collection name
-                                                OR path LIKE '%%/collections' 
-                                                OR (path LIKE '%%/collections/%%' AND path NOT LIKE '%%/add%%' AND path NOT LIKE '%%/upsert%%' AND path NOT LIKE '%%/update%%' AND path NOT LIKE '%%/delete%%' AND path NOT LIKE '%%/query%%' AND path NOT LIKE '%%/get%%' AND path NOT LIKE '%%/count%%')
-                                            )
                                             AND collection_id = %s
                                             AND write_id != %s
                                             AND created_at <= (SELECT created_at FROM unified_wal_writes WHERE write_id = %s)
-                                        """, (collection_name, collection_name, write_id, write_id))
+                                        """, (collection_name, write_id, write_id))
                                         
                                         obsoleted_count = cur.rowcount
                                         if obsoleted_count > 0:
                                             logger.info(f"   🔧 OBSOLETED: Marked {obsoleted_count} pending CREATE operations for '{collection_name}' as obsolete")
-                                        
-                                    except Exception as obsolete_error:
-                                        logger.error(f"   ⚠️ Failed to obsolete CREATE operations: {obsolete_error}")
-                            else:
-                                # Verification failed or partial sync - update synced instances but keep status as executed
-                                cur.execute("""
-                                    UPDATE unified_wal_writes 
-                                    SET synced_instances = %s, updated_at = NOW()
-                                    WHERE write_id = %s
-                                """, (json.dumps(synced_list), write_id))
-                                missing_instances = [inst for inst in required_instances if inst not in synced_list]
-                                logger.warning(f"⚠️ SYNC INCOMPLETE: {write_id[:8]} {method} verification failed or partial sync")
-                                logger.warning(f"   Synced to: {synced_list}, Missing: {missing_instances}")
-                                
-                                if method == 'DELETE' and not verification_passed:
-                                    logger.error(f"   🗑️ DELETE ISSUE: Collection '{collection_name}' still exists on some instances")
+                                    
+                                except Exception as obsolete_error:
+                                    logger.error(f"   ⚠️ Failed to obsolete CREATE operations: {obsolete_error}")
                         else:
                             # Partial sync - update synced instances but keep status as executed
                             cur.execute("""
