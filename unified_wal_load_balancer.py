@@ -884,9 +884,10 @@ class UnifiedWALLoadBalancer:
                     # 1. Operations with target_instance = target_instance AND executed_on != target_instance (single instance sync)
                     # 2. Operations with target_instance = 'both' AND this instance NOT in synced_instances (both instance sync)
                     
-                    # 🚨 CRITICAL BUG FIX: Use correct PostgreSQL JSON containment operator
-                    # The ? operator checks for key existence, but synced_instances is an array, not an object
-                    # We need to use @> operator to check if the array contains the target instance
+                    # 🔧 CRITICAL FIX: Use correct PostgreSQL JSON array element checking
+                    # synced_instances is a JSON array like ["primary"] or ["primary", "replica"]
+                    # We need to check if the target_instance string exists as an element in this array
+                    # Use ? operator to check if array contains the target instance as a text element
                     cur.execute("""
                         SELECT write_id, method, path, data, headers, collection_id, 
                                timestamp, retry_count, data_size_bytes, priority, target_instance, synced_instances
@@ -896,8 +897,8 @@ class UnifiedWALLoadBalancer:
                             (target_instance = %s AND executed_on != %s) OR
                             (target_instance = 'both' AND (
                                 synced_instances IS NULL OR 
-                                synced_instances = '[]' OR
-                                NOT (synced_instances @> %s)
+                                synced_instances = '[]'::jsonb OR
+                                NOT (synced_instances ? %s)
                             ))
                         )
                         AND retry_count < 3
@@ -907,7 +908,7 @@ class UnifiedWALLoadBalancer:
                         )
                         ORDER BY timestamp ASC, retry_count ASC, priority DESC
                         LIMIT %s
-                    """, (target_instance, target_instance, json.dumps([target_instance]), batch_size * 3))
+                    """, (target_instance, target_instance, target_instance, batch_size * 3))
                     
                     records = cur.fetchall()
                     
