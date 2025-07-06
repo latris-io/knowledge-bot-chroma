@@ -1516,8 +1516,8 @@ class UnifiedWALLoadBalancer:
                                         ))
                                         emergency_conn.commit()
                                         logger.info(f"🚑 EMERGENCY MAPPING FIX: {collection_name} -> {instance.name} UUID: {new_uuid[:8]}")
-                                                                        except Exception as emergency_error:
-                                                logger.error(f"❌ EMERGENCY MAPPING FIX FAILED: {emergency_error}")
+                            except Exception as emergency_error:
+                                logger.error(f"❌ EMERGENCY MAPPING FIX FAILED: {emergency_error}")
                                             
                             else:
                                 logger.warning(f"⚠️ Collection creation response missing UUID or name: new_uuid={new_uuid}, collection_name={collection_name}")
