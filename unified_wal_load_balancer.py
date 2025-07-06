@@ -2774,20 +2774,71 @@ class UnifiedWALLoadBalancer:
                     for row in results:
                         collection_name, source_uuid = row
                         
-                        # CRITICAL FIX: Check for pending DELETE operations before recreating collection
+                        # CRITICAL FIX: Check for incomplete DELETE operations before recreating collection
+                        # This includes both pending DELETEs and incomplete "both" target DELETEs
                         cur.execute("""
                             SELECT COUNT(*) FROM unified_wal_writes 
                             WHERE method = 'DELETE' 
                             AND path LIKE %s 
-                            AND status IN ('executed', 'failed', 'pending')
-                            AND (target_instance = 'both' OR target_instance = %s)
-                        """, (f'%/collections/{collection_name}%', target_instance_name))
+                            AND (
+                                -- Pending or failed DELETEs
+                                status IN ('failed', 'pending')
+                                OR 
+                                -- Incomplete "both" target DELETEs (executed but not synced to target instance)
+                                (
+                                    status = 'executed' 
+                                    AND target_instance = 'both'
+                                    AND (
+                                        synced_instances IS NULL 
+                                        OR synced_instances::text NOT LIKE %s
+                                    )
+                                )
+                                OR
+                                -- Single target DELETEs aimed at this instance
+                                (
+                                    status IN ('executed', 'failed', 'pending')
+                                    AND target_instance = %s
+                                )
+                            )
+                        """, (f'%/collections/{collection_name}%', f'%{target_instance_name}%', target_instance_name))
                         
-                        pending_deletes = cur.fetchone()[0]
+                        incomplete_deletes = cur.fetchone()[0]
                         
-                        if pending_deletes > 0:
-                            logger.warning(f"⚠️ COLLECTION RECOVERY: Skipping '{collection_name}' - has {pending_deletes} pending DELETE operations")
-                            logger.warning(f"   DELETE sync must complete before collection recreation")
+                        if incomplete_deletes > 0:
+                            logger.warning(f"⚠️ COLLECTION RECOVERY: Skipping '{collection_name}' - has {incomplete_deletes} incomplete DELETE operations")
+                            logger.warning(f"   DELETE sync must complete to {target_instance_name} before collection recreation")
+                            
+                            # Enhanced logging to show what specific DELETE operations are blocking recovery
+                            cur.execute("""
+                                SELECT write_id, target_instance, status, synced_instances 
+                                FROM unified_wal_writes 
+                                WHERE method = 'DELETE' 
+                                AND path LIKE %s 
+                                AND (
+                                    status IN ('failed', 'pending')
+                                    OR 
+                                    (
+                                        status = 'executed' 
+                                        AND target_instance = 'both'
+                                        AND (
+                                            synced_instances IS NULL 
+                                            OR synced_instances::text NOT LIKE %s
+                                        )
+                                    )
+                                    OR
+                                    (
+                                        status IN ('executed', 'failed', 'pending')
+                                        AND target_instance = %s
+                                    )
+                                )
+                                ORDER BY created_at DESC
+                            """, (f'%/collections/{collection_name}%', f'%{target_instance_name}%', target_instance_name))
+                            
+                            blocking_operations = cur.fetchall()
+                            for op in blocking_operations:
+                                write_id, target, status, synced = op
+                                logger.warning(f"   Blocking DELETE: {write_id[:8]} target={target} status={status} synced={synced}")
+                            
                             continue
                         
                         missing_collections.append({
