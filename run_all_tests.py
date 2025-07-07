@@ -973,8 +973,9 @@ class ProductionValidator(EnhancedTestBase):
                 mappings_data = mappings_response.json()
                 for mapping in mappings_data.get('collection_mappings', []):
                     if mapping['collection_name'] == test_collection:
-                        primary_uuid = mapping.get('primary_uuid') or mapping.get('primary_collection_id')
-                        replica_uuid = mapping.get('replica_uuid') or mapping.get('replica_collection_id')
+                        # Use full collection IDs for direct instance queries (UUIDs are required)
+                        primary_uuid = mapping.get('primary_collection_id') or mapping.get('primary_uuid')
+                        replica_uuid = mapping.get('replica_collection_id') or mapping.get('replica_uuid')
                         print(f"   Found mapping: P:{primary_uuid[:8] if primary_uuid else 'None'}..., R:{replica_uuid[:8] if replica_uuid else 'None'}...")
                         break
             except Exception as e:
