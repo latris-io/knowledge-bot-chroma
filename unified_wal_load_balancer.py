@@ -1424,8 +1424,19 @@ class UnifiedWALLoadBalancer:
                         # Determine operation type based on path structure
                         if final_path.endswith('/delete'):
                             operation_type = "DOCUMENT DELETE"
+                            # 🔧 CRITICAL FIX: Use POST method for document DELETE operations during sync
+                            actual_method = "POST"
+                            logger.info(f"🔧 METHOD CORRECTION: Document DELETE will use POST method for sync execution")
                         else:
                             operation_type = "COLLECTION DELETE"
+                            # Use DELETE method for collection DELETE operations
+                            actual_method = "DELETE"
+                            logger.info(f"🔧 METHOD CORRECTION: Collection DELETE will use DELETE method for sync execution")
+                        
+                        logger.info(f"🔄 WAL SYNC: Executing {operation_type} on {instance.name}: {final_path}")
+                        
+                        # Execute with the correct HTTP method based on operation type
+                        response = self.make_direct_request(instance, actual_method, final_path, data=data, headers=headers)
                         
                         if response.status_code in [200, 204]:
                             logger.info(f"✅ WAL SYNC: {operation_type} successful on {instance.name} - Status: {response.status_code}")
@@ -1581,7 +1592,18 @@ class UnifiedWALLoadBalancer:
                                 else:
                                     self.mark_write_synced(write_id)
                                     logger.info(f"📝 {operation_type} SYNC: Operation {write_id[:8]} marked as completed (single-target operation)")
-                        else:
+                        
+                        # 🔧 CRITICAL FIX: Mark document DELETE operations as synced (no verification needed)
+                        elif delete_success and operation_type == "DOCUMENT DELETE":
+                            if target_instance_type == 'both':
+                                self.mark_instance_synced(write_id, instance.name)
+                                logger.info(f"📝 {operation_type} SYNC: Operation {write_id[:8]} marked as synced to {instance.name} (both-target operation)")
+                            else:
+                                self.mark_write_synced(write_id)
+                                logger.info(f"📝 {operation_type} SYNC: Operation {write_id[:8]} marked as completed (single-target operation)")
+                        
+                        # Handle failure cases
+                        if not delete_success:
                             logger.error(f"❌ {operation_type} SYNC: Not marking as synced due to failure")
                     
                     # Handle other operations (document operations, etc.)
