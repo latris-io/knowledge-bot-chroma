@@ -1515,7 +1515,6 @@ class UnifiedWALLoadBalancer:
                                                             logger.info(f"🔧 RETRY DELETE: {retry_response.status_code} - {retry_response.text[:100]}")
                                                             
                                                             # Wait a moment for the delete to process
-                                                            import time
                                                             time.sleep(2)
                                                             
                                                         except Exception as retry_error:
