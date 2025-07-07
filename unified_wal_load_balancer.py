@@ -2927,7 +2927,7 @@ class UnifiedWALLoadBalancer:
                             SELECT 1 FROM unified_wal_writes w
                             WHERE w.method = 'DELETE' 
                             AND w.path LIKE '%%/collections/%%'
-                            AND w.created_at > NOW() - INTERVAL '5 minutes'
+                            AND w.created_at > NOW() - INTERVAL '10 minutes'
                             AND (
                                 w.status = 'executed' 
                                 OR w.status = 'synced'
@@ -2963,10 +2963,11 @@ class UnifiedWALLoadBalancer:
                         FROM unified_wal_writes w
                         WHERE w.method = 'DELETE' 
                         AND w.path LIKE '%%/collections/%%'
-                        AND w.created_at > NOW() - INTERVAL '5 minutes'
+                        AND w.created_at > NOW() - INTERVAL '10 minutes'
                         AND (
                             w.status = 'executed' 
                             OR w.status = 'synced'
+                            OR w.status = 'failed'
                             OR (w.status = 'pending' AND w.retry_count < 3)
                         )
                         ORDER BY w.created_at DESC
