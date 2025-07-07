@@ -1421,82 +1421,132 @@ class UnifiedWALLoadBalancer:
                             self.mark_write_failed(write_id, f"{operation_type} failed: HTTP {response.status_code}")
                             continue
                         
-                        # 🔧 CRITICAL FIX: ONLY mark as synced if DELETE actually succeeded
-                        if delete_success:
-                            # 🔧 ENHANCED VERIFICATION: For collection DELETE, verify collection is actually gone
-                            if method == 'DELETE' and '/collections/' in final_path:
-                                # Extract collection name for verification
+                        # 🔧 ENHANCED VERIFICATION: For collection DELETE operations, verify deletion actually worked
+                        # This detects cases where ChromaDB returns HTTP 200 but doesn't actually delete
+                        if delete_success and method == 'DELETE' and '/collections/' in final_path:
+                            # Extract collection name for verification
+                            try:
                                 collection_name = None
                                 if '/collections/' in final_path:
                                     path_parts = final_path.split('/collections/')
                                     if len(path_parts) > 1:
                                         collection_identifier = path_parts[1].split('/')[0]
                                         
-                                        # If it's a UUID, try to resolve back to collection name for verification
-                                        import re
-                                        if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_identifier):
-                                            # Try to find collection name from mapping
-                                            try:
-                                                with self.get_db_connection() as conn:
-                                                    with conn.cursor() as cur:
-                                                        if instance.name == 'primary':
-                                                            cur.execute("""
-                                                                SELECT collection_name FROM collection_id_mapping 
-                                                                WHERE primary_collection_id = %s
-                                                            """, (collection_identifier,))
-                                                        else:
-                                                            cur.execute("""
-                                                                SELECT collection_name FROM collection_id_mapping 
-                                                                WHERE replica_collection_id = %s
-                                                            """, (collection_identifier,))
-                                                        result = cur.fetchone()
-                                                        if result:
-                                                            collection_name = result[0]
-                                                            logger.info(f"🔍 DELETE VERIFICATION: Resolved UUID {collection_identifier[:8]} to name '{collection_name}'")
-                                                        else:
-                                                            logger.warning(f"⚠️ DELETE VERIFICATION: Could not resolve UUID {collection_identifier[:8]} to collection name")
-                                                            collection_name = collection_identifier  # Use UUID as fallback
-                                            except Exception as resolve_error:
-                                                logger.error(f"❌ DELETE VERIFICATION: Error resolving UUID: {resolve_error}")
-                                                collection_name = collection_identifier  # Use UUID as fallback
+                                        # Check if it's a UUID (36 chars with hyphens) or collection name
+                                        if len(collection_identifier) == 36 and '-' in collection_identifier:
+                                            # It's a UUID, try to find the collection name from mappings
+                                            with self.get_db_connection() as conn:
+                                                with conn.cursor() as cur:
+                                                    if instance.name == 'primary':
+                                                        cur.execute("""
+                                                            SELECT collection_name FROM collection_id_mapping 
+                                                            WHERE primary_collection_id = %s
+                                                        """, (collection_identifier,))
+                                                    else:
+                                                        cur.execute("""
+                                                            SELECT collection_name FROM collection_id_mapping 
+                                                            WHERE replica_collection_id = %s
+                                                        """, (collection_identifier,))
+                                                    result = cur.fetchone()
+                                                    collection_name = result[0] if result else collection_identifier
                                         else:
                                             # It's already a collection name
                                             collection_name = collection_identifier
                                 
-                                # 🔧 VERIFICATION: Check that collection is actually deleted
-                                logger.info(f"🔍 DELETE VERIFICATION: Checking if '{collection_name}' is actually deleted from {instance.name}")
-                                
-                                try:
-                                    # List collections to verify deletion
-                                    verify_response = self.make_direct_request(
-                                        instance, "GET", 
-                                        "/api/v2/tenants/default_tenant/databases/default_database/collections"
-                                    )
+                                if collection_name:
+                                    logger.info(f"🔍 DELETE VERIFICATION: Checking if '{collection_name}' was actually deleted from {instance.name}")
                                     
-                                    if verify_response.status_code == 200:
-                                        collections = verify_response.json()
-                                        collection_still_exists = any(
-                                            coll.get('name') == collection_name for coll in collections
-                                        )
+                                    # 🚨 AGGRESSIVE RETRY STRATEGY: Try multiple approaches when DELETE claims success but verification fails
+                                    max_verification_attempts = 3
+                                    verification_success = False
+                                    
+                                    for verify_attempt in range(max_verification_attempts):
+                                        logger.info(f"🔍 DELETE VERIFICATION: Attempt {verify_attempt + 1}/{max_verification_attempts}")
                                         
-                                        if collection_still_exists:
-                                            logger.error(f"❌ DELETE VERIFICATION FAILED: Collection '{collection_name}' still exists on {instance.name}")
-                                            logger.error(f"   DELETE operation claimed success but collection is still present!")
-                                            logger.error(f"   Marking DELETE as FAILED instead of synced")
-                                            self.mark_write_failed(write_id, f"DELETE verification failed: collection '{collection_name}' still exists on {instance.name}")
-                                            continue
-                                        else:
-                                            logger.info(f"✅ DELETE VERIFICATION PASSED: Collection '{collection_name}' confirmed deleted from {instance.name}")
-                                            delete_success = True
-                                    else:
-                                        logger.warning(f"⚠️ DELETE VERIFICATION: Could not list collections on {instance.name} (HTTP {verify_response.status_code})")
-                                        logger.warning(f"   Assuming DELETE succeeded based on HTTP response")
-                                        delete_success = True
-                                        
-                                except Exception as verify_error:
-                                    logger.error(f"❌ DELETE VERIFICATION: Error checking collection existence: {verify_error}")
-                                    logger.warning(f"   Assuming DELETE succeeded based on HTTP response")
-                                    delete_success = True
+                                        try:
+                                            # List collections to verify deletion
+                                            verify_response = self.make_direct_request(
+                                                instance, "GET", 
+                                                "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                            )
+                                            
+                                            if verify_response.status_code == 200:
+                                                collections = verify_response.json()
+                                                collection_still_exists = any(
+                                                    coll.get('name') == collection_name for coll in collections
+                                                )
+                                                
+                                                if collection_still_exists:
+                                                    logger.error(f"❌ DELETE VERIFICATION FAILED (attempt {verify_attempt + 1}): Collection '{collection_name}' still exists on {instance.name}")
+                                                    
+                                                    if verify_attempt < max_verification_attempts - 1:
+                                                        # 🚨 AGGRESSIVE RETRY: Try different DELETE approaches
+                                                        logger.info(f"🔧 AGGRESSIVE DELETE RETRY: Using alternative approach {verify_attempt + 1}")
+                                                        
+                                                        if verify_attempt == 0:
+                                                            # First retry: Use collection name instead of UUID
+                                                            retry_path = f"/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
+                                                            logger.info(f"🔧 RETRY 1: DELETE using collection name: {retry_path}")
+                                                        elif verify_attempt == 1:
+                                                            # Second retry: Find the actual UUID and use that
+                                                            actual_uuid = None
+                                                            for coll in collections:
+                                                                if coll.get('name') == collection_name:
+                                                                    actual_uuid = coll.get('id')
+                                                                    break
+                                                            if actual_uuid:
+                                                                retry_path = f"/api/v2/tenants/default_tenant/databases/default_database/collections/{actual_uuid}"
+                                                                logger.info(f"🔧 RETRY 2: DELETE using actual UUID {actual_uuid[:8]}: {retry_path}")
+                                                            else:
+                                                                logger.error(f"❌ RETRY 2: Could not find UUID for collection '{collection_name}'")
+                                                                continue
+                                                        
+                                                        # Execute the retry DELETE
+                                                        try:
+                                                            retry_response = self.make_direct_request(
+                                                                instance, "DELETE", retry_path
+                                                            )
+                                                            logger.info(f"🔧 RETRY DELETE: {retry_response.status_code} - {retry_response.text[:100]}")
+                                                            
+                                                            # Wait a moment for the delete to process
+                                                            import time
+                                                            time.sleep(2)
+                                                            
+                                                        except Exception as retry_error:
+                                                            logger.error(f"❌ RETRY DELETE failed: {retry_error}")
+                                                    else:
+                                                        # Final attempt failed
+                                                        logger.error(f"❌ FINAL DELETE VERIFICATION FAILED: Collection '{collection_name}' still exists after {max_verification_attempts} attempts")
+                                                        logger.error(f"   DELETE operation claimed success but collection is still present!")
+                                                        logger.error(f"   This indicates a ChromaDB instance bug where DELETE returns HTTP 200 but doesn't actually delete")
+                                                        self.mark_write_failed(write_id, f"DELETE verification failed after {max_verification_attempts} attempts: collection '{collection_name}' still exists on {instance.name}")
+                                                        delete_success = False
+                                                        break
+                                                else:
+                                                    logger.info(f"✅ DELETE VERIFICATION PASSED (attempt {verify_attempt + 1}): Collection '{collection_name}' confirmed deleted from {instance.name}")
+                                                    verification_success = True
+                                                    delete_success = True
+                                                    break
+                                            else:
+                                                logger.warning(f"⚠️ DELETE VERIFICATION: Could not list collections on {instance.name} (HTTP {verify_response.status_code})")
+                                                logger.warning(f"   Assuming DELETE succeeded based on HTTP response")
+                                                verification_success = True
+                                                delete_success = True
+                                                break
+                                                
+                                        except Exception as verify_error:
+                                            logger.error(f"❌ DELETE VERIFICATION: Error checking collection existence (attempt {verify_attempt + 1}): {verify_error}")
+                                            if verify_attempt == max_verification_attempts - 1:
+                                                logger.warning(f"   Final attempt failed, assuming DELETE succeeded based on HTTP response")
+                                                verification_success = True
+                                                delete_success = True
+                                else:
+                                    logger.warning(f"⚠️ DELETE VERIFICATION: Could not extract collection name from path {final_path}")
+                                    delete_success = True  # Assume success if we can't verify
+                                    
+                            except Exception as extraction_error:
+                                logger.error(f"❌ DELETE VERIFICATION: Error extracting collection info: {extraction_error}")
+                                delete_success = True  # Assume success if we can't verify
                             
                             # Only mark as synced if verification passed
                             if delete_success:
