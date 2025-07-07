@@ -555,14 +555,21 @@ class UseCase2Tester(EnhancedVerificationBase):
                     
                 collections = response.json()
                 collection_names = [c['name'] for c in collections]
-                found_collections = [name for name in self.test_collections if name in collection_names]
+                
+                # CRITICAL FIX: Separate regular collections from deleted collections for validation
+                # Only check consistency for collections that should EXIST (not deleted ones)
+                regular_collections = [col for col in self.test_collections if col not in self.deleted_collections]
+                found_collections = [name for name in regular_collections if name in collection_names]
                 
                 self.log(f"📊 Collection-level verification (attempt {attempt + 1}/{max_retries}):")
-                self.log(f"   Created during failure: {len(self.test_collections)}")
+                self.log(f"   Regular collections created during failure: {len(regular_collections)}")
                 self.log(f"   Found after recovery: {len(found_collections)}")
-                self.log(f"   Collection consistency: {len(found_collections)}/{len(self.test_collections)} = {len(found_collections)/len(self.test_collections)*100:.1f}%" if self.test_collections else "No test collections")
+                self.log(f"   Collection consistency: {len(found_collections)}/{len(regular_collections)} = {len(found_collections)/len(regular_collections)*100:.1f}%" if regular_collections else "No regular collections to check")
                 
-                collection_consistency = len(found_collections) == len(self.test_collections)
+                if len(self.deleted_collections) > 0:
+                    self.log(f"   Deleted collections (should NOT exist): {len(self.deleted_collections)} ({', '.join(self.deleted_collections)})")
+                
+                collection_consistency = len(found_collections) == len(regular_collections)
                 
                 # CRITICAL FIX: Verify collections actually exist on PRIMARY instance
                 # This is the core USE CASE 2 functionality - replica→primary sync
@@ -570,7 +577,7 @@ class UseCase2Tester(EnhancedVerificationBase):
                 primary_sync_success = True
                 primary_collections_found = 0
                 
-                if self.test_collections:
+                if regular_collections:
                     try:
                         # Check PRIMARY instance directly 
                         primary_response = requests.get(
@@ -581,20 +588,23 @@ class UseCase2Tester(EnhancedVerificationBase):
                         if primary_response.status_code == 200:
                             primary_collections = primary_response.json()
                             primary_collection_names = [c['name'] for c in primary_collections]
-                            primary_found = [name for name in self.test_collections if name in primary_collection_names]
+                            primary_found = [name for name in regular_collections if name in primary_collection_names]
                             primary_collections_found = len(primary_found)
                             
                             self.log(f"   📊 PRIMARY INSTANCE CHECK:")
-                            self.log(f"      Collections created during primary failure: {len(self.test_collections)}")
+                            self.log(f"      Regular collections created during primary failure: {len(regular_collections)}")
                             self.log(f"      Collections found on primary after recovery: {primary_collections_found}")
-                            self.log(f"      Primary sync success: {primary_collections_found}/{len(self.test_collections)} = {primary_collections_found/len(self.test_collections)*100:.1f}%")
+                            self.log(f"      Primary sync success: {primary_collections_found}/{len(regular_collections)} = {primary_collections_found/len(regular_collections)*100:.1f}%" if regular_collections else "No regular collections to check")
                             
-                            if primary_collections_found == len(self.test_collections):
-                                self.log(f"   ✅ CORE SUCCESS: All collections synced from replica to primary!")
+                            if len(self.deleted_collections) > 0:
+                                self.log(f"      Deleted collections (should NOT exist): {len(self.deleted_collections)} ({', '.join(self.deleted_collections)})")
+                            
+                            if primary_collections_found == len(regular_collections):
+                                self.log(f"   ✅ CORE SUCCESS: All regular collections synced from replica to primary!")
                                 primary_sync_success = True
                             else:
-                                self.log(f"   ❌ CORE FAILURE: Only {primary_collections_found}/{len(self.test_collections)} collections synced to primary")
-                                self.log(f"      Collections missing from primary: {set(self.test_collections) - set(primary_found)}")
+                                self.log(f"   ❌ CORE FAILURE: Only {primary_collections_found}/{len(regular_collections)} regular collections synced to primary")
+                                self.log(f"      Collections missing from primary: {set(regular_collections) - set(primary_found)}")
                                 primary_sync_success = False
                         else:
                             self.log(f"   ❌ Cannot check primary instance: HTTP {primary_response.status_code}")
