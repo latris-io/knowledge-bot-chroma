@@ -243,7 +243,8 @@ class UnifiedWALLoadBalancer:
             "concurrent_requests": 0,
             "total_requests_processed": 0,
             "timeout_requests": 0,
-            "queue_full_rejections": 0
+            "queue_full_rejections": 0,
+            "method_normalizations": 0,
         }
 
         # 🧪 TESTING MODE - For optimized connection pooling during rapid operations
@@ -685,6 +686,16 @@ class UnifiedWALLoadBalancer:
                     resolved_collection_id = collection_identifier
         data_size = len(data) if data else 0
         
+        # 🔧 CONSISTENCY FIX: Normalize DELETE operations in WAL
+        # Store both original and normalized method for consistency
+        original_method = method
+        normalized_method = method
+        
+        # Normalize document DELETE operations (POST /delete) to DELETE method for consistency
+        if method == "POST" and path.endswith('/delete'):
+            normalized_method = "DELETE"
+            logger.info(f"🔧 WAL NORMALIZATION: Document DELETE operation normalized: POST /delete → DELETE")
+        
         # INTELLIGENT DELETION HANDLING FOR CHROMADB ID SYNCHRONIZATION
         converted_data = data
         original_data = None
@@ -742,7 +753,7 @@ class UnifiedWALLoadBalancer:
                             VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s)
                         """, (
                             write_id,
-                            method,
+                            normalized_method,  # 🔧 CONSISTENCY FIX: Use normalized method
                             path,
                             converted_data,  # Use converted data
                             json.dumps(headers) if headers else None,
@@ -751,8 +762,8 @@ class UnifiedWALLoadBalancer:
                             executed_on,
                             WALWriteStatus.EXECUTED.value if executed_on else WALWriteStatus.PENDING.value,
                             data_size,
-                            1 if (method == "DELETE" or path.endswith('/delete')) else 0,  # DELETE operations and POST /delete get higher priority
-                            original_data,  # Store original for reference
+                            1 if (normalized_method == "DELETE" or path.endswith('/delete')) else 0,  # 🔧 Use normalized method for priority
+                            original_data if original_data else (json.dumps({"original_method": original_method}).encode() if original_method != normalized_method else None),  # Store original method if different
                             conversion_type  # Track conversion type
                         ))
                         conn.commit()
@@ -760,6 +771,8 @@ class UnifiedWALLoadBalancer:
             self.stats["total_wal_writes"] += 1
             if conversion_type:
                 self.stats["deletion_conversions"] = self.stats.get("deletion_conversions", 0) + 1
+            if original_method != normalized_method:
+                self.stats["method_normalizations"] = self.stats.get("method_normalizations", 0) + 1
                 
             # Enhanced logging with collection info
             if resolved_collection_id != collection_identifier:
@@ -772,6 +785,8 @@ class UnifiedWALLoadBalancer:
             
             if conversion_type:
                 logger.info(f"🔄 Deletion conversion applied: {conversion_type}")
+            if original_method != normalized_method:
+                logger.info(f"🔧 Method normalization: {original_method} → {normalized_method}")
                 
             return write_id
             
@@ -1403,15 +1418,20 @@ class UnifiedWALLoadBalancer:
                             continue
                     
                     # 🔧 ENHANCED: Handle both collection and document DELETE operations
-                    elif (method == 'DELETE' and '/collections/' in final_path) or (method == 'POST' and '/delete' in final_path):
+                    # Note: All DELETE operations are now normalized to method="DELETE" in WAL
+                    elif method == 'DELETE' and '/collections/' in final_path:
                         delete_success = False
-                        operation_type = "COLLECTION DELETE" if method == 'DELETE' else "DOCUMENT DELETE"
+                        # Determine operation type based on path structure
+                        if final_path.endswith('/delete'):
+                            operation_type = "DOCUMENT DELETE"
+                        else:
+                            operation_type = "COLLECTION DELETE"
                         
                         if response.status_code in [200, 204]:
                             logger.info(f"✅ WAL SYNC: {operation_type} successful on {instance.name} - Status: {response.status_code}")
                             delete_success = True
                         elif response.status_code == 404:
-                            if method == 'DELETE':
+                            if operation_type == "COLLECTION DELETE":
                                 # Collection DELETE: 404 means collection not found = goal achieved
                                 logger.info(f"✅ WAL SYNC: {operation_type} successful on {instance.name} - Status: 404 (collection not found - goal achieved)")
                                 delete_success = True
@@ -1429,7 +1449,7 @@ class UnifiedWALLoadBalancer:
                         
                         # 🔧 ENHANCED VERIFICATION: For collection DELETE operations, verify deletion actually worked
                         # This detects cases where ChromaDB returns HTTP 200 but doesn't actually delete
-                        if delete_success and method == 'DELETE' and '/collections/' in final_path:
+                        if delete_success and operation_type == "COLLECTION DELETE":
                             # Extract collection name for verification
                             try:
                                 collection_name = None
@@ -1584,7 +1604,7 @@ class UnifiedWALLoadBalancer:
                     
                     # Clean up collection mapping if DELETE was successful
                     if (method == 'DELETE' and 
-                        '/collections/' in final_path and 
+                        operation_type == "COLLECTION DELETE" and 
                         response.status_code in [200, 204]):
                         try:
                             # Extract collection name from the original WAL record for mapping cleanup
