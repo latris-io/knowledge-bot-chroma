@@ -1126,21 +1126,35 @@ class ProductionValidator(EnhancedTestBase):
             print("   - System integrity: ✅")
             return True
         
-        # BASIC SUCCESS: Load balancer working correctly (core functionality)
+        # CRITICAL FIX: Don't claim success if instance verification fails
         elif (lb_delete_me_count == expected_delete_me and 
               lb_keep_me_count == expected_keep_me):
             
-            # Validate system integrity after basic DELETE sync success
+            # Check if instance verification actually worked
+            if primary_delete_me_count == -1 or replica_delete_me_count == -1:
+                return self.fail("Document DELETE Sync", 
+                               "Instance-level verification failed with HTTP 400 errors",
+                               f"Cannot verify DELETE sync on instances: Primary={primary_delete_me_count}, Replica={replica_delete_me_count}")
+            
+            # Only claim success if we can actually verify instance sync
+            if (primary_delete_me_count != expected_delete_me or 
+                primary_keep_me_count != expected_keep_me or
+                replica_delete_me_count != expected_delete_me or
+                replica_keep_me_count != expected_keep_me):
+                
+                return self.fail("Document DELETE Sync",
+                               "DELETE sync verification failed - documents not properly synced between instances",
+                               f"Expected: 0 delete_me, 4 keep_me on both instances. Got: P({primary_delete_me_count}, {primary_keep_me_count}), R({replica_delete_me_count}, {replica_keep_me_count})")
+            
+            # Validate system integrity after verified DELETE sync success
             if not self.validate_system_integrity("Document DELETE Sync"):
                 return False
                 
-            print("✅ VALIDATED: Load balancer DELETE sync working correctly")
+            print("✅ VALIDATED: DELETE sync working correctly on all levels")
             print("   - Document group deletion via load balancer: ✅")
             print("   - Selective metadata-based deletion: ✅")
-            print("   - Instance sync status:")
-            print(f"     Primary: {primary_delete_me_count} delete_me, {primary_keep_me_count} keep_me")
-            print(f"     Replica: {replica_delete_me_count} delete_me, {replica_keep_me_count} keep_me")
-            print("   - Note: Instance sync may need more time (user CMS test showed ~1 minute)")
+            print("   - Primary instance sync: ✅ Verified")
+            print("   - Replica instance sync: ✅ Verified")
             print("   - System integrity: ✅")
             return True
         
