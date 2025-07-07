@@ -1338,12 +1338,30 @@ class UnifiedWALLoadBalancer:
                             logger.info(f"ℹ️ UUID mapping not needed: {collection_id[:8]} (same on both instances)")
                             # Continue with current UUID
                     
+                    # 🔧 CRITICAL FIX: Correct HTTP method for DELETE operations BEFORE execution
+                    actual_method = method
+                    operation_type = None
+                    
+                    if method == 'DELETE' and '/collections/' in final_path:
+                        # Determine operation type and correct method based on path structure
+                        if final_path.endswith('/delete'):
+                            operation_type = "DOCUMENT DELETE"
+                            # Document DELETE operations require POST method
+                            actual_method = "POST"
+                            logger.info(f"🔧 METHOD CORRECTION: Document DELETE will use POST method for sync execution")
+                        else:
+                            operation_type = "COLLECTION DELETE"
+                            # Collection DELETE operations use DELETE method
+                            actual_method = "DELETE"
+                            logger.info(f"🔧 METHOD CORRECTION: Collection DELETE will use DELETE method for sync execution")
+                    
                     # 🔧 CRITICAL FIX: ALWAYS ATTEMPT THE OPERATION - NO EARLY RETURNS
                     # Previous logic had too many paths that marked as synced without execution
-                    logger.info(f"🔄 WAL SYNC: Executing {method} on {instance.name}: {final_path}")
+                    operation_label = operation_type if operation_type else method
+                    logger.info(f"🔄 WAL SYNC: Executing {operation_label} on {instance.name}: {final_path}")
                     
-                    # Make the sync request with normalized path
-                    response = self.make_direct_request(instance, method, final_path, data=data, headers=headers)
+                    # Make the sync request with corrected method and normalized path
+                    response = self.make_direct_request(instance, actual_method, final_path, data=data, headers=headers)
                     
                     # CRITICAL FIX: Handle collection creation sync with proper error handling including 409 Conflict
                     if (method == 'POST' and 
@@ -1417,26 +1435,9 @@ class UnifiedWALLoadBalancer:
                             self.mark_write_failed(write_id, f"Collection creation failed: HTTP {response.status_code}")
                             continue
                     
-                    # 🔧 ENHANCED: Handle both collection and document DELETE operations
-                    # Note: All DELETE operations are now normalized to method="DELETE" in WAL
-                    elif method == 'DELETE' and '/collections/' in final_path:
+                    # 🔧 ENHANCED: Handle DELETE operations (method correction already applied above)
+                    elif operation_type and operation_type.endswith('DELETE'):
                         delete_success = False
-                        # Determine operation type based on path structure
-                        if final_path.endswith('/delete'):
-                            operation_type = "DOCUMENT DELETE"
-                            # 🔧 CRITICAL FIX: Use POST method for document DELETE operations during sync
-                            actual_method = "POST"
-                            logger.info(f"🔧 METHOD CORRECTION: Document DELETE will use POST method for sync execution")
-                        else:
-                            operation_type = "COLLECTION DELETE"
-                            # Use DELETE method for collection DELETE operations
-                            actual_method = "DELETE"
-                            logger.info(f"🔧 METHOD CORRECTION: Collection DELETE will use DELETE method for sync execution")
-                        
-                        logger.info(f"🔄 WAL SYNC: Executing {operation_type} on {instance.name}: {final_path}")
-                        
-                        # Execute with the correct HTTP method based on operation type
-                        response = self.make_direct_request(instance, actual_method, final_path, data=data, headers=headers)
                         
                         if response.status_code in [200, 204]:
                             logger.info(f"✅ WAL SYNC: {operation_type} successful on {instance.name} - Status: {response.status_code}")
@@ -1625,8 +1626,7 @@ class UnifiedWALLoadBalancer:
                     # ... existing mapping code ...
                     
                     # Clean up collection mapping if DELETE was successful
-                    if (method == 'DELETE' and 
-                        operation_type == "COLLECTION DELETE" and 
+                    if (operation_type == "COLLECTION DELETE" and 
                         response.status_code in [200, 204]):
                         try:
                             # Extract collection name from the original WAL record for mapping cleanup
