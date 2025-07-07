@@ -1100,12 +1100,18 @@ class UnifiedWALLoadBalancer:
                             if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_name):
                                 logger.info(f"🗑️ COLLECTION DELETE: Removing entire collection '{collection_name}' from {instance.name}")
                                 
-                                # 🔧 ENHANCED: Try multiple UUID resolution methods for cross-outage scenarios
-                                resolved_uuid = self.resolve_collection_name_to_uuid(collection_name, instance.name)
-                                if resolved_uuid:
-                                    final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{resolved_uuid}')
-                                    logger.info(f"✅ Collection DELETE: Using UUID path for {instance.name}: {collection_name} -> {resolved_uuid[:8]}")
-                                else:
+                                # 🚨 CRITICAL FIX: DON'T use UUID resolution for collection DELETE operations
+                                # User confirmed manual DELETE with collection name works perfectly:
+                                # curl -X DELETE "https://chroma-replica.onrender.com/.../collections/UC3_MANUAL_1751916583_DELETE_TEST"
+                                # The UUID resolution was converting to wrong/stale UUID causing DELETE to fail
+                                logger.info(f"🔧 Collection DELETE: Using collection NAME directly (no UUID resolution): {collection_name}")
+                                final_path = normalized_path  # Use collection name directly
+                                
+                                # Skip the UUID resolution that was causing the issue
+                                logger.info(f"✅ Collection DELETE: Will use name-based path: {final_path}")
+                                
+                                # Note: The cross-outage fallback code below is also skipped for collection DELETE
+                                if False:  # Disabled UUID resolution
                                     # 🔧 CROSS-OUTAGE FIX: Try to find collection via direct instance query
                                     # This handles cases where collection was created during different outage
                                     logger.info(f"🔍 Cross-outage resolution: Checking for '{collection_name}' directly on {instance.name}")
@@ -1139,7 +1145,7 @@ class UnifiedWALLoadBalancer:
                                     except Exception as cross_outage_error:
                                         logger.warning(f"⚠️ Cross-outage resolution failed: {cross_outage_error}")
                                     
-                                    logger.info(f"⚠️ Collection DELETE: No UUID mapping found for '{collection_name}', using name-based DELETE")
+                                    pass  # UUID resolution disabled for collection DELETE - using name-based DELETE
                     
                     elif is_document_delete:
                         # This is a document-level DELETE operation (documents within collection)
