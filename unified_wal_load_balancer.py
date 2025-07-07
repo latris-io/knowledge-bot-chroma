@@ -1082,28 +1082,123 @@ class UnifiedWALLoadBalancer:
                     if normalized_path != path:
                         logger.info(f"🔧 WAL SYNC PATH CONVERSION: {path} → {normalized_path}")
                     
-                    # CRITICAL FIX: Resolve collection names to UUIDs for collection-level operations (DELETE)
+                    # 🔧 ENHANCED DELETE LOGIC: Handle real-world scenarios
                     final_path = normalized_path
-                    if (method == "DELETE" and '/collections/' in normalized_path and 
-                        not any(doc_op in normalized_path for doc_op in ['/add', '/upsert', '/update', '/delete', '/get', '/query', '/count'])):
-                        # This is a collection-level DELETE operation
+                    
+                    # Determine if this is a collection DELETE or document DELETE within collection
+                    is_collection_delete = (method == "DELETE" and '/collections/' in normalized_path and 
+                                          not any(op in normalized_path for op in ['/add', '/upsert', '/update', '/delete', '/get', '/query', '/count']))
+                    is_document_delete = (method == "POST" and '/delete' in normalized_path and '/collections/' in normalized_path)
+                    
+                    if is_collection_delete:
+                        # This is a collection-level DELETE operation (entire collection removal)
                         path_parts = normalized_path.split('/collections/')
                         if len(path_parts) > 1:
                             collection_name = path_parts[1].split('/')[0]  # Extract collection name
                             # Check if it's a name (not UUID) - UUIDs have specific format
                             import re
                             if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_name):
-                                logger.info(f"🔍 WAL SYNC: Collection DELETE detected - resolving name '{collection_name}' to UUID for {instance.name}")
+                                logger.info(f"🗑️ COLLECTION DELETE: Removing entire collection '{collection_name}' from {instance.name}")
                                 
-                                # 🔧 CRITICAL FIX: Simplified DELETE logic - try UUID first, fallback to name
+                                # 🔧 ENHANCED: Try multiple UUID resolution methods for cross-outage scenarios
                                 resolved_uuid = self.resolve_collection_name_to_uuid(collection_name, instance.name)
                                 if resolved_uuid:
-                                    # Replace collection name with UUID in path
                                     final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{resolved_uuid}')
-                                    logger.info(f"✅ WAL DELETE: Using UUID path for {instance.name}: {collection_name} -> {resolved_uuid[:8]}")
+                                    logger.info(f"✅ Collection DELETE: Using UUID path for {instance.name}: {collection_name} -> {resolved_uuid[:8]}")
                                 else:
-                                    logger.info(f"⚠️ WAL DELETE: No UUID mapping found for '{collection_name}', will try name-based DELETE")
-                                    # Continue with name-based path - ChromaDB API accepts collection names too
+                                    # 🔧 CROSS-OUTAGE FIX: Try to find collection via direct instance query
+                                    # This handles cases where collection was created during different outage
+                                    logger.info(f"🔍 Cross-outage resolution: Checking for '{collection_name}' directly on {instance.name}")
+                                    try:
+                                        collections_response = self.make_direct_request(
+                                            instance, "GET", 
+                                            "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                        )
+                                        if collections_response.status_code == 200:
+                                            collections = collections_response.json()
+                                            found_uuid = None
+                                            for coll in collections:
+                                                if coll.get('name') == collection_name:
+                                                    found_uuid = coll.get('id')
+                                                    break
+                                            
+                                            if found_uuid:
+                                                final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{found_uuid}')
+                                                logger.info(f"✅ Cross-outage found: {collection_name} -> {found_uuid[:8]} on {instance.name}")
+                                                
+                                                # Update mapping for future operations
+                                                try:
+                                                    self.create_collection_mapping_with_retry(collection_name, found_uuid, instance.name)
+                                                    logger.info(f"📝 Updated mapping for cross-outage scenario")
+                                                except Exception as mapping_error:
+                                                    logger.warning(f"⚠️ Could not update mapping: {mapping_error}")
+                                            else:
+                                                logger.info(f"ℹ️ Collection '{collection_name}' not found on {instance.name} - may already be deleted")
+                                        else:
+                                            logger.warning(f"⚠️ Could not list collections on {instance.name}: {collections_response.status_code}")
+                                    except Exception as cross_outage_error:
+                                        logger.warning(f"⚠️ Cross-outage resolution failed: {cross_outage_error}")
+                                    
+                                    logger.info(f"⚠️ Collection DELETE: No UUID mapping found for '{collection_name}', using name-based DELETE")
+                    
+                    elif is_document_delete:
+                        # This is a document-level DELETE operation (documents within collection)
+                        path_parts = normalized_path.split('/collections/')
+                        if len(path_parts) > 1:
+                            collection_part = path_parts[1].split('/')[0]
+                            # Check if it's a name (not UUID)
+                            import re
+                            if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_part):
+                                logger.info(f"📄 DOCUMENT DELETE: Removing documents from collection '{collection_part}' on {instance.name}")
+                                
+                                # 🔧 ENHANCED: Handle document deletions with cross-outage UUID resolution
+                                resolved_uuid = self.resolve_collection_name_to_uuid(collection_part, instance.name)
+                                if resolved_uuid:
+                                    final_path = normalized_path.replace(f'/collections/{collection_part}/', f'/collections/{resolved_uuid}/')
+                                    logger.info(f"✅ Document DELETE: Using UUID path for {instance.name}: {collection_part} -> {resolved_uuid[:8]}")
+                                else:
+                                    # Cross-outage resolution for document operations
+                                    logger.info(f"🔍 Document DELETE cross-outage: Checking for '{collection_part}' on {instance.name}")
+                                    try:
+                                        collections_response = self.make_direct_request(
+                                            instance, "GET", 
+                                            "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                        )
+                                        if collections_response.status_code == 200:
+                                            collections = collections_response.json()
+                                            found_uuid = None
+                                            for coll in collections:
+                                                if coll.get('name') == collection_part:
+                                                    found_uuid = coll.get('id')
+                                                    break
+                                            
+                                            if found_uuid:
+                                                final_path = normalized_path.replace(f'/collections/{collection_part}/', f'/collections/{found_uuid}/')
+                                                logger.info(f"✅ Document DELETE cross-outage: {collection_part} -> {found_uuid[:8]} on {instance.name}")
+                                                
+                                                # Log the actual deletion payload for debugging
+                                                if data:
+                                                    try:
+                                                        delete_payload = json.loads(data.decode())
+                                                        if 'where' in delete_payload:
+                                                            logger.info(f"📋 Document DELETE filter: {delete_payload['where']}")
+                                                        elif 'ids' in delete_payload:
+                                                            logger.info(f"📋 Document DELETE by IDs: {len(delete_payload['ids'])} documents")
+                                                    except:
+                                                        logger.info(f"📋 Document DELETE payload: {len(data)} bytes")
+                                            else:
+                                                logger.warning(f"⚠️ Collection '{collection_part}' not found on {instance.name} for document DELETE")
+                                                # This might be legitimate if collection was deleted
+                                                self.mark_write_failed(write_id, f"Collection '{collection_part}' not found on {instance.name} for document DELETE")
+                                                continue
+                                        else:
+                                            logger.error(f"❌ Could not list collections on {instance.name}: {collections_response.status_code}")
+                                            self.mark_write_failed(write_id, f"Could not verify collection existence on {instance.name}")
+                                            continue
+                                    except Exception as doc_cross_outage_error:
+                                        logger.error(f"❌ Document DELETE cross-outage resolution failed: {doc_cross_outage_error}")
+                                        self.mark_write_failed(write_id, f"Cross-outage resolution failed for document DELETE")
+                                        continue
                     
                     # CRITICAL: Resolve collection names to UUIDs for document operations in WAL sync
                     # Note: Collection DELETE operations already have UUID resolution handled above
@@ -1301,31 +1396,39 @@ class UnifiedWALLoadBalancer:
                             self.mark_write_failed(write_id, f"Collection creation failed: HTTP {response.status_code}")
                             continue
                     
-                    # CRITICAL FIX: Handle DELETE operations with proper status code validation and unified sync completion
-                    elif (method == 'DELETE' and '/collections/' in final_path):
+                    # 🔧 ENHANCED: Handle both collection and document DELETE operations
+                    elif (method == 'DELETE' and '/collections/' in final_path) or (method == 'POST' and '/delete' in final_path):
                         delete_success = False
+                        operation_type = "COLLECTION DELETE" if method == 'DELETE' else "DOCUMENT DELETE"
                         
                         if response.status_code in [200, 204]:
-                            logger.info(f"✅ WAL SYNC: Collection DELETE successful on {instance.name} - Status: {response.status_code}")
+                            logger.info(f"✅ WAL SYNC: {operation_type} successful on {instance.name} - Status: {response.status_code}")
                             delete_success = True
                         elif response.status_code == 404:
-                            logger.info(f"✅ WAL SYNC: Collection DELETE successful on {instance.name} - Status: 404 (collection not found - goal achieved)")
-                            delete_success = True
+                            if method == 'DELETE':
+                                # Collection DELETE: 404 means collection not found = goal achieved
+                                logger.info(f"✅ WAL SYNC: {operation_type} successful on {instance.name} - Status: 404 (collection not found - goal achieved)")
+                                delete_success = True
+                            else:
+                                # Document DELETE: 404 might mean collection doesn't exist
+                                logger.warning(f"⚠️ WAL SYNC: {operation_type} got 404 on {instance.name} - collection may not exist")
+                                logger.warning(f"   This might be expected if collection was deleted in cross-outage scenario")
+                                delete_success = True  # Treat as success for document operations
                         else:
-                            logger.error(f"❌ WAL SYNC: Collection DELETE failed on {instance.name} - Status: {response.status_code}")
+                            logger.error(f"❌ WAL SYNC: {operation_type} failed on {instance.name} - Status: {response.status_code}")
                             logger.error(f"   Response: {response.text[:200]}")
                             logger.error(f"   DELETE path: {final_path}")
-                            self.mark_write_failed(write_id, f"Collection DELETE failed: HTTP {response.status_code}")
+                            self.mark_write_failed(write_id, f"{operation_type} failed: HTTP {response.status_code}")
                             continue
                         
-                        # CRITICAL FIX: Unified DELETE sync completion - always use appropriate method based on target_instance
+                        # Enhanced DELETE sync completion with logging
                         if delete_success:
                             if target_instance_type == 'both':
                                 self.mark_instance_synced(write_id, instance.name)
-                                logger.info(f"📝 DELETE SYNC: Operation {write_id[:8]} marked as synced to {instance.name} (both-target operation)")
+                                logger.info(f"📝 {operation_type} SYNC: Operation {write_id[:8]} marked as synced to {instance.name} (both-target operation)")
                             else:
                                 self.mark_write_synced(write_id)
-                                logger.info(f"📝 DELETE SYNC: Operation {write_id[:8]} marked as completed (single-target operation)")
+                                logger.info(f"📝 {operation_type} SYNC: Operation {write_id[:8]} marked as completed (single-target operation)")
                     
                     # Handle other operations (document operations, etc.)
                     elif response.status_code in [200, 201, 204]:

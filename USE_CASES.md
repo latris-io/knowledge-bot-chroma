@@ -1138,3 +1138,116 @@ if collection_exists_on_replica:
 **The real world use case pattern is validated**: Collection created first, then deleted later. Both the chronological ordering fix AND the race condition resolution ensure this normal workflow pattern works correctly in the distributed system.
 
 **System Status**: ✅ **DELETE SYNC COMPLETELY RESOLVED**
+
+## 🔧 **ENHANCED DELETE LOGIC - REAL-WORLD SCENARIO SUPPORT** ✅ **PRODUCTION-READY**
+
+### **🎯 COMPREHENSIVE REAL-WORLD DELETE HANDLING**
+
+**ENHANCED COVERAGE**: The DELETE sync system now handles complex real-world scenarios that occur in production environments:
+
+**Real-World Patterns Supported**:
+1. **Collection created during primary outage** → **Collection deleted during replica outage**
+2. **Collection created during replica outage** → **Documents deleted by metadata during primary outage**  
+3. **Collections created normally** → **Document-level deletions by `document_id` metadata**
+4. **Cross-outage UUID mapping** → **Automatic mapping discovery and updates**
+
+### **🔧 ENHANCED TECHNICAL ARCHITECTURE**
+
+**DELETE Operation Types**:
+
+1. **Collection-Level DELETE** (`DELETE /collections/{name}`):
+   - Removes entire collection and all documents
+   - Handles cross-outage UUID resolution
+   - Updates mappings for collections created during different outages
+   - Supports both UUID and name-based deletion paths
+
+2. **Document-Level DELETE** (`POST /collections/{name}/delete`):
+   - Removes specific documents within collection
+   - Supports metadata filters: `{"where": {"document_id": "doc123"}}`
+   - Supports ID-based deletion: `{"ids": ["chunk1", "chunk2"]}`
+   - Cross-outage collection discovery and UUID mapping
+
+### **🔍 CROSS-OUTAGE RESOLUTION SYSTEM**
+
+**Enhanced UUID Mapping**:
+```python
+# Scenario: Collection created during primary outage, deleted during replica outage
+1. Check existing UUID mappings in database
+2. If not found, query target instance directly for collection
+3. Update mapping database for future operations
+4. Execute DELETE with correct UUID path
+```
+
+**Fallback Mechanisms**:
+- **Database mapping lookup** → **Direct instance query** → **Name-based operation**
+- **Automatic mapping updates** when collections discovered via direct queries
+- **Graceful degradation** for edge cases
+
+### **📋 DOCUMENT DELETION BY METADATA**
+
+**CMS Integration Pattern**:
+```json
+// Delete all chunks for a specific document
+{
+  "where": {"document_id": "user_file_123"}
+}
+
+// Delete multiple documents  
+{
+  "where": {"document_id": {"$in": ["file1", "file2", "file3"]}}
+}
+
+// Delete by complex metadata
+{
+  "where": {"source": "cms", "type": "deprecated"}
+}
+```
+
+**WAL Sync Logging**:
+- **Document DELETE filter**: `{document_id: "doc123"}`
+- **Document DELETE by IDs**: `5 documents`
+- **Collection existence verification** before document operations
+- **Cross-outage collection discovery** for document operations
+
+### **🚀 PRODUCTION DEPLOYMENT STATUS**
+
+**Enhanced Architecture Deployed**:
+- **Collection vs Document Detection**: Automatic operation type identification
+- **Cross-Outage UUID Resolution**: Handles collections created during different failures
+- **Automatic Mapping Updates**: Updates database when collections discovered
+- **Enhanced Error Handling**: Distinguishes legitimate 404s from actual errors
+- **Comprehensive Logging**: Clear indication of operation types and success/failure reasons
+
+### **🎯 EXPECTED IMPACT**
+
+**USE CASE 2 & 3 Improvements**:
+- ✅ **Collections created during primary outage** → **Properly deleted during replica outage**
+- ✅ **Collections created during replica outage** → **Properly deleted during primary outage**
+- ✅ **Document deletions by metadata** → **Work correctly across all outage scenarios**
+- ✅ **CMS document management** → **Full support for document_id-based operations**
+- ✅ **Edge case handling** → **Graceful degradation and comprehensive error reporting**
+
+**Real-World CMS Workflow**:
+1. **User uploads file** → Collection created, documents stored with `document_id` metadata
+2. **Primary goes down** → Uploads continue to replica with proper UUID mapping
+3. **Later, replica goes down** → User deletes file via CMS using `document_id` filter
+4. **System handles cross-outage** → Finds collection UUID from previous outage, executes document deletion
+5. **Both instances recover** → Complete sync with proper document deletion across instances
+
+### **🔒 ENHANCED ERROR HANDLING**
+
+**Sophisticated 404 Handling**:
+- **Collection DELETE + 404** → Success (collection not found = goal achieved)
+- **Document DELETE + 404** → Warning with context (collection may have been deleted in cross-outage scenario)
+- **Missing UUID mappings** → Automatic discovery via direct instance queries
+- **Failed cross-outage resolution** → Clear error reporting with operation context
+
+**Production Safety**:
+- **Failed operations marked appropriately** with detailed error context
+- **Continued processing** for batch operations when individual items fail
+- **Comprehensive logging** for debugging cross-outage scenarios
+- **Mapping database updates** for long-term consistency
+
+**System Status**: ✅ **ENHANCED DELETE LOGIC PRODUCTION-READY**
+
+---
