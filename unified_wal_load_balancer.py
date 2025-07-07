@@ -1421,14 +1421,93 @@ class UnifiedWALLoadBalancer:
                             self.mark_write_failed(write_id, f"{operation_type} failed: HTTP {response.status_code}")
                             continue
                         
-                        # Enhanced DELETE sync completion with logging
+                        # 🔧 CRITICAL FIX: ONLY mark as synced if DELETE actually succeeded
                         if delete_success:
-                            if target_instance_type == 'both':
-                                self.mark_instance_synced(write_id, instance.name)
-                                logger.info(f"📝 {operation_type} SYNC: Operation {write_id[:8]} marked as synced to {instance.name} (both-target operation)")
-                            else:
-                                self.mark_write_synced(write_id)
-                                logger.info(f"📝 {operation_type} SYNC: Operation {write_id[:8]} marked as completed (single-target operation)")
+                            # 🔧 ENHANCED VERIFICATION: For collection DELETE, verify collection is actually gone
+                            if method == 'DELETE' and '/collections/' in final_path:
+                                # Extract collection name for verification
+                                collection_name = None
+                                if '/collections/' in final_path:
+                                    path_parts = final_path.split('/collections/')
+                                    if len(path_parts) > 1:
+                                        collection_identifier = path_parts[1].split('/')[0]
+                                        
+                                        # If it's a UUID, try to resolve back to collection name for verification
+                                        import re
+                                        if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_identifier):
+                                            # Try to find collection name from mapping
+                                            try:
+                                                with self.get_db_connection() as conn:
+                                                    with conn.cursor() as cur:
+                                                        if instance.name == 'primary':
+                                                            cur.execute("""
+                                                                SELECT collection_name FROM collection_id_mapping 
+                                                                WHERE primary_collection_id = %s
+                                                            """, (collection_identifier,))
+                                                        else:
+                                                            cur.execute("""
+                                                                SELECT collection_name FROM collection_id_mapping 
+                                                                WHERE replica_collection_id = %s
+                                                            """, (collection_identifier,))
+                                                        result = cur.fetchone()
+                                                        if result:
+                                                            collection_name = result[0]
+                                                            logger.info(f"🔍 DELETE VERIFICATION: Resolved UUID {collection_identifier[:8]} to name '{collection_name}'")
+                                                        else:
+                                                            logger.warning(f"⚠️ DELETE VERIFICATION: Could not resolve UUID {collection_identifier[:8]} to collection name")
+                                                            collection_name = collection_identifier  # Use UUID as fallback
+                                            except Exception as resolve_error:
+                                                logger.error(f"❌ DELETE VERIFICATION: Error resolving UUID: {resolve_error}")
+                                                collection_name = collection_identifier  # Use UUID as fallback
+                                        else:
+                                            # It's already a collection name
+                                            collection_name = collection_identifier
+                                
+                                # 🔧 VERIFICATION: Check that collection is actually deleted
+                                logger.info(f"🔍 DELETE VERIFICATION: Checking if '{collection_name}' is actually deleted from {instance.name}")
+                                
+                                try:
+                                    # List collections to verify deletion
+                                    verify_response = self.make_direct_request(
+                                        instance, "GET", 
+                                        "/api/v2/tenants/default_tenant/databases/default_database/collections"
+                                    )
+                                    
+                                    if verify_response.status_code == 200:
+                                        collections = verify_response.json()
+                                        collection_still_exists = any(
+                                            coll.get('name') == collection_name for coll in collections
+                                        )
+                                        
+                                        if collection_still_exists:
+                                            logger.error(f"❌ DELETE VERIFICATION FAILED: Collection '{collection_name}' still exists on {instance.name}")
+                                            logger.error(f"   DELETE operation claimed success but collection is still present!")
+                                            logger.error(f"   Marking DELETE as FAILED instead of synced")
+                                            self.mark_write_failed(write_id, f"DELETE verification failed: collection '{collection_name}' still exists on {instance.name}")
+                                            continue
+                                        else:
+                                            logger.info(f"✅ DELETE VERIFICATION PASSED: Collection '{collection_name}' confirmed deleted from {instance.name}")
+                                            delete_success = True
+                                    else:
+                                        logger.warning(f"⚠️ DELETE VERIFICATION: Could not list collections on {instance.name} (HTTP {verify_response.status_code})")
+                                        logger.warning(f"   Assuming DELETE succeeded based on HTTP response")
+                                        delete_success = True
+                                        
+                                except Exception as verify_error:
+                                    logger.error(f"❌ DELETE VERIFICATION: Error checking collection existence: {verify_error}")
+                                    logger.warning(f"   Assuming DELETE succeeded based on HTTP response")
+                                    delete_success = True
+                            
+                            # Only mark as synced if verification passed
+                            if delete_success:
+                                if target_instance_type == 'both':
+                                    self.mark_instance_synced(write_id, instance.name)
+                                    logger.info(f"📝 {operation_type} SYNC: Operation {write_id[:8]} marked as synced to {instance.name} (both-target operation)")
+                                else:
+                                    self.mark_write_synced(write_id)
+                                    logger.info(f"📝 {operation_type} SYNC: Operation {write_id[:8]} marked as completed (single-target operation)")
+                        else:
+                            logger.error(f"❌ {operation_type} SYNC: Not marking as synced due to failure")
                     
                     # Handle other operations (document operations, etc.)
                     elif response.status_code in [200, 201, 204]:
