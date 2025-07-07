@@ -2075,20 +2075,30 @@ class UnifiedWALLoadBalancer:
         try:
             logger.info(f"🔧 COORDINATED RECOVERY: Starting for {target_instance_name}")
             
-            # STEP 1: Wait for WAL sync to process any pending operations
-            max_wait_seconds = 60  # Max wait time for WAL sync
+            # STEP 1: Wait for WAL sync to process any pending operations AND retry failed operations
+            max_wait_seconds = 120  # Increased timeout for retries
             wait_interval = 5  # Check every 5 seconds
             
             for attempt in range(max_wait_seconds // wait_interval):
                 pending_writes = self.get_pending_writes_count()
-                if pending_writes == 0:
-                    logger.info(f"✅ COORDINATED RECOVERY: WAL sync complete (0 pending writes)")
+                
+                # CRITICAL FIX: Also check for failed operations that still need retrying
+                with self.get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT COUNT(*) FROM unified_wal_writes 
+                            WHERE status = 'failed' AND retry_count < 3
+                        """)
+                        failed_retries = cur.fetchone()[0]
+                
+                if pending_writes == 0 and failed_retries == 0:
+                    logger.info(f"✅ COORDINATED RECOVERY: WAL sync complete (0 pending, 0 failed retries)")
                     break
                 else:
-                    logger.info(f"⏳ COORDINATED RECOVERY: Waiting for WAL sync completion ({pending_writes} pending writes)")
+                    logger.info(f"⏳ COORDINATED RECOVERY: Waiting for completion (pending: {pending_writes}, failed retries: {failed_retries})")
                     time.sleep(wait_interval)
             else:
-                logger.warning(f"⚠️ COORDINATED RECOVERY: Proceeding despite pending WAL operations (timeout after {max_wait_seconds}s)")
+                logger.warning(f"⚠️ COORDINATED RECOVERY: Proceeding despite pending operations (timeout after {max_wait_seconds}s)")
             
             # STEP 2: Wait additional buffer time for any final DELETE operations to complete
             logger.info(f"⏳ COORDINATED RECOVERY: Waiting 10s buffer for final operations...")
@@ -2967,7 +2977,6 @@ class UnifiedWALLoadBalancer:
                         AND (
                             w.status = 'executed' 
                             OR w.status = 'synced'
-                            OR w.status = 'failed'
                             OR (w.status = 'pending' AND w.retry_count < 3)
                         )
                         ORDER BY w.created_at DESC
