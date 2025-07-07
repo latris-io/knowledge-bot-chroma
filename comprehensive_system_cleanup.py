@@ -54,6 +54,7 @@ class ComprehensiveSystemCleanup:
             # USE CASE manual testing patterns - FIX for UC2_MANUAL_ cleanup issue
             'UC2_MANUAL_', 'UC3_MANUAL_', 'UC4_MANUAL_', 'UC5_MANUAL_',
             'UC2_DELETE_', 'UC3_DELETE_', 'UC4_DELETE_', 'UC5_DELETE_',
+            'UC4_SAFETY_', 'UC4_safety_', 'uc4_safety_',  # USE CASE 4 transaction safety test patterns
             'USE_CASE_', 'use_case_', 'Use_Case_'
         ]
         
