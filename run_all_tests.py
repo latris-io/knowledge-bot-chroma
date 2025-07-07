@@ -981,10 +981,40 @@ class ProductionValidator(EnhancedTestBase):
                 print(f"   Warning: Error parsing mappings: {e}")
         
         if not primary_uuid or not replica_uuid:
-            print(f"   ⚠️ Could not find UUID mapping for {test_collection} - attempting collection name fallback")
-            # Fallback: try using collection name directly
-            primary_uuid = test_collection
-            replica_uuid = test_collection
+            print(f"   ⚠️ Could not find UUID mapping for {test_collection} - attempting direct UUID lookup")
+            
+            # CRITICAL FIX: Get actual UUIDs from instances directly
+            try:
+                # Get actual primary UUID
+                if not primary_uuid:
+                    primary_response = requests.get("https://chroma-primary.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections", timeout=10)
+                    if primary_response.status_code == 200:
+                        primary_collections = primary_response.json()
+                        for collection in primary_collections:
+                            if collection.get('name') == test_collection:
+                                primary_uuid = collection.get('id')
+                                print(f"   ✅ Found actual primary UUID: {primary_uuid[:8] if primary_uuid else 'None'}...")
+                                break
+                
+                # Get actual replica UUID  
+                if not replica_uuid:
+                    replica_response = requests.get("https://chroma-replica.onrender.com/api/v2/tenants/default_tenant/databases/default_database/collections", timeout=10)
+                    if replica_response.status_code == 200:
+                        replica_collections = replica_response.json()
+                        for collection in replica_collections:
+                            if collection.get('name') == test_collection:
+                                replica_uuid = collection.get('id')
+                                print(f"   ✅ Found actual replica UUID: {replica_uuid[:8] if replica_uuid else 'None'}...")
+                                break
+                                
+            except Exception as e:
+                print(f"   ⚠️ Error during direct UUID lookup: {e}")
+            
+            # Final fallback: use collection name  
+            if not primary_uuid:
+                primary_uuid = test_collection
+            if not replica_uuid:
+                replica_uuid = test_collection
         
         # Verify document deletion on BOTH instances (critical validation)
         print("   Validating deletion sync on primary instance...")
@@ -1010,6 +1040,13 @@ class ProductionValidator(EnhancedTestBase):
                 print(f"   Primary details: {primary_remaining} total docs, {primary_delete_me_count} delete_me, {primary_keep_me_count} keep_me")
             else:
                 print(f"   Primary validation failed: HTTP {primary_get.status_code}")
+                print(f"   Primary UUID used: {primary_uuid}")
+                if primary_get.status_code == 400:
+                    try:
+                        error_details = primary_get.json() 
+                        print(f"   Primary error: {error_details}")
+                    except:
+                        print(f"   Primary error text: {primary_get.text[:200]}")
                 primary_delete_me_count = -1  # Error indicator
                 primary_keep_me_count = -1
         except Exception as e:
@@ -1041,6 +1078,13 @@ class ProductionValidator(EnhancedTestBase):
                 print(f"   Replica details: {replica_remaining} total docs, {replica_delete_me_count} delete_me, {replica_keep_me_count} keep_me")
             else:
                 print(f"   Replica validation failed: HTTP {replica_get.status_code}")
+                print(f"   Replica UUID used: {replica_uuid}")
+                if replica_get.status_code == 400:
+                    try:
+                        error_details = replica_get.json()
+                        print(f"   Replica error: {error_details}")
+                    except:
+                        print(f"   Replica error text: {replica_get.text[:200]}")
                 replica_delete_me_count = -1  # Error indicator
                 replica_keep_me_count = -1
         except Exception as e:
