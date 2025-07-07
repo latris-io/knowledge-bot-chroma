@@ -1095,139 +1095,15 @@ class UnifiedWALLoadBalancer:
                             if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', collection_name):
                                 logger.info(f"🔍 WAL SYNC: Collection DELETE detected - resolving name '{collection_name}' to UUID for {instance.name}")
                                 
-                                # CRITICAL FIX: Always try to resolve UUID with enhanced logging
+                                # 🔧 CRITICAL FIX: Simplified DELETE logic - try UUID first, fallback to name
                                 resolved_uuid = self.resolve_collection_name_to_uuid(collection_name, instance.name)
                                 if resolved_uuid:
                                     # Replace collection name with UUID in path
                                     final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{resolved_uuid}')
-                                    logger.info(f"✅ WAL SYNC: Collection DELETE path resolved for {instance.name}: {collection_name} -> {resolved_uuid[:8]}")
-                                    logger.info(f"   Final path: {final_path}")
+                                    logger.info(f"✅ WAL DELETE: Using UUID path for {instance.name}: {collection_name} -> {resolved_uuid[:8]}")
                                 else:
-                                    # CRITICAL: Don't immediately mark as synced - this might be a resolution error
-                                    logger.error(f"❌ WAL SYNC: FAILED to resolve collection name '{collection_name}' to UUID for {instance.name}")
-                                    logger.error(f"   This is unexpected - collection might exist but resolution failed")
-                                    
-                                    # Try one more direct verification before giving up
-                                    logger.info(f"🔍 VERIFICATION: Double-checking if collection '{collection_name}' exists on {instance.name}")
-                                    try:
-                                        verification_response = self.make_direct_request(
-                                            instance, 
-                                            "GET", 
-                                            "/api/v2/tenants/default_tenant/databases/default_database/collections"
-                                        )
-                                        if verification_response.status_code == 200:
-                                            collections = verification_response.json()
-                                            found_collection = None
-                                            for coll in collections:
-                                                if coll.get('name') == collection_name:
-                                                    found_collection = coll
-                                                    break
-                                            
-                                            if found_collection:
-                                                actual_uuid = found_collection.get('id')
-                                                logger.error(f"❌ CRITICAL BUG: Collection '{collection_name}' EXISTS with UUID {actual_uuid[:8]} but resolution failed!")
-                                                logger.error(f"   Trying DELETE with discovered UUID: {actual_uuid}")
-                                                final_path = normalized_path.replace(f'/collections/{collection_name}', f'/collections/{actual_uuid}')
-                                                
-                                                # PHANTOM COLLECTION FIX: Try DELETE by UUID first, fall back to name if 404
-                                                uuid_delete_response = self.make_direct_request(instance, "DELETE", final_path)
-                                                if uuid_delete_response.status_code in [200, 204]:
-                                                    logger.info(f"✅ PHANTOM FIX: Collection '{collection_name}' deleted by corrected UUID {actual_uuid[:8]}")
-                                                    # Mark as synced and continue
-                                                    if target_instance_type == 'both':
-                                                        self.mark_instance_synced(write_id, instance.name)
-                                                    else:
-                                                        self.mark_write_synced(write_id)
-                                                    continue
-                                                elif uuid_delete_response.status_code == 404:
-                                                    # PHANTOM COLLECTION: UUID exists in listing but not accessible - try name-based DELETE
-                                                    logger.warning(f"🔍 PHANTOM COLLECTION DETECTED: UUID {actual_uuid[:8]} in listing but 404 on DELETE")
-                                                    logger.warning(f"   Attempting DELETE by name as fallback...")
-                                                    
-                                                    name_delete_path = f"/api/v2/tenants/default_tenant/databases/default_database/collections/{collection_name}"
-                                                    name_delete_response = self.make_direct_request(instance, "DELETE", name_delete_path)
-                                                    
-                                                    if name_delete_response.status_code in [200, 204]:
-                                                        logger.info(f"✅ PHANTOM FIX: Collection '{collection_name}' deleted by NAME after UUID 404")
-                                                        # Mark as synced and continue
-                                                        if target_instance_type == 'both':
-                                                            self.mark_instance_synced(write_id, instance.name)
-                                                        else:
-                                                            self.mark_write_synced(write_id)
-                                                        continue
-                                                    elif name_delete_response.status_code == 404:
-                                                        logger.info(f"✅ PHANTOM COLLECTION RESOLVED: '{collection_name}' not found by name either - DELETE goal achieved")
-                                                        # Both UUID and name DELETE returned 404 - collection is actually gone
-                                                        if target_instance_type == 'both':
-                                                            self.mark_instance_synced(write_id, instance.name)
-                                                        else:
-                                                            self.mark_write_synced(write_id)
-                                                        continue
-                                                    else:
-                                                        logger.error(f"❌ PHANTOM FIX FAILED: Name-based DELETE returned {name_delete_response.status_code}")
-                                                        self.mark_write_failed(write_id, f"Phantom collection DELETE failed: UUID 404, Name {name_delete_response.status_code}")
-                                                        continue
-                                                else:
-                                                    logger.error(f"❌ CORRECTED UUID DELETE FAILED: {uuid_delete_response.status_code}")
-                                                    self.mark_write_failed(write_id, f"Corrected UUID DELETE failed: HTTP {uuid_delete_response.status_code}")
-                                                    continue
-                                            else:
-                                                # Collection doesn't exist - this could be timing issue during sync
-                                                logger.warning(f"⚠️ DELETE SYNC ISSUE: Collection '{collection_name}' not found on {instance.name}")
-                                                logger.warning(f"   This could be:")
-                                                logger.warning(f"   1. DELETE goal already achieved (collection was deleted)")
-                                                logger.warning(f"   2. Timing issue - collection hasn't been created via sync yet")
-                                                logger.warning(f"   3. Collection mapping issue")
-                                                
-                                                # CRITICAL FIX: Don't assume "not found" = "DELETE goal achieved"
-                                                # Check if this collection was supposed to be created during same sync batch
-                                                logger.info(f"🔍 CHECKING: Looking for pending CREATE operations for '{collection_name}'")
-                                                
-                                                try:
-                                                    with self.get_db_connection() as conn:
-                                                        with conn.cursor() as cur:
-                                                            # Check if there are pending CREATE operations for this collection
-                                                            cur.execute("""
-                                                                SELECT COUNT(*) FROM unified_wal_writes 
-                                                                WHERE method = 'POST' 
-                                                                AND path LIKE %s
-                                                                AND collection_id = %s
-                                                                AND status != 'synced'
-                                                            """, (f'%/collections%', collection_name))
-                                                            pending_creates = cur.fetchone()[0]
-                                                            
-                                                            if pending_creates > 0:
-                                                                logger.warning(f"⚠️ TIMING ISSUE: {pending_creates} pending CREATE operations for '{collection_name}'")
-                                                                logger.warning(f"   DELETE should wait for CREATE operations to complete first")
-                                                                # Fail this DELETE sync so it gets retried after CREATE completes
-                                                                self.mark_write_failed(write_id, f"Collection '{collection_name}' has pending CREATE operations - retry after CREATE completes")
-                                                                continue
-                                                            else:
-                                                                logger.info(f"✅ CONFIRMED: No pending CREATE operations - DELETE goal legitimately achieved")
-                                                                # Safe to mark as completed
-                                                                # Use appropriate sync marking based on target_instance
-                                                                if target_instance_type == 'both':
-                                                                    # Use per-instance sync tracking for "both" operations
-                                                                    self.mark_instance_synced(write_id, instance.name)
-                                                                    logger.info(f"📝 MARKED: DELETE operation {write_id[:8]} synced to {instance.name} (goal achieved - no pending CREATEs)")
-                                                                else:
-                                                                    # Use regular sync marking for single-instance operations
-                                                                    self.mark_write_synced(write_id)
-                                                                    logger.info(f"📝 MARKED: DELETE operation {write_id[:8]} completed (goal achieved - no pending CREATEs)")
-                                                                continue
-                                                except Exception as check_error:
-                                                    logger.error(f"❌ Error checking pending CREATE operations: {check_error}")
-                                                    # On error, be conservative and fail the DELETE sync for retry
-                                                    self.mark_write_failed(write_id, f"Could not verify pending CREATE operations for '{collection_name}': {check_error}")
-                                                    continue
-                                        else:
-                                            logger.error(f"❌ VERIFICATION FAILED: Cannot list collections on {instance.name} (HTTP {verification_response.status_code})")
-                                            self.mark_write_failed(write_id, f"DELETE verification failed - cannot list collections on {instance.name}")
-                                            continue
-                                    except Exception as verify_error:
-                                        logger.error(f"❌ VERIFICATION ERROR during DELETE sync: {verify_error}")
-                                        self.mark_write_failed(write_id, f"DELETE verification error on {instance.name}: {verify_error}")
-                                        continue
+                                    logger.info(f"⚠️ WAL DELETE: No UUID mapping found for '{collection_name}', will try name-based DELETE")
+                                    # Continue with name-based path - ChromaDB API accepts collection names too
                     
                     # CRITICAL: Resolve collection names to UUIDs for document operations in WAL sync
                     # Note: Collection DELETE operations already have UUID resolution handled above
@@ -1345,6 +1221,10 @@ class UnifiedWALLoadBalancer:
                         else:
                             logger.info(f"ℹ️ UUID mapping not needed: {collection_id[:8]} (same on both instances)")
                             # Continue with current UUID
+                    
+                    # 🔧 CRITICAL FIX: ALWAYS ATTEMPT THE OPERATION - NO EARLY RETURNS
+                    # Previous logic had too many paths that marked as synced without execution
+                    logger.info(f"🔄 WAL SYNC: Executing {method} on {instance.name}: {final_path}")
                     
                     # Make the sync request with normalized path
                     response = self.make_direct_request(instance, method, final_path, data=data, headers=headers)
@@ -1528,15 +1408,8 @@ class UnifiedWALLoadBalancer:
                             logger.error(f"❌ Collection mapping cleanup failed: {mapping_cleanup_error}")
                             # Don't fail the sync operation for mapping cleanup errors
                     
-                    # CRITICAL FIX: Use proper sync completion logic for "both" target operations
-                    if target_instance_type == 'both':
-                        # For "both" operations, use instance-specific sync tracking
-                        self.mark_instance_synced(write_id, instance.name)
-                        logger.info(f"🔄 BOTH TARGET: {write_id[:8]} {method} completed on {instance.name} - using instance-specific sync tracking")
-                    else:
-                        # For single target operations, mark as fully synced
-                        self.mark_write_synced(write_id)
-                        logger.info(f"✅ SINGLE TARGET: {write_id[:8]} {method} completed on {instance.name} - marked as fully synced")
+                    # Note: Sync completion is already handled in the specific operation handlers above
+                    # No additional sync marking needed here
                     
                     success_count += 1
                     
